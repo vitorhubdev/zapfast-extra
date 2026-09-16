@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Published version (empty tests the published v0.13.1 fixture)
+        description: Published version (empty validates packaging configuration only)
         type: string
         default: ''
       publish:
@@ -42,11 +42,12 @@ jobs:
     uses: crmne/native-packages/.github/workflows/package.yml@f002ce91c1180528734538fa47d235d387fd351f # v0.6.0
     with:
       targets: linux-amd64,linux-arm64
-      version: ${{ inputs.version || 'v0.13.1' }}
+      version: ${{ inputs.version }}
       publish: ${{ inputs.publish == true && inputs.version != '' }}
     secrets: inherit
 
   installation:
+    if: inputs.version != ''
     name: Install (${{ matrix.os }}, ${{ matrix.image }})
     needs: packaging
     runs-on: ${{ matrix.os }}
