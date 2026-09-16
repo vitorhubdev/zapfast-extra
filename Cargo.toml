@@ -1,10 +1,11 @@
 [package]
 name = "zapfast"
 version = "0.14.0"
+authors = ["Vitor (ZapExt fork) <108148783+vitorhubdev@users.noreply.github.com>"]
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "A native WhatsApp client built with Rust and egui"
+description = "ZapExt, a community mod of ZapFast with extra desktop features and fixes"
 homepage = "https://github.com/vitorhubdev/zapfast-extra"
 repository = "https://github.com/vitorhubdev/zapfast-extra"
 keywords = ["whatsapp", "chat", "egui", "messaging"]

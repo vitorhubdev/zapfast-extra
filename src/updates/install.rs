@@ -12,6 +12,13 @@ const LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 #[cfg(not(target_os = "macos"))]
 const MARKER: &str = "zapfast-portable-v1";
 
+#[cfg(not(target_os = "macos"))]
+fn official_portable_filename(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with("-portable.exe"))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Kind {
     Portable,
@@ -112,8 +119,9 @@ pub fn detect_at(executable: &Path) -> Result<Installation> {
     {
         ensure!(
             fs::read_to_string(directory.join("zapfast-portable.txt"))
-                .is_ok_and(|value| value.trim() == MARKER),
-            "This installation does not identify itself as a portable download. Use the download page to install an update-enabled build."
+                .is_ok_and(|value| value.trim() == MARKER)
+                || official_portable_filename(executable),
+            "This installation does not identify itself as an official portable download. Use the download page to install an update-enabled build."
         );
         Ok(Installation {
             executable: executable.to_owned(),
@@ -731,6 +739,18 @@ mod tests {
         assert_eq!(process_identity("42 (app) S"), None);
         let current = fs::read_to_string(format!("/proc/{}/stat", std::process::id())).unwrap();
         assert!(process_identity(&current).unwrap().parse::<u64>().is_ok());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn official_portable_executable_name_is_recognized() {
+        assert!(official_portable_filename(Path::new(
+            "ZapExt-v1.0.4-windows-x64-portable.exe"
+        )));
+        assert!(official_portable_filename(Path::new(
+            "zapext-v1.0.4-windows-arm64-portable.EXE"
+        )));
+        assert!(!official_portable_filename(Path::new("zapfast.exe")));
     }
 
     #[test]

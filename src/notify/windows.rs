@@ -17,7 +17,7 @@ fn register_identity() -> std::io::Result<()> {
         r"Software\Classes\AppUserModelId\{APPLICATION_ID}"
     ));
     let name = wide("DisplayName");
-    let value = wide("ZapFast");
+    let value = wide("ZapExt");
     let mut key = std::ptr::null_mut();
     // All buffers are NUL-terminated UTF-16 and remain alive during each call.
     let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, path.as_ptr(), &mut key) };
@@ -51,12 +51,22 @@ fn notification(title: &str, body: &str, picture: Option<&Path>) -> Toast {
     }
 }
 
-pub(super) fn show(title: &str, body: &str, picture: Option<&Path>) -> anyhow::Result<()> {
+pub(super) fn show(
+    title: &str,
+    body: &str,
+    picture: Option<&Path>,
+    mut activated: impl FnMut() + Send + 'static,
+) -> anyhow::Result<()> {
     static REGISTERED: OnceLock<Result<(), String>> = OnceLock::new();
     if let Err(error) = REGISTERED.get_or_init(|| register_identity().map_err(|e| e.to_string())) {
         anyhow::bail!("notification identity unavailable: {error}");
     }
-    notification(title, body, picture).show()?;
+    notification(title, body, picture)
+        .on_activated(move |_| {
+            activated();
+            Ok(())
+        })
+        .show()?;
     Ok(())
 }
 

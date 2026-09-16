@@ -68,7 +68,8 @@ impl Notifications {
         body: String,
         picture: Option<PathBuf>,
         chat: String,
-        opened: Arc<Mutex<Vec<String>>>,
+        message: String,
+        opened: Arc<Mutex<Vec<(String, String)>>>,
         wake: impl Fn() + Send + 'static,
     ) {
         let cancelled = self.register(&chat);
@@ -80,6 +81,7 @@ impl Notifications {
                     &body,
                     picture.as_deref(),
                     chat,
+                    message,
                     opened,
                     wake,
                     cancelled,
@@ -107,7 +109,8 @@ fn deliver(
     body: &str,
     picture: Option<&std::path::Path>,
     chat: String,
-    opened: Arc<Mutex<Vec<String>>>,
+    message: String,
+    opened: Arc<Mutex<Vec<(String, String)>>>,
     wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -146,7 +149,10 @@ fn deliver(
                     _ = &mut cancelled => handle.close_async().await,
                     _ = handle.wait_for_action_async(|action| {
                         if matches!(action, notify_rust::NotificationResponse::Default) {
-                            opened.lock().unwrap_or_else(|p| p.into_inner()).push(chat);
+                            opened
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .push((chat, message));
                             wake();
                         }
                     }) => {}
@@ -162,16 +168,26 @@ fn deliver(
     title: &str,
     body: &str,
     picture: Option<&std::path::Path>,
-    _chat: String,
-    _opened: Arc<Mutex<Vec<String>>>,
-    _wake: impl Fn() + Send + 'static,
+    chat: String,
+    message: String,
+    opened: Arc<Mutex<Vec<(String, String)>>>,
+    wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
-    if matches!(
+    if !matches!(
         cancelled.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ) && let Err(error) = windows::show(title, body, picture)
-    {
+    ) {
+        return;
+    }
+    let activated = move || {
+        opened
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((chat.clone(), message.clone()));
+        wake();
+    };
+    if let Err(error) = windows::show(title, body, picture, activated) {
         log::debug!("no Windows notification: {error}");
     }
 }
@@ -182,7 +198,8 @@ fn deliver(
     body: &str,
     picture: Option<&std::path::Path>,
     _chat: String,
-    _opened: Arc<Mutex<Vec<String>>>,
+    _message: String,
+    _opened: Arc<Mutex<Vec<(String, String)>>>,
     _wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -268,6 +285,7 @@ mod tests {
             "A test from ZapFast, with a picture".into(),
             picture,
             "test".into(),
+            "test-message".into(),
             Default::default(),
             || {},
         );

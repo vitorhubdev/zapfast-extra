@@ -1,23 +1,28 @@
-# ZapFast
+<p align="center">
+  <img src="assets/zapext.png" width="220" alt="ZapExt logo">
+</p>
 
-**WhatsApp, native and fast.** ZapFast is a WhatsApp client written in Rust
-with [egui](https://github.com/emilk/egui). It uses
+# ZapExt
+
+**A community mod of ZapFast, native and fast.**
+
+ZapExt is an independent fork/mod maintained by
+[Vitor (`@vitorhubdev`)](https://github.com/vitorhubdev). It is based on the
+original [ZapFast](https://github.com/crmne/zapfast) project and keeps its MIT
+license and original copyright notices. The fork adds its own desktop fixes,
+packaging, updater path, branding, and extra behavior while preserving
+compatibility-sensitive internal `zapfast` identifiers where changing them
+would break existing installations.
+
+ZapExt is written in Rust with [egui](https://github.com/emilk/egui) and uses
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) for the WhatsApp Web
-protocol. It runs on Linux, macOS, and Windows, links to your phone as a
-companion device, and has no browser engine. In our Linux test, it opened in
-under a second and used about 150 MB of idle RAM, compared with 1.13 GB for
-WhatsApp Web and its Chromium processes. [See the measurements](https://zapfast.rocks/benchmarks/).
+protocol. It runs on Linux, macOS, and Windows and links as a companion device
+without embedding a browser engine.
 
-ZapFast is a sibling of [Spotifast](https://spotifast.rocks),
-with the same native UI for a different service.
+**Downloads:** [latest ZapExt release](https://github.com/vitorhubdev/zapfast-extra/releases/latest)
 
-![ZapFast showing a chat with a photo, a document, a voice message, a quoted reply, and a link](docs/screenshot.png)
-
-See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
-
-![A group chat with sender names and pictures, a photo with reactions, a reply with a mention, and a poll](docs/screenshot-group.png)
-
-![The linking screen with the QR code](docs/screenshot-link.png)
+> ZapExt is not the upstream ZapFast project and is not affiliated with
+> WhatsApp or Meta.
 
 ## What it does
 
@@ -40,7 +45,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   Group messages show two gray checks after every recipient has received
   them, and blue checks after every recipient has read them. The recipient
   list and individual receipts are saved locally; later membership changes
-  do not change that list. If the original recipients are unknown, ZapFast
+  do not change that list. If the original recipients are unknown, ZapExt
   waits for the phone's aggregate status instead of guessing from one reader.
 - **WhatsApp formatting.** Bold, italic, strikethrough, code, lists, quotes,
   mentions, and link previews are supported. Links are clickable. Hebrew and
@@ -72,12 +77,12 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapFast downloads files up to 64 MB automatically or
+- **View attachments.** ZapExt downloads files up to 64 MB automatically or
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos and documents open in
   their default desktop apps. Profile pictures and downloaded images support
   Windows drive paths and filenames with spaces or non-ASCII characters.
-  If an attachment has expired, ZapFast asks your
+  If an attachment has expired, ZapExt asks your
   phone to upload it again.
 - **Polls.** Use the checklist button beside the paperclip to create a poll with
   2–12 answers. Turn off **Allow multiple answers** for a single-choice poll.
@@ -89,7 +94,7 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   Voting needs the original poll's key;
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
-  the protocol library's poll API, so ZapFast blocks it instead of ignoring the timer.
+  the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
 - **Emoji, GIF, and sticker picker.** Search emoji and GIFs, use recent emoji
   and stickers, and save stickers with a right-click. Emoji autocomplete and
   picker search select their first match; use the arrow keys and Enter to
@@ -111,19 +116,20 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
   when validation fails. Private read-state updates run one at a time. Failures
   pause the whole queue with backoff from 30 seconds to 15 minutes; pending reads
   remain saved and resume automatically. New messages can still arrive.
-- **Runs in the background.** Closing the window keeps ZapFast linked in the
+- **Runs in the background.** Closing the window keeps ZapExt linked in the
   system tray. Reopen it from the tray or by launching it again. Quit from the
   tray or with `Ctrl+Q`, or disable this behavior in Settings.
 - **Desktop notifications.** Get notifications with the chat picture when you
   are away from the open chat. Muted chats do not notify you. Windows notifications
-  identify ZapFast as the sender and show chat pictures as small circular icons;
+  identify ZapExt as the sender and show chat pictures as small circular icons;
   installed and portable builds register this identity in the current user's registry.
-  On Linux,
+  Clicking a Windows notification opens its chat and anchors on the exact
+  notified message. On Linux,
   clicking a notification opens the chat, and reading the chat here or on another
   device dismisses its outstanding notifications. On macOS, notifications use
-  the installed ZapFast application's identity without an application chooser;
+  the installed ZapExt application's identity without an application chooser;
   unregistered development builds skip notifications if that identity is unavailable.
-- **Update notices.** ZapFast checks GitHub once a day and shows a download
+- **Update notices.** ZapExt checks GitHub once a day and shows a download
   link when a newer release is available. You can turn this off in Settings.
 - **Themes.** Light, dark, follow the system, or a local JSON palette. Native
   Linux packages can follow Omarchy colors without restarting the app. Zoom with
@@ -150,9 +156,9 @@ See **[zapfast.rocks](https://zapfast.rocks)** for downloads and guides.
 
 ## Installing
 
-On macOS with Homebrew: `brew install --cask crmne/tap/zapfast`.
+For ZapExt, download the fork build from GitHub Releases. The upstream Homebrew and AUR recipes belong to the original ZapFast project and are not published by this fork.
 
-ZapFast was previously called FastsApp. Version 0.13.0 introduces the new
+ZapExt was previously called FastsApp. Version 0.13.0 introduces the new
 package and executable names. On Arch Linux:
 
 ```sh
@@ -162,12 +168,12 @@ yay -S zapfast-git      # built from the latest commit
 ```
 
 Builds for every release are on the
-[releases page](https://github.com/crmne/zapfast/releases):
+[ZapExt releases page](https://github.com/vitorhubdev/zapfast-extra/releases):
 
 | Platform | File |
 | --- | --- |
 | Linux x86_64 and arm64 | `zapfast-vX.Y.Z-<target>.tar.gz`, with the desktop file and icon in `packaging/` |
-| Windows x64 and arm64 | `zapfast-vX.Y.Z-<target>-setup.exe` (no administrator rights needed), or the `.zip` |
+| Windows x64 and arm64 | `zapfast-vX.Y.Z-<target>-setup.exe`, `ZapExt-vX.Y.Z-windows-<arch>-portable.exe`, or the portable `.zip` |
 | macOS, universal | `zapfast-vX.Y.Z-macos-universal.dmg` |
 
 On macOS, the rounded Dock icon matches the app bundle. Native menus provide
@@ -175,11 +181,12 @@ Settings, editing, search, view controls, and window commands. The traffic
 lights share the chat header, leaving more room for conversations in a normal
 window. Settings is also available with `⌘,`.
 
-The macOS release process signs the app with Developer ID, submits the DMG
-to Apple's notarization service, and staples and validates its ticket before
-publishing. Open the DMG and drag **ZapFast** to Applications.
+The macOS release process always validates the universal app and its entitlements.
+When Apple Developer credentials are configured it also signs with Developer ID,
+notarizes the DMG, and validates the stapled ticket. Without those credentials,
+the release uses an ad-hoc signature and skips only the Apple notarization checks. Open the DMG and drag **ZapExt** to Applications.
 When upgrading from FastsApp on macOS, quit the old app and remove its
-application bundle after installing ZapFast.
+application bundle after installing ZapExt.
 
 Releases before 0.13.0 keep their original FastsApp filenames.
 
@@ -188,8 +195,8 @@ Releases before 0.13.0 keep their original FastsApp filenames.
 Flatpak packaging lives in `packaging/flatpak/`, following Spotifast's source
 manifest and release-bundle setup. Future releases will attach an x86_64
 `.flatpak` bundle; install a downloaded bundle with `flatpak install --user FILE`
-and run `flatpak run rocks.zapfast.ZapFast`. Flathub publication is pending;
-ZapFast is not yet listed there. See [PACKAGING.md](PACKAGING.md) for local builds
+and run `flatpak run rocks.zapfast.ZapExt`. Flathub publication is pending;
+ZapExt is not yet listed there. See [PACKAGING.md](PACKAGING.md) for local builds
 and preparing a Flathub submission. File selection uses desktop portals;
 the sandbox has no general access to your home directory.
 
@@ -198,7 +205,7 @@ the sandbox has no general access to your home directory.
 The archive key is a random 256-bit secret in Secret Service on Linux, Keychain
 on macOS, or Windows Credential Manager. Linux needs a working Secret Service
 provider (for example GNOME Keyring or KeePassXC with Secret Service enabled).
-If the keyring is locked or unavailable, unlock it and click Retry; ZapFast keeps
+If the keyring is locked or unavailable, unlock it and click Retry; ZapExt keeps
 its archive intact and waits before connecting. It never saves a replacement
 plaintext archive. Back up both the archive and its OS keyring key: copying only
 `archive.db` to another computer is insufficient.
@@ -213,7 +220,7 @@ while your login is unlocked.
 
 ### From source
 
-ZapFast needs Rust, a C/C++ toolchain, CMake and Perl (for bundled OpenSSL). `rust-toolchain.toml` pins the exact version. On Linux,
+ZapExt needs Rust, a C/C++ toolchain, CMake and Perl (for bundled OpenSSL). `rust-toolchain.toml` pins the exact version. On Linux,
 it also needs GUI development packages:
 
 ```sh
@@ -235,7 +242,7 @@ The desktop file and icon are in `packaging/`.
 `whatsapp-rust` is pinned to a Git commit because version 0.7.0 on crates.io
 enables a `simd` feature that needs nightly Rust. The pinned commit builds on
 stable Rust and includes the upstream fixes for missing app-state snapshots and
-conflicts that make no progress. ZapFast does not reset your session to recover
+conflicts that make no progress. ZapExt does not reset your session to recover
 a collection.
 
 ## Using it
@@ -266,14 +273,14 @@ to your phone and linked devices.
 | Log of the last run | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more |
 
 macOS and Windows use the standard platform directories selected by the
-`directories` crate. On first start, ZapFast moves settings, the linked session,
+`directories` crate. On first start, ZapExt moves settings, the linked session,
 message archive, saved stickers, caches, and window state from `fastsapp`
-(or the earlier `fastwhatsapp`) paths. Existing ZapFast directories take
-precedence and are never overwritten. Quit FastsApp before starting ZapFast;
+(or the earlier `fastwhatsapp`) paths. Existing ZapExt directories take
+precedence and are never overwritten. Quit FastsApp before starting ZapExt;
 if an older copy is still running, the new launch brings its window forward.
 Your phone may keep showing the old linked-device name until you link again.
 
-On Linux and macOS, ZapFast restricts its configuration, state, and cache
+On Linux and macOS, ZapExt restricts its configuration, state, and cache
 directories to the current user (`0700`), including existing installations.
 Startup stops if those directories cannot be created or secured, before opening
 logs or databases. Windows uses the permissions inherited from your user profile.
@@ -306,9 +313,13 @@ packages additionally register a missing per-user template and theme hook on
 first launch; existing user files are preserved. Flatpak uses the desktop's
 light/dark preference and does not read host theme files or install desktop hooks.
 
-### Updating ZapFast
+### Updating ZapExt
 
-ZapFast checks GitHub once a day when **Check for updates** is enabled.
+ZapExt uses the fork's GitHub Releases API at
+`https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest`.
+It checks once a day when **Check for updates** is enabled. The current fork
+version has one canonical source in the repository root: [`VERSION`](VERSION).
+Release tags are validated against that file before binaries are built.
 Click **Update** in the banner to download and verify a newer release, then
 **Restart to update** when convenient. **Download updates automatically** is
 optional and off by default; it downloads in the background and still waits for
@@ -355,7 +366,7 @@ cargo build --locked --features demo
 ./target/debug/zapfast --demo-tour --demo-size 1280x800
 ```
 
-The **ZapFast Demo** window waits for **Space**. The 41-second tour starts with
+The **ZapExt Demo** window waits for **Space**. The 41-second tour starts with
 search, switches chats with keyboard shortcuts, scrolls, right-clicks a message
 and selects Reply, types quickly, completes emoji and mentions, searches the GIF
 picker and sends a still sticker, opens group information and the shortcut list,
@@ -371,7 +382,7 @@ For deterministic theme screenshots, `--demo-page settings,omarchy` and
 palettes without changing the desktop theme.
 
 On Omarchy, run `omarchy screenrecord`, select the demo window, then press Space
-in ZapFast. Recording has no audio unless you explicitly enable desktop or
+in ZapExt. Recording has no audio unless you explicitly enable desktop or
 microphone audio. Stop with `omarchy screenrecord --stop-recording` after the
 tour finishes. The default capture records a fixed rectangle, so keep the demo
 window visible and stationary until recording stops.
@@ -392,13 +403,23 @@ trace contains only pointer coordinates and shortcut labels, not typed text.
 
 ## Disclaimer
 
-ZapFast is an unofficial client and is not affiliated with WhatsApp or
+ZapExt is an unofficial client and is not affiliated with WhatsApp or
 Meta. Using an unofficial client may be against WhatsApp's terms of service
 and could get an account suspended. Use it at your own risk.
 
 ## Packaging maintenance
 
 Release packaging uses the [native-packages](https://rubygems.org/gems/native-packages) gem. macOS release builds automatically sign and notarize when the Apple CI credentials are configured. `native-packages.yaml` declares packages and downstream repositories; native recipes and installation assets live in `packaging/`; see [PACKAGING.md](PACKAGING.md) for local commands and CI behavior.
+
+## Credits
+
+ZapExt modifications and fork releases are maintained by
+[Vitor (`@vitorhubdev`)](https://github.com/vitorhubdev).
+
+The original project is [ZapFast](https://github.com/crmne/zapfast), created
+and developed by its original authors and contributors. ZapExt is a derivative
+MIT-licensed mod/fork. The original license and copyright notice remain in
+[`LICENSE`](LICENSE).
 
 ## License
 

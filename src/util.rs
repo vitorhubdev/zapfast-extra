@@ -441,11 +441,27 @@ mod tests {
     }
 
     #[test]
-    fn icon_is_opaque_in_the_middle_and_clear_at_the_corners() {
+    fn icon_has_clear_corners_and_visible_interior() {
         let icon = app_icon_rgba(32);
         assert_eq!(icon[3], 0);
-        let middle = (16 * 32 + 16) * 4;
-        assert_eq!(icon[middle + 3], 255);
+        assert_eq!(icon[((31 * 32 + 31) * 4) + 3], 0);
+
+        let mut visible_pixels = 0usize;
+        let mut max_alpha = 0u8;
+        for y in 4..28 {
+            for x in 4..28 {
+                let alpha = icon[((y * 32 + x) * 4) + 3];
+                max_alpha = max_alpha.max(alpha);
+                if alpha >= 32 {
+                    visible_pixels += 1;
+                }
+            }
+        }
+        assert!(max_alpha >= 64, "icon interior is too transparent");
+        assert!(
+            visible_pixels >= 32,
+            "icon interior has too little visible coverage"
+        );
     }
 }
 

@@ -13,7 +13,7 @@ nfpm:
   name: zapfast
   maintainer: vitorhubdev <108148783+vitorhubdev@users.noreply.github.com>
   homepage: https://github.com/vitorhubdev/zapfast-extra
-  description: ZapExt, a fast native WhatsApp client
+  description: ZapExt, a community mod of ZapFast with extra desktop features and fixes
   license: MIT
   provides: [fastsapp]
   conflicts: [fastsapp]

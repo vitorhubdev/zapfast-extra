@@ -2,6 +2,23 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.4] - 2026-09-16
+
+### Fixed
+
+- Clicking a Windows desktop notification now shows ZapExt, opens the originating chat, and anchors the conversation on the exact notified message.
+- macOS release verification now distinguishes notarized builds from ad-hoc builds, so repositories without Apple Developer credentials can still publish a verified universal DMG without falsely requiring a stapled notarization ticket.
+- The Windows notification identity now displays `ZapExt` while retaining the existing compatibility-sensitive AppUserModelID.
+
+### Packaging
+
+- Windows x64 and ARM64 releases now publish a directly downloadable `*-portable.exe` in addition to the original-compatible portable ZIP and Inno Setup `*-setup.exe`.
+- Official `*-portable.exe` downloads are recognized as portable installations for ZapExt self-update detection.
+
+### Compatibility
+
+- Existing `zapfast-v*` ZIP/setup asset naming, executable name, installer AppId, AppUserModelID, and storage identifiers remain intact; the direct portable EXE is additive.
+
 ## [1.0.3] - 2026-09-16
 
 ### Fixed
@@ -26,6 +43,10 @@ All notable changes to the ZapExt fork are recorded here.
 
 ### Changed
 
+- Replaced the application icon with the new green ZapExt `Z+` artwork across the runtime window, Windows executable and setup, Linux/Flatpak icon, macOS app/Dock icon, and README.
+- Added a root `VERSION` file as the single fork-version source; release tags are checked against it before building.
+- README and package metadata now identify ZapExt as a community mod/fork, credit the original ZapFast project and contributors, and identify `vitorhubdev` as the fork maintainer.
+- The updater continues to use the fork's `vitorhubdev/zapfast-extra` GitHub Releases API and daily update checks.
 - Added separate `Chats & groups` and `Channels & communities` sidebar views.
 - Community parent containers are classified explicitly, so ordinary admin-only groups remain in `Chats & groups`.
 - Sticker picker prioritizes `My stickers` and keeps synchronized phone history separately under `Recent from phone`.

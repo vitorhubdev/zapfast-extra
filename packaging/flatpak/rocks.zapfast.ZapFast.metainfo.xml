@@ -2,14 +2,14 @@
 <component type="desktop-application">
   <id>rocks.zapfast.ZapFast</id>
   <name>ZapExt</name>
-  <summary>A native WhatsApp client</summary>
+  <summary>A community mod of ZapFast with extra desktop features</summary>
   <developer id="io.github.vitorhubdev">
     <name>vitorhubdev</name>
   </developer>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
-    <p>A native WhatsApp companion for Linux, macOS and Windows, written in Rust
+    <p>ZapExt is a community mod of ZapFast for Linux, macOS and Windows, written in Rust
     without a browser engine. Link your phone to read and send messages.</p>
     <p>Browse chats, search your local archive, send attachments and voice messages,
     and use emoji, GIFs and stickers. Closing the window can keep the connection
@@ -37,8 +37,8 @@
     <control>keyboard</control>
   </supports>
   <releases>
-    <release version="1.0.3" date="2026-09-16">
-      <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.3</url>
+    <release version="1.0.4" date="2026-09-16">
+      <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.4</url>
     </release>
   </releases>
 </component>

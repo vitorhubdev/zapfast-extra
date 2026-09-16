@@ -1,8 +1,16 @@
 #!/bin/bash
-# Verify the app that users receive inside a signed, notarized release DMG.
+# Verify the app users receive inside a release DMG. Notarized builds get
+# Gatekeeper/stapler checks; ad-hoc builds still get signature, architecture,
+# microphone metadata, and entitlement validation.
 set -euo pipefail
 
 dmg="$1"
+mode="${2:-notarized}"
+case "$mode" in
+    notarized|adhoc) ;;
+    *) echo "unknown verification mode: $mode" >&2; exit 2 ;;
+esac
+
 temporary="$(mktemp -d)"
 mount="$temporary/mount"
 mkdir "$mount"
@@ -13,11 +21,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-xcrun stapler validate "$dmg"
+if [ "$mode" = notarized ]; then
+    xcrun stapler validate "$dmg"
+fi
 hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount" >/dev/null
 app="$mount/ZapExt.app"
 codesign --verify --strict --deep "$app"
-spctl --assess --type execute --verbose=2 "$app"
+if [ "$mode" = notarized ]; then
+    spctl --assess --type execute --verbose=2 "$app"
+fi
 lipo "$app/Contents/MacOS/zapfast" -verify_arch x86_64 arm64
 codesign --display --entitlements - --xml "$app" > "$temporary/entitlements.plist"
 

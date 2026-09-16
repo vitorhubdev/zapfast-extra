@@ -8,7 +8,12 @@ fn main() {
         resource
             .set_icon("packaging/windows/zapfast.ico")
             .set("ProductName", "ZapExt")
-            .set("FileDescription", "ZapExt");
+            .set("FileDescription", "ZapExt")
+            .set("CompanyName", "vitorhubdev")
+            .set(
+                "LegalCopyright",
+                "ZapExt fork by vitorhubdev, based on ZapFast under MIT",
+            );
         if let Err(error) = resource.compile() {
             println!("cargo:warning=Windows resources not embedded: {error}");
         }

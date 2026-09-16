@@ -258,8 +258,8 @@ pub struct App {
     pub wants_show: bool,
     /// Requests received from later launches.
     control_commands: Option<std::sync::Arc<std::sync::Mutex<Vec<ControlCommand>>>>,
-    /// Chat ids from clicked notifications.
-    notification_opens: std::sync::Arc<std::sync::Mutex<Vec<ChatId>>>,
+    /// Chat and message ids from clicked notifications.
+    notification_opens: std::sync::Arc<std::sync::Mutex<Vec<(ChatId, String)>>>,
     notifications: crate::notify::Notifications,
 }
 
@@ -498,14 +498,14 @@ impl App {
 
     /// Opens chats from clicked notifications, creating a window when needed.
     fn handle_notification_opens(&mut self) {
-        let opened: Vec<ChatId> = std::mem::take(
+        let opened: Vec<(ChatId, String)> = std::mem::take(
             &mut *self
                 .notification_opens
                 .lock()
                 .unwrap_or_else(|p| p.into_inner()),
         );
-        for chat in opened {
-            self.actions.push(Action::OpenChat(chat));
+        for (chat, message) in opened {
+            self.actions.push(Action::OpenMessage { chat, message });
             self.actions.push(Action::ShowWindow);
         }
     }
@@ -548,6 +548,7 @@ impl App {
             body,
             picture,
             chat_id.to_owned(),
+            message.id.clone(),
             std::sync::Arc::clone(&self.notification_opens),
             move || waker.wake(),
         );
