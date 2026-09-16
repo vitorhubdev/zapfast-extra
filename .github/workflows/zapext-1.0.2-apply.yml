@@ -7,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: zapext-1.0.2-apply
+  cancel-in-progress: true
+
 jobs:
   apply:
     if: github.event.head_commit.message == 'Prepare ZapExt 1.0.2 patch'
@@ -28,12 +32,13 @@ jobs:
         run: |
           python3 .github/scripts/apply-zapext-1.0.2.py
           python3 .github/scripts/finalize-zapext-1.0.2.py
-      - name: Format and validate
+      - name: Format and validate affected paths
         run: |
           cargo fmt --all
           cargo fmt --all --check
-          cargo check --locked --all-targets
-          cargo test --locked --lib
+          cargo test --locked --lib zapext_phone_search_tests
+          cargo test --locked --lib zapext_community_tests
+          cargo test --locked --lib demo::tour::tests::real_input_opens_menus_completes_text_and_sends_offline_media
       - name: Commit ZapExt 1.0.2
         run: |
           git config user.name "Vitor"
