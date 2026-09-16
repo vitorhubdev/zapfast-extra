@@ -142,7 +142,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist/macos-input
-          bash packaging/macos/bundle.sh universal/zapfast dist/macos-input/ZapFast.app "$version"
+          bash packaging/macos/bundle.sh universal/zapfast dist/macos-input/ZapExt.app "$version"
           cp README.md LICENSE dist/macos-input/
 
       - name: Package, sign and notarize macOS app
