@@ -17,7 +17,12 @@ jobs:
         with:
           fetch-depth: 0
       - name: Apply ZapExt 1.0.3 packaging changes
-        run: python3 .github/scripts/apply-zapext-1.0.3.py
+        run: |
+          python3 .github/scripts/apply-zapext-1.0.3.py
+          # Workflow files require a separate GitHub App permission. Keep the
+          # release workflow untouched in this runner; it is updated directly
+          # through the GitHub connector after this commit lands.
+          git checkout -- .github/workflows/release.yml
       - name: Validate packaging identity
         run: |
           git diff --check
@@ -46,7 +51,6 @@ jobs:
           assert 'ZapExt' in plist['NSMicrophoneUsageDescription']
           assert 'ZapExt.app' in Path('packaging/macos/verify.sh').read_text()
           assert '"-volname", "ZapExt"' in Path('packaging/macos/dmg.rb').read_text()
-          assert 'dist/macos-input/ZapExt.app' in Path('.github/workflows/release.yml').read_text()
 
           desktop = Path('packaging/applications/zapfast.desktop').read_text()
           assert 'Name=ZapExt' in desktop
@@ -67,7 +71,6 @@ jobs:
           git config user.name "Vitor"
           git config user.email "108148783+vitorhubdev@users.noreply.github.com"
           git rm .github/scripts/apply-zapext-1.0.3.py
-          git rm .github/workflows/zapext-1.0.3-apply.yml
           git add -A
           git commit -m "Release ZapExt 1.0.3 packaging identity"
           git push origin main
