@@ -4,6 +4,32 @@ ZapFast is a small native WhatsApp client: Rust, egui, and the
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) library for the
 protocol. These notes are for coding agents and new contributors.
 
+## ZapExt fork rules
+
+These rules are mandatory for work in this fork and take precedence over
+upstream workflow conventions when they conflict.
+
+- Work directly on `main`. Do not create branches or pull requests for fork work.
+- The visible fork name is `ZapExt`. Keep the upstream/internal `zapfast` crate,
+  storage paths, app ids, protocol identities, and compatibility names unchanged
+  unless a task explicitly migrates them safely.
+- The fork version starts at `1.0.1`. `APP_VERSION` in `src/main.rs` is the source
+  of truth for the ZapExt version shown to users.
+- Every completed modification batch must receive a new ZapExt version before the
+  work is considered done. By default increment the patch number by one
+  (`1.0.1` -> `1.0.2` -> `1.0.3`). Use a minor or major bump only when the scope
+  clearly warrants it or the repository owner explicitly requests it.
+- The normal application title must always be `ZapExt - X.Y.Z`, using the current
+  `APP_VERSION`. The CLI version must report the same ZapExt version.
+- Update `CHANGELOG.md` in the same modification batch. Every ZapExt version gets
+  its own dated heading and a concise list of user-visible changes, fixes, and
+  relevant internal changes. Never reuse a version for a later code change.
+- A version bump does not require creating a GitHub Release or tag. Releases may
+  still batch multiple versions when appropriate.
+- Before finishing, verify that the application title, CLI version, tests that
+  assert the title/version, and `CHANGELOG.md` agree. Report the resulting ZapExt
+  version in the final summary.
+
 ## Product boundaries
 
 - Keep it a small native client. No browser engine, no telemetry, no
