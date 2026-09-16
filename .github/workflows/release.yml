@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -36,6 +35,14 @@ jobs:
             target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v7
+      - name: Validate ZapExt release version
+        shell: bash
+        run: |
+          expected="v$(tr -d '\r\n' < VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION ($expected)" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -60,6 +67,13 @@ jobs:
           mkdir -p "dist/$name"
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp "target/${{ matrix.target }}/release/zapfast.exe" "dist/$name/"
+            case "${{ matrix.target }}" in
+              x86_64-*) portable_arch="x64" ;;
+              aarch64-*) portable_arch="arm64" ;;
+              *) portable_arch="${{ matrix.target }}" ;;
+            esac
+            cp "target/${{ matrix.target }}/release/zapfast.exe" \
+              "dist/ZapExt-${GITHUB_REF_NAME}-windows-${portable_arch}-portable.exe"
           else
             cp "target/${{ matrix.target }}/release/zapfast" "dist/$name/"
           fi
@@ -97,6 +111,7 @@ jobs:
             dist/*.tar.gz
             dist/*.zip
             dist/*-setup.exe
+            dist/*-portable.exe
           if-no-files-found: error
 
   macos:
@@ -153,8 +168,19 @@ jobs:
             --output "$RUNNER_TEMP/macos-packages"
           cp "$RUNNER_TEMP/macos-packages/packages/macos-universal/dmg/"*.dmg dist/
 
-      - name: Verify the notarized release app
-        run: bash packaging/macos/verify.sh "dist/zapfast-${GITHUB_REF_NAME}-macos-universal.dmg"
+      - name: Verify the macOS release app
+        run: |
+          mode=adhoc
+          if [[ -n "${APPLE_CERTIFICATE_P12:-}" \
+             && -n "${APPLE_CERTIFICATE_PASSWORD:-}" \
+             && -n "${APPLE_SIGNING_IDENTITY:-}" \
+             && -n "${APPLE_ID:-}" \
+             && -n "${APPLE_TEAM_ID:-}" \
+             && -n "${APPLE_APP_PASSWORD:-}" ]]; then
+            mode=notarized
+          fi
+          bash packaging/macos/verify.sh \
+            "dist/zapfast-${GITHUB_REF_NAME}-macos-universal.dmg" "$mode"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -209,6 +235,7 @@ jobs:
           sha256sum * > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
+          name: ZapExt ${{ github.ref_name }}
           files: dist/*
           generate_release_notes: true
 
