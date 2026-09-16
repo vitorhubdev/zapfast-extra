@@ -1,0 +1,67 @@
+name: Apply ZapExt 1.0.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/apply-zapext-1.0.4.py
+      - .github/workflows/zapext-1.0.4-apply.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'Run ZapExt 1.0.4 release patch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+          targets: x86_64-pc-windows-gnu
+
+      - name: Linux and Windows cross-check dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
+            cmake perl gcc-mingw-w64-x86-64
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: zapext-1.0.4-apply
+
+      - name: Apply ZapExt 1.0.4 changes
+        run: python3 .github/scripts/apply-zapext-1.0.4.py
+
+      - name: Format and validate Linux build
+        run: |
+          cargo fmt --all
+          cargo fmt --all --check
+          cargo check --locked --all-targets
+          cargo test --locked --lib
+          bash -n packaging/macos/verify.sh
+
+      - name: Validate Windows-specific notification code
+        run: cargo check --locked --target x86_64-pc-windows-gnu
+
+      - name: Commit ZapExt 1.0.4 and create release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "Release ZapExt 1.0.4"
+          git tag -a v1.0.4 -m "ZapExt 1.0.4"
+          git push origin main
+          git push origin v1.0.4
+          gh workflow run release.yml --ref v1.0.4
