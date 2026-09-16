@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/scripts/apply-zapext-1.0.4.py
+      - .github/scripts/finalize-zapext-1.0.4.py
+      - .github/scripts/zapext-logo.webp.b64
       - .github/workflows/zapext-1.0.4-apply.yml
   workflow_dispatch:
 
@@ -22,24 +24,28 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.98.0
           components: rustfmt
           targets: x86_64-pc-windows-gnu
 
-      - name: Linux and Windows cross-check dependencies
+      - name: Build and icon dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev \
-            cmake perl gcc-mingw-w64-x86-64
+            cmake perl gcc-mingw-w64-x86-64 imagemagick
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: zapext-1.0.4-apply
+          key: zapext-1.0.4-final
 
-      - name: Apply ZapExt 1.0.4 changes
+      - name: Apply ZapExt 1.0.4 functional changes
         run: python3 .github/scripts/apply-zapext-1.0.4.py
+
+      - name: Apply ZapExt branding, logo and release metadata
+        run: python3 .github/scripts/finalize-zapext-1.0.4.py
 
       - name: Format and validate Linux build
         run: |
@@ -48,13 +54,13 @@ jobs:
           cargo check --locked --all-targets
           cargo test --locked --lib
           bash -n packaging/macos/verify.sh
+          test "$(cat VERSION)" = "1.0.4"
+          grep -q 'vitorhubdev/zapfast-extra/releases/latest' src/updates.rs
 
       - name: Validate Windows-specific notification code
         run: cargo check --locked --target x86_64-pc-windows-gnu
 
       - name: Commit ZapExt 1.0.4 and create release tag
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -64,4 +70,12 @@ jobs:
           git tag -a v1.0.4 -m "ZapExt 1.0.4"
           git push origin main
           git push origin v1.0.4
-          gh workflow run release.yml --ref v1.0.4
+
+      - name: Update repository About metadata when permitted
+        env:
+          GH_TOKEN: ${{ github.token }}
+        continue-on-error: true
+        run: |
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY" \
+            -f description='ZapExt: a community mod of ZapFast with extra desktop features and fixes' \
+            -f homepage='https://github.com/vitorhubdev/zapfast-extra'
