@@ -3,6 +3,7 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -85,7 +86,7 @@ jobs:
           $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           & $iscc "/DVersion=$version" "/DArch=$arch" `
-            "/DBinary=$PWD\target\${{ matrix.target }}\release\zapfast.exe" `
+            "/DBinary=$PWD\target\${{ matrix.target }}/release/zapfast.exe" `
             "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
