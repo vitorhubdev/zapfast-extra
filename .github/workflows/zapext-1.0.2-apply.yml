@@ -25,7 +25,9 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
       - uses: Swatinem/rust-cache@v2
       - name: Apply ZapExt 1.0.2 changes
-        run: python3 .github/scripts/apply-zapext-1.0.2.py
+        run: |
+          python3 .github/scripts/apply-zapext-1.0.2.py
+          python3 .github/scripts/finalize-zapext-1.0.2.py
       - name: Format and validate
         run: |
           cargo fmt --all
@@ -36,6 +38,9 @@ jobs:
         run: |
           git config user.name "Vitor"
           git config user.email "108148783+vitorhubdev@users.noreply.github.com"
-          git add AGENTS.md CHANGELOG.md Cargo.toml build.rs src/main.rs src/app.rs src/model.rs src/util.rs src/backend/worker.rs src/ui/chats.rs src/ui/picker.rs src/updates.rs src/updates/install.rs src/updates/transfer.rs
+          git rm .github/scripts/apply-zapext-1.0.2.py
+          git rm .github/scripts/finalize-zapext-1.0.2.py
+          git rm .github/workflows/zapext-1.0.2-apply.yml
+          git add -A
           git commit -m "Release ZapExt 1.0.2 fixes"
           git push origin main
