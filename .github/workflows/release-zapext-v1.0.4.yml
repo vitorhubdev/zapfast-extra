@@ -1,0 +1,219 @@
+name: Release ZapExt v1.0.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release-zapext-v1.0.4.yml
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RELEASE_TAG: v1.0.4
+  ZAPFAST_GIPHY_KEY: ${{ secrets.ZAPFAST_GIPHY_KEY || secrets.FASTSAPP_GIPHY_KEY }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v1.0.4
+      - name: Validate ZapExt release version
+        shell: bash
+        run: test "v$(tr -d '\r\n' < VERSION)" = "$RELEASE_TAG"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: rustup target add ${{ matrix.target }}
+      - name: GUI build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          name="zapfast-${RELEASE_TAG}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/zapfast.exe" "dist/$name/"
+            case "${{ matrix.target }}" in
+              x86_64-*) portable_arch="x64" ;;
+              aarch64-*) portable_arch="arm64" ;;
+              *) portable_arch="${{ matrix.target }}" ;;
+            esac
+            cp "target/${{ matrix.target }}/release/zapfast.exe" \
+              "dist/ZapExt-${RELEASE_TAG}-windows-${portable_arch}-portable.exe"
+          else
+            cp "target/${{ matrix.target }}/release/zapfast" "dist/$name/"
+          fi
+          cp README.md LICENSE packaging/zapfast-portable.txt "dist/$name/"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            cp --parents packaging/applications/zapfast.desktop packaging/icons/zapfast.svg contrib/omarchy/zapfast.json.tpl contrib/omarchy/zapfast-theme "dist/$name/"
+          fi
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "$name.zip" "$name"
+          else
+            tar czf "$name.tar.gz" "$name"
+          fi
+      - name: Installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $arch = "${{ matrix.target }}".Split("-")[0]
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DVersion=$version" "/DArch=$arch" `
+            "/DBinary=$PWD\target\${{ matrix.target }}\release\zapfast.exe" `
+            "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*-setup.exe
+            dist/*-portable.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS universal app
+    runs-on: macos-latest
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v1.0.4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-universal
+      - name: Build both architectures
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+      - name: Universal binary
+        run: |
+          mkdir -p universal
+          lipo -create \
+            target/aarch64-apple-darwin/release/zapfast \
+            target/x86_64-apple-darwin/release/zapfast \
+            -output universal/zapfast
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - name: Install native packaging
+        run: gem install native-packages --version 0.6.0 --no-document
+      - name: App bundle
+        run: |
+          version="${RELEASE_TAG#v}"
+          mkdir -p dist/macos-input
+          bash packaging/macos/bundle.sh universal/zapfast dist/macos-input/ZapExt.app "$version"
+          cp README.md LICENSE dist/macos-input/
+      - name: Package macOS app
+        run: |
+          native-packages build \
+            --version "${RELEASE_TAG#v}" --target macos-universal --defer-recipes \
+            --output "$RUNNER_TEMP/macos-packages"
+          cp "$RUNNER_TEMP/macos-packages/packages/macos-universal/dmg/"*.dmg dist/
+      - name: Verify macOS release app
+        run: |
+          mode=adhoc
+          if [[ -n "${APPLE_CERTIFICATE_P12:-}" \
+             && -n "${APPLE_CERTIFICATE_PASSWORD:-}" \
+             && -n "${APPLE_SIGNING_IDENTITY:-}" \
+             && -n "${APPLE_ID:-}" \
+             && -n "${APPLE_TEAM_ID:-}" \
+             && -n "${APPLE_APP_PASSWORD:-}" ]]; then
+            mode=notarized
+          fi
+          bash packaging/macos/verify.sh \
+            "dist/zapfast-${RELEASE_TAG}-macos-universal.dmg" "$mode"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  flatpak:
+    name: Flatpak bundle
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v1.0.4
+      - uses: actions/download-artifact@v7
+        with:
+          name: x86_64-unknown-linux-gnu
+          path: dist
+      - name: Unpack Linux build
+        run: |
+          tar xzf dist/zapfast-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz -C packaging/flatpak
+          mv packaging/flatpak/zapfast-${RELEASE_TAG}-x86_64-unknown-linux-gnu packaging/flatpak/built
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/rocks.zapfast.ZapFast.bundle.yml
+          bundle: zapfast-${{ env.RELEASE_TAG }}-x86_64.flatpak
+          cache: false
+          upload-artifact: false
+      - uses: actions/upload-artifact@v7
+        with:
+          name: flatpak
+          path: "*.flatpak"
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [build, macos, flatpak]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.4
+          name: ZapExt v1.0.4
+          files: dist/*
+          generate_release_notes: true
