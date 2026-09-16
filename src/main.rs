@@ -6,9 +6,20 @@ use zapfast::{app, backend, paths, settings, single_instance};
 
 use clap::Parser;
 
+const APP_NAME: &str = "ZapExt";
+const APP_VERSION: &str = "1.0.1";
+
+fn app_title(demo: bool) -> String {
+    if demo {
+        format!("{APP_NAME} Demo - {APP_VERSION}")
+    } else {
+        format!("{APP_NAME} - {APP_VERSION}")
+    }
+}
+
 /// A fast, native WhatsApp client.
 #[derive(Debug, Parser)]
-#[command(name = "zapfast", version, about)]
+#[command(name = "zapext", version = APP_VERSION, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Control>,
@@ -68,7 +79,7 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Control {
-    /// Reload palettes in an already-running ZapFast without showing its window.
+    /// Reload palettes in an already-running ZapExt without showing its window.
     ReloadThemes,
 }
 
@@ -96,7 +107,7 @@ fn main() -> eframe::Result<()> {
         match single_instance::acquire(&waker) {
             single_instance::Outcome::Only(guard) => Some(guard),
             single_instance::Outcome::Surfaced => {
-                eprintln!("ZapFast or FastsApp is already running; asked it to show its window");
+                eprintln!("ZapExt or FastsApp is already running; asked it to show its window");
                 return Ok(());
             }
         }
@@ -174,6 +185,7 @@ fn main() -> eframe::Result<()> {
     let slot = std::sync::Arc::new(std::sync::Mutex::new(Some(app)));
 
     let mut update_receipt = cli.update_receipt;
+    let window_title = app_title(false);
 
     // The link, archive, and tray outlive windows. Recreate a window when the
     // tray, notification, or another launch requests one.
@@ -186,7 +198,7 @@ fn main() -> eframe::Result<()> {
         #[cfg(feature = "demo")]
         let creator_tour_events = cli.demo_tour_events.clone();
         eframe::run_native(
-            "ZapFast",
+            &window_title,
             native_options(demo_persistence.clone()),
             Box::new(move |cc| {
                 creator_waker.attach(&cc.egui_ctx);
@@ -286,9 +298,9 @@ fn log_panics(path: std::path::PathBuf) {
         previous(info);
         let thread = std::thread::current();
         let entry = format!(
-            "{} zapfast {} on thread {:?}: {info}\n",
+            "{} zapext {} on thread {:?}: {info}\n",
             jiff::Timestamp::now(),
-            env!("CARGO_PKG_VERSION"),
+            APP_VERSION,
             thread.name().unwrap_or("unnamed"),
         );
         let file = std::fs::OpenOptions::new()
@@ -315,7 +327,7 @@ fn native_options(demo_persistence: Option<std::path::PathBuf>) -> eframe::Nativ
     let demo_size = demo_size_arg().unwrap_or([1180.0, 780.0]);
     let demo = demo_persistence.is_some();
     let viewport = egui::ViewportBuilder::default()
-        .with_title(if demo { "ZapFast Demo" } else { "ZapFast" })
+        .with_title(app_title(demo))
         .with_app_id(if demo {
             "zapfast-demo".to_owned()
         } else {
@@ -498,6 +510,11 @@ fn app_icon() -> egui::IconData {
 #[cfg(all(test, feature = "demo"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zapext_title_includes_version() {
+        assert_eq!(app_title(false), "ZapExt - 1.0.1");
+    }
 
     #[test]
     fn tour_cli_accepts_manual_and_delayed_starts() {
