@@ -15,7 +15,7 @@ trap cleanup EXIT
 
 xcrun stapler validate "$dmg"
 hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount" >/dev/null
-app="$mount/ZapFast.app"
+app="$mount/ZapExt.app"
 codesign --verify --strict --deep "$app"
 spctl --assess --type execute --verbose=2 "$app"
 lipo "$app/Contents/MacOS/zapfast" -verify_arch x86_64 arm64

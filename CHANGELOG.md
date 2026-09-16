@@ -2,6 +2,19 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.3] - 2026-09-16
+
+### Fixed
+
+- Windows installer now displays `ZapExt` and points publisher, support, and update links at the fork.
+- macOS bundle, DMG volume, microphone permission text, and release verification now use the visible `ZapExt` name.
+- Linux desktop and Flatpak metadata now display `ZapExt` and link to `vitorhubdev/zapfast-extra`.
+- Native package release/source metadata now reads from the fork instead of `crmne/zapfast`.
+
+### Compatibility
+
+- Internal executable/package names, Windows `AppId`, macOS bundle identifier, Flatpak application id, storage identifiers, and `zapfast-v*` release asset names remain unchanged so existing installations and the updater continue to work.
+
 ## [1.0.2] - 2026-09-16
 
 ### Fixed

@@ -513,8 +513,8 @@ mod tests {
 
     #[test]
     fn zapext_title_includes_version() {
-        assert_eq!(APP_VERSION, "1.0.2");
-        assert_eq!(app_title(false), "ZapExt - 1.0.2");
+        assert_eq!(APP_VERSION, "1.0.3");
+        assert_eq!(app_title(false), "ZapExt - 1.0.3");
     }
 
     #[test]

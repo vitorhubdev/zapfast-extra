@@ -11,7 +11,7 @@ abort "output already exists: #{output}" if File.exist?(output)
 Dir.mktmpdir("zapfast-dmg-") do |directory|
   FileUtils.cp_r(File.join(payload, "."), directory, preserve: true)
   File.symlink("/Applications", File.join(directory, "Applications"))
-  abort "DMG creation failed" unless system("hdiutil", "create", "-volname", "ZapFast",
+  abort "DMG creation failed" unless system("hdiutil", "create", "-volname", "ZapExt",
     "-srcfolder", directory, "-format", "UDZO", output)
   abort "DMG verification failed" unless system("hdiutil", "verify", output)
 end

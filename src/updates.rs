@@ -28,7 +28,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub const ZAPEXT_VERSION: &str = "1.0.2";
+pub const ZAPEXT_VERSION: &str = "1.0.3";
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";
 

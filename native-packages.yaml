@@ -11,9 +11,9 @@ libraries:
     rpm: alsa-lib
 nfpm:
   name: zapfast
-  maintainer: Carmine Paolino <carmine@paolino.me>
-  homepage: https://zapfast.rocks
-  description: Fast native WhatsApp client
+  maintainer: vitorhubdev <108148783+vitorhubdev@users.noreply.github.com>
+  homepage: https://github.com/vitorhubdev/zapfast-extra
+  description: ZapExt, a fast native WhatsApp client
   license: MIT
   provides: [fastsapp]
   conflicts: [fastsapp]
@@ -122,7 +122,7 @@ targets:
       local: dist/zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
       release_asset: zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
 release:
-  repository: crmne/zapfast
+  repository: vitorhubdev/zapfast-extra
   checksums: checksums.txt
 assets:
   AMD64:
@@ -136,7 +136,7 @@ assets:
     local: dist/zapfast-v@VERSION@-macos-universal.dmg
   SOURCE:
     file: zapfast-@VERSION@.tar.gz
-    url: https://github.com/crmne/zapfast/archive/refs/tags/v@VERSION@.tar.gz
+    url: https://github.com/vitorhubdev/zapfast-extra/archive/refs/tags/v@VERSION@.tar.gz
     checksummed: false
     local: dist/zapfast-@VERSION@.tar.gz
 templates:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build ZapFast.app from a GUI binary on macOS.
+# Build ZapExt.app from a GUI binary on macOS.
 #
 #   packaging/macos/bundle.sh <binary> <output.app> <version>
 #

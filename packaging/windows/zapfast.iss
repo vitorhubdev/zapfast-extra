@@ -25,7 +25,7 @@
   #define InnoArch "x64compatible"
 #endif
 
-#define AppName "ZapFast"
+#define AppName "ZapExt"
 #define AppExeName "zapfast.exe"
 
 [Setup]
@@ -34,10 +34,10 @@ AppId={{F2512314-384A-4002-9933-AB840FD01639}
 AppName={#AppName}
 AppVersion={#Version}
 AppVerName={#AppName} {#Version}
-AppPublisher=Carmine Paolino
-AppPublisherURL=https://zapfast.rocks
-AppSupportURL=https://github.com/crmne/zapfast/issues
-AppUpdatesURL=https://github.com/crmne/zapfast/releases
+AppPublisher=vitorhubdev
+AppPublisherURL=https://github.com/vitorhubdev/zapfast-extra
+AppSupportURL=https://github.com/vitorhubdev/zapfast-extra/issues
+AppUpdatesURL=https://github.com/vitorhubdev/zapfast-extra/releases
 DefaultDirName={localappdata}\Programs\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
