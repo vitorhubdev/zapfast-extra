@@ -1,0 +1,30 @@
+name: Tag ZapExt 1.0.4
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/tag-zapext-1.0.4.yml
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Create v1.0.4 tag
+        run: |
+          target="e49c25f2982884a2c100477108194ce9756627d4"
+          test "$(git show "$target:VERSION")" = "1.0.4"
+          if git ls-remote --exit-code --tags origin refs/tags/v1.0.4 >/dev/null 2>&1; then
+            echo "v1.0.4 already exists" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a v1.0.4 "$target" -m "ZapExt 1.0.4"
+          git push origin v1.0.4
