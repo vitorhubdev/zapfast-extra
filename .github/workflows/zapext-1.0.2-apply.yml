@@ -11,148 +11,28 @@ jobs:
   apply:
     if: github.event.head_commit.message == 'Prepare ZapExt 1.0.2 patch'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Apply ZapExt 1.0.2 changes
-        shell: bash
+        with:
+          components: rustfmt
+      - name: GUI build dependencies
         run: |
-          python3 <<'PY'
-          from pathlib import Path
-
-          def replace(path, old, new, count=1):
-              p = Path(path)
-              text = p.read_text()
-              found = text.count(old)
-              if found < count:
-                  raise SystemExit(f"{path}: expected {count}, found {found}: {old[:100]!r}")
-              p.write_text(text.replace(old, new, count))
-
-          replace('src/updates.rs',
-                  'const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/crmne/zapfast/releases/latest";',
-                  'pub const ZAPEXT_VERSION: &str = "1.0.2";\nconst LATEST_RELEASE_URL: &str = "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";')
-          replace('src/updates.rs',
-                  '.header("User-Agent", concat!("ZapFast/", env!("CARGO_PKG_VERSION")))',
-                  '.header("User-Agent", format!("ZapExt/{ZAPEXT_VERSION}"))')
-          replace('src/updates.rs',
-                  'is_newer(&version, env!("CARGO_PKG_VERSION"))',
-                  'is_newer(&version, ZAPEXT_VERSION)')
-
-          replace('src/main.rs', 'const APP_VERSION: &str = "1.0.1";',
-                  'const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;')
-          replace('src/main.rs',
-                  'assert_eq!(app_title(false), "ZapExt - 1.0.1");',
-                  'assert_eq!(APP_VERSION, "1.0.2");\n        assert_eq!(app_title(false), "ZapExt - 1.0.2");')
-
-          replace('src/updates/transfer.rs',
-                  'format!("https://api.github.com/repos/crmne/zapfast/releases/tags/v{version}")',
-                  'format!("https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/tags/v{version}")')
-          replace('src/updates/transfer.rs',
-                  '.user_agent(concat!("ZapFast/", env!("CARGO_PKG_VERSION")))',
-                  '.user_agent(format!("ZapExt/{}", super::ZAPEXT_VERSION))')
-          replace('src/updates/transfer.rs',
-                  '"/crmne/zapfast/releases/download/v{}/{}",',
-                  '"/vitorhubdev/zapfast-extra/releases/download/v{}/{}",')
-          replace('src/updates/install.rs',
-                  'version.trim() == format!("zapfast {expected}")',
-                  'version.trim() == format!("zapext {expected}")')
-
-          replace('build.rs', '.set("ProductName", "ZapFast")', '.set("ProductName", "ZapExt")')
-          replace('build.rs', '.set("FileDescription", "ZapFast")', '.set("FileDescription", "ZapExt")')
-          replace('Cargo.toml', 'homepage = "https://zapfast.rocks"', 'homepage = "https://github.com/vitorhubdev/zapfast-extra"')
-          replace('Cargo.toml', 'repository = "https://github.com/crmne/zapfast"', 'repository = "https://github.com/vitorhubdev/zapfast-extra"')
-
-          # Notifications: muted was already checked; archived is now equally hard-blocked.
-          replace('src/app.rs',
-                  'if chat.unread == 0 || chat.muted(now) || now - message.timestamp > 60 {',
-                  'if chat.unread == 0 || chat.archived || chat.muted(now) || now - message.timestamp > 60 {')
-
-          # Browse channels/communities separately from normal chats/groups.
-          replace('src/app.rs',
-                  '    pub show_archived: bool,\n    pub toasts: Vec<Toast>,',
-                  '    pub show_archived: bool,\n    /// Show channels and community/announcement containers instead of normal chats.\n    pub show_channels: bool,\n    pub toasts: Vec<Toast>,')
-          replace('src/app.rs',
-                  '            show_archived: false,\n            toasts: Vec::new(),',
-                  '            show_archived: false,\n            show_channels: false,\n            toasts: Vec::new(),')
-          replace('src/app.rs',
-                  '.filter(|chat| chat.archived == self.show_archived || !needle.is_empty())\n            .filter(|chat| {',
-                  '.filter(|chat| chat.archived == self.show_archived || !needle.is_empty())\n            .filter(|chat| !needle.is_empty() || chat.is_channel_or_community() == self.show_channels)\n            .filter(|chat| {')
-
-          # Search direct chats by resolved contact name, not only the raw chat name.
-          replace('src/app.rs',
-                  '|| crate::util::search_key(&chat.name).contains(&needle)\n                    || chat.phone().is_some_and(|phone| phone.contains(&needle))',
-                  '|| crate::util::search_key(&self.chat_title(chat)).contains(&needle)\n                    || chat\n                        .phone()\n                        .is_some_and(|phone| crate::util::phone_matches(phone, self.search.trim()))')
-          text = Path('src/app.rs').read_text()
-          old = 'is_some_and(|phone| phone.contains(&needle))'
-          if old not in text:
-              raise SystemExit('src/app.rs: contact phone match not found')
-          Path('src/app.rs').write_text(text.replace(
-              old,
-              'is_some_and(|phone| crate::util::phone_matches(phone, self.search.trim()))',
-              1,
-          ))
-
-          replace('src/model.rs',
-                  '    pub fn muted(&self, now: i64) -> bool {\n        matches!(self.muted_until, Some(0)) || self.muted_until.is_some_and(|until| until > now)\n    }\n\n    /// Direct-chat phone number as digits.',
-                  '    pub fn muted(&self, now: i64) -> bool {\n        matches!(self.muted_until, Some(0)) || self.muted_until.is_some_and(|until| until > now)\n    }\n\n    /// Whether this row belongs in the separate channels/communities view.\n    pub fn is_channel_or_community(&self) -> bool {\n        self.kind == ChatKind::Broadcast || (self.kind == ChatKind::Group && self.read_only)\n    }\n\n    /// Direct-chat phone number as digits.')
-          # Community parent containers are not ordinary group chats.
-          replace('src/backend/worker.rs',
-                  'read_only: metadata.is_announcement && !admin,',
-                  'read_only: metadata.is_parent_group || (metadata.is_announcement && !admin),')
-
-          # Phone/DDD normalization.
-          util = Path('src/util.rs')
-          text = util.read_text()
-          marker = '#[cfg(test)]\nmod tests {'
-          if marker not in text:
-              raise SystemExit('src/util.rs: tests marker not found')
-          helpers = '''/// Digits from a user-entered phone number.\npub fn phone_digits(text: &str) -> String {\n    text.chars().filter(|ch| ch.is_ascii_digit()).collect()\n}\n\n/// Match a stored international WhatsApp number against a formatted query.\n/// Suffix matching allows DDD + local number without requiring country code.\npub fn phone_matches(phone: &str, query: &str) -> bool {\n    let phone = phone_digits(phone);\n    let query = phone_digits(query);\n    if query.len() < 4 {\n        return false;\n    }\n    phone == query || phone.ends_with(&query) || query.ends_with(&phone)\n}\n\n'''
-          util.write_text(text.replace(marker, helpers + marker, 1))
-          with util.open('a') as f:
-              f.write('''\n#[cfg(test)]\nmod zapext_phone_search_tests {\n    use super::*;\n\n    #[test]\n    fn phone_search_accepts_country_code_ddd_and_formatting() {\n        let stored = "5575991234567";\n        assert!(phone_matches(stored, "+55 (75) 99123-4567"));\n        assert!(phone_matches(stored, "(75) 99123-4567"));\n        assert!(phone_matches(stored, "75991234567"));\n        assert!(!phone_matches(stored, "71991234567"));\n        assert!(!phone_matches(stored, "75"));\n    }\n}\n''')
-
-          # Avatar recovery: failed lookups should not poison the cache for a day,
-          # and direct contacts may have a usable privacy LID picture identity.
-          replace('src/backend/worker.rs',
-                  'const AVATAR_FRESH: Duration = Duration::from_secs(24 * 60 * 60);',
-                  'const AVATAR_FRESH: Duration = Duration::from_secs(24 * 60 * 60);\nconst AVATAR_MISS_FRESH: Duration = Duration::from_secs(5 * 60);')
-          replace('src/backend/worker.rs',
-                  '.is_some_and(|age| age < AVATAR_FRESH)\n        {\n            let path = (metadata.len() > 0).then_some(path);',
-                  '.is_some_and(|age| {\n                    age < if metadata.len() > 0 { AVATAR_FRESH } else { AVATAR_MISS_FRESH }\n                })\n        {\n            let path = (metadata.len() > 0).then_some(path);')
-          replace('src/backend/worker.rs',
-                  '        } else {\n            Self::jid_of(&id).into_iter().collect()\n        };\n        if candidates.is_empty() {',
-                  '        } else {\n            let mut candidates: Vec<Jid> = Self::jid_of(&id).into_iter().collect();\n            if let Some(phone) = crate::model::phone_of(&id)\n                && let Some(lid) = self\n                    .lid_to_pn\n                    .iter()\n                    .find_map(|(lid, pn)| (pn == phone).then_some(lid))\n                && let Some(jid) = Self::jid_of(&format!("{lid}@lid"))\n                && !candidates.contains(&jid)\n            {\n                candidates.push(jid);\n            }\n            candidates\n        };\n        if candidates.is_empty() {')
-
-          replace('src/ui/chats.rs',
-                  '    if !app.search.trim().is_empty() {\n        results(app, ui);\n        return;\n    }\n    let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();',
-                  '    if !app.search.trim().is_empty() {\n        results(app, ui);\n        return;\n    }\n    if !app.show_archived {\n        ui.horizontal(|ui| {\n            if ui.selectable_label(!app.show_channels, "Chats & groups").clicked() {\n                app.show_channels = false;\n            }\n            if ui\n                .selectable_label(app.show_channels, "Channels & communities")\n                .clicked()\n            {\n                app.show_channels = true;\n            }\n        });\n        ui.add_space(6.0);\n    }\n    let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();')
-
-          # Saved-by-user content stays first; history recents are clearly separate.
-          replace('src/ui/picker.rs', 'theme::text(ui, "Saved",', 'theme::text(ui, "My stickers",')
-          replace('src/ui/picker.rs', 'theme::text(ui, "Recent",', 'theme::text(ui, "Recent from phone",')
-
-          replace('AGENTS.md',
-                  '- The fork version starts at `1.0.1`. `APP_VERSION` in `src/main.rs` is the source\n  of truth for the ZapExt version shown to users.',
-                  '- The fork version starts at `1.0.1`. `ZAPEXT_VERSION` in `src/updates.rs` is the\n  source of truth for the ZapExt product version; `src/main.rs` must use that value.')
-
-          changelog = Path('CHANGELOG.md')
-          text = changelog.read_text()
-          anchor = 'All notable changes to the ZapExt fork are recorded here.\n\n'
-          if anchor not in text:
-              raise SystemExit('CHANGELOG.md: header anchor not found')
-          entry = '''## [1.0.2] - 2026-09-16\n\n### Fixed\n\n- Archived conversations no longer generate desktop notifications.\n- Muted conversations remain excluded from notifications, and archived state is now enforced in the same gate.\n- Search resolves the best contact display name and normalizes formatted phone numbers, country codes, and DDD input.\n- Failed profile-picture lookups retry after a short negative-cache interval; direct contacts also try their known privacy LID identity.\n\n### Changed\n\n- Added separate `Chats & groups` and `Channels & communities` sidebar views.\n- Community parent and read-only announcement containers are classified away from ordinary chats.\n- Sticker picker prioritizes `My stickers` and identifies synchronized phone history separately as `Recent from phone`.\n- Update checks and release-asset validation now point at `vitorhubdev/zapfast-extra`, and downloaded builds are verified through the ZapExt CLI identity.\n- Windows executable metadata and Cargo repository links now identify ZapExt/the fork while compatibility-sensitive internal `zapfast` identifiers remain unchanged.\n\n### Known limitation\n\n- The pinned `whatsapp-rust` schema contains `FavoriteSticker`, but its high-level event API does not expose favorite-sticker synchronization. ZapExt therefore prioritizes app-saved stickers and keeps phone recents separate; full account-favorite sync requires extending that integration.\n\n'''
-          changelog.write_text(text.replace(anchor, anchor + entry, 1))
-          PY
-
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply ZapExt 1.0.2 changes
+        run: python3 .github/scripts/apply-zapext-1.0.2.py
+      - name: Format and validate
+        run: |
           cargo fmt --all
           cargo fmt --all --check
           cargo check --locked --all-targets
           cargo test --locked --lib
-
       - name: Commit ZapExt 1.0.2
-        shell: bash
         run: |
           git config user.name "Vitor"
           git config user.email "108148783+vitorhubdev@users.noreply.github.com"
