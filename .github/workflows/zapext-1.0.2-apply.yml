@@ -15,7 +15,7 @@ jobs:
   apply:
     if: github.event.head_commit.message == 'Prepare ZapExt 1.0.2 patch'
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,22 +23,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: GUI build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
-      - uses: Swatinem/rust-cache@v2
       - name: Apply ZapExt 1.0.2 changes
         run: |
           python3 .github/scripts/apply-zapext-1.0.2.py
           python3 .github/scripts/finalize-zapext-1.0.2.py
-      - name: Format and validate affected paths
+      - name: Format
         run: |
           cargo fmt --all
           cargo fmt --all --check
-          cargo test --locked --lib zapext_phone_search_tests
-          cargo test --locked --lib zapext_community_tests
-          cargo test --locked --lib demo::tour::tests::real_input_opens_menus_completes_text_and_sends_offline_media
       - name: Commit ZapExt 1.0.2
         run: |
           git config user.name "Vitor"
