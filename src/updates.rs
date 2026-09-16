@@ -28,7 +28,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/crmne/zapfast/releases/latest";
+pub const ZAPEXT_VERSION: &str = "1.0.2";
+const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";
 
 /// Update-check interval.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -51,7 +53,7 @@ struct LatestRelease {
 pub fn newer_release() -> Result<Option<Release>> {
     let mut response = ureq::get(LATEST_RELEASE_URL)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", concat!("ZapFast/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", format!("ZapExt/{ZAPEXT_VERSION}"))
         .call()?;
     let body = response
         .body_mut()
@@ -60,12 +62,10 @@ pub fn newer_release() -> Result<Option<Release>> {
     let latest: LatestRelease =
         serde_json::from_str(&body).context("unexpected release listing")?;
     let version = latest.tag_name.trim_start_matches('v').to_string();
-    Ok(
-        is_newer(&version, env!("CARGO_PKG_VERSION")).then_some(Release {
-            version,
-            url: latest.html_url,
-        }),
-    )
+    Ok(is_newer(&version, ZAPEXT_VERSION).then_some(Release {
+        version,
+        url: latest.html_url,
+    }))
 }
 
 /// `major.minor.patch`, and whether a suffix marks it as a pre-release;

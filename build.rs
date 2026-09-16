@@ -7,8 +7,8 @@ fn main() {
         let mut resource = winresource::WindowsResource::new();
         resource
             .set_icon("packaging/windows/zapfast.ico")
-            .set("ProductName", "ZapFast")
-            .set("FileDescription", "ZapFast");
+            .set("ProductName", "ZapExt")
+            .set("FileDescription", "ZapExt");
         if let Err(error) = resource.compile() {
             println!("cargo:warning=Windows resources not embedded: {error}");
         }

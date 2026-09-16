@@ -7,7 +7,7 @@ use zapfast::{app, backend, paths, settings, single_instance};
 use clap::Parser;
 
 const APP_NAME: &str = "ZapExt";
-const APP_VERSION: &str = "1.0.1";
+const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;
 
 fn app_title(demo: bool) -> String {
     if demo {
@@ -513,7 +513,8 @@ mod tests {
 
     #[test]
     fn zapext_title_includes_version() {
-        assert_eq!(app_title(false), "ZapExt - 1.0.1");
+        assert_eq!(APP_VERSION, "1.0.2");
+        assert_eq!(app_title(false), "ZapExt - 1.0.2");
     }
 
     #[test]

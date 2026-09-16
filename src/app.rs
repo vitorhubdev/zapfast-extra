@@ -225,6 +225,8 @@ pub struct App {
     pub pair_phone: String,
     pub sidebar_visible: bool,
     pub show_archived: bool,
+    /// Show channels and community/announcement containers instead of normal chats.
+    pub show_channels: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
     /// A newer release than this build, once GitHub has said so.
@@ -419,6 +421,7 @@ impl App {
             pair_phone: String::new(),
             sidebar_visible: true,
             show_archived: false,
+            show_channels: false,
             toasts: Vec::new(),
             actions: Vec::new(),
             update: None,
@@ -517,7 +520,7 @@ impl App {
         };
         let now = crate::util::now();
         // Skip muted chats and delayed reconnect backlogs.
-        if chat.unread == 0 || chat.muted(now) || now - message.timestamp > 60 {
+        if chat.unread == 0 || chat.archived || chat.muted(now) || now - message.timestamp > 60 {
             return;
         }
         let reading = !self.window_hidden
@@ -820,9 +823,14 @@ impl App {
             .iter()
             .filter(|chat| chat.archived == self.show_archived || !needle.is_empty())
             .filter(|chat| {
+                !needle.is_empty() || chat.is_channel_or_community() == self.show_channels
+            })
+            .filter(|chat| {
                 needle.is_empty()
-                    || crate::util::search_key(&chat.name).contains(&needle)
-                    || chat.phone().is_some_and(|phone| phone.contains(&needle))
+                    || crate::util::search_key(&self.chat_title(chat)).contains(&needle)
+                    || chat
+                        .phone()
+                        .is_some_and(|phone| crate::util::phone_matches(phone, self.search.trim()))
                     || chat.last.as_ref().is_some_and(|last| {
                         crate::util::search_key(&last.summary).contains(&needle)
                     })
@@ -846,23 +854,21 @@ impl App {
         if needle.is_empty() {
             return Vec::new();
         }
-        let mut contacts: Vec<&Contact> = self
-            .contacts
-            .values()
-            .filter(|contact| crate::model::phone_of(&contact.id).is_some())
-            .filter(|contact| self.me.as_deref() != Some(contact.id.as_str()))
-            .filter(|contact| !self.chats.iter().any(|chat| chat.id == contact.id))
-            .filter(|contact| {
-                contact
-                    .display_name()
-                    .is_some_and(|name| crate::util::search_key(name).contains(&needle))
-                    || contact
-                        .id
-                        .split('@')
-                        .next()
-                        .is_some_and(|phone| phone.contains(&needle))
-            })
-            .collect();
+        let mut contacts: Vec<&Contact> =
+            self.contacts
+                .values()
+                .filter(|contact| crate::model::phone_of(&contact.id).is_some())
+                .filter(|contact| self.me.as_deref() != Some(contact.id.as_str()))
+                .filter(|contact| !self.chats.iter().any(|chat| chat.id == contact.id))
+                .filter(|contact| {
+                    contact
+                        .display_name()
+                        .is_some_and(|name| crate::util::search_key(name).contains(&needle))
+                        || contact.id.split('@').next().is_some_and(|phone| {
+                            crate::util::phone_matches(phone, self.search.trim())
+                        })
+                })
+                .collect();
         contacts
             .sort_by_key(|contact| contact.display_name().unwrap_or(&contact.id).to_lowercase());
         contacts.truncate(15);
@@ -959,8 +965,9 @@ impl App {
                     self.me_about = about;
                 }
                 Event::Chats(chats) => {
+                    let now = crate::util::now();
                     for chat in &chats {
-                        if chat.unread == 0 {
+                        if chat.unread == 0 || chat.archived || chat.muted(now) {
                             self.notifications.clear(&chat.id);
                         }
                     }
@@ -1250,7 +1257,7 @@ impl App {
         let is_open =
             self.open_chat.as_deref() == Some(chat.id.as_str()) && self.page == Page::Chats;
         let mut chat = chat;
-        if chat.unread == 0 {
+        if chat.unread == 0 || chat.archived || chat.muted(crate::util::now()) {
             self.notifications.clear(&chat.id);
         }
         if is_open && chat.unread > 0 && self.window_focused && !self.window_hidden {

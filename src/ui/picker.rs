@@ -569,7 +569,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 if app.stickers_pending {
                     "Loading your stickers…"
                 } else {
-                    "Recent stickers appear here. Right-click one to save it. To import a pack, paste a signal.art link or open a .wastickers file."
+                    "Your saved stickers appear first. Phone recents stay in a separate section. To import a pack, paste a signal.art link or open a .wastickers file."
                 },
                 theme::regular(13.0),
                 palette.secondary,
@@ -587,7 +587,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !saved.is_empty() {
-                theme::text(ui, "Saved", theme::semibold(12.5), palette.secondary);
+                theme::text(ui, "My stickers", theme::semibold(12.5), palette.secondary);
                 sticker_grid(ui, palette, &saved, true, &mut choices);
                 ui.add_space(8.0);
             }
@@ -613,7 +613,12 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 ui.add_space(8.0);
             }
             if !recent.is_empty() {
-                theme::text(ui, "Recent", theme::semibold(12.5), palette.secondary);
+                theme::text(
+                    ui,
+                    "Recent from phone",
+                    theme::semibold(12.5),
+                    palette.secondary,
+                );
                 sticker_grid(ui, palette, &recent, false, &mut choices);
             }
         });

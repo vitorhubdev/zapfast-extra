@@ -404,7 +404,10 @@ impl Tour {
             Target::Gif => ctx
                 .read_response(egui::Id::new("gif-search"))
                 .map(|r| r.rect.left_bottom() + vec2(60.0, 55.0)),
-            Target::Sticker => self.labels.get("Saved").map(|pos| *pos + vec2(25.0, 52.0)),
+            Target::Sticker => self
+                .labels
+                .get("My stickers")
+                .map(|pos| *pos + vec2(25.0, 52.0)),
         }
     }
 

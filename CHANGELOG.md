@@ -2,6 +2,27 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.2] - 2026-09-16
+
+### Fixed
+
+- Archived conversations no longer generate desktop notifications, and any visible notification is cleared as soon as a chat becomes archived.
+- Muted chats, groups and channels remain excluded from new notifications; visible notifications are also cleared immediately when mute state arrives or changes.
+- Search resolves the best contact display name and normalizes formatted phone numbers, country codes, and DDD input.
+- Failed profile-picture lookups retry after a short negative-cache interval; direct contacts also try their known privacy LID identity.
+
+### Changed
+
+- Added separate `Chats & groups` and `Channels & communities` sidebar views.
+- Community parent containers are classified explicitly, so ordinary admin-only groups remain in `Chats & groups`.
+- Sticker picker prioritizes `My stickers` and keeps synchronized phone history separately under `Recent from phone`.
+- Update checks and release-asset validation now point at `vitorhubdev/zapfast-extra`, and downloaded builds are verified through the ZapExt CLI identity.
+- Windows executable metadata and Cargo repository links now identify ZapExt/the fork while compatibility-sensitive internal `zapfast` identifiers remain unchanged.
+
+### Known limitation
+
+- The pinned `whatsapp-rust` revision exposes the `FavoriteSticker` app-state schema but no public `FavoriteSticker` event. ZapExt therefore prioritizes stickers explicitly saved in ZapExt and separates phone recents; complete WhatsApp-account favorite sync requires extending the library event integration rather than guessing from general recents.
+
 ## [1.0.1] - 2026-09-16
 
 ### Changed

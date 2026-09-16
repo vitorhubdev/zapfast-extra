@@ -103,7 +103,7 @@ END;
 const CHAT_COLUMNS: &str =
     "c.id, c.name, c.kind, c.last_activity, c.unread, c.archived, c.pinned, c.muted_until,
                     m.from_me, m.sender_name, m.content, m.status, m.sender, c.participants, c.read_only,
-                    c.pinned_at, c.ephemeral_expiration";
+                    c.pinned_at, c.ephemeral_expiration, c.community";
 
 /// Adds columns introduced after the initial schema when missing.
 const MIGRATIONS: &[(&str, &str, &str)] = &[
@@ -111,6 +111,7 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("messages", "mentions", "TEXT NOT NULL DEFAULT '[]'"),
     ("chats", "participants", "TEXT NOT NULL DEFAULT '[]'"),
     ("chats", "read_only", "INTEGER NOT NULL DEFAULT 0"),
+    ("chats", "community", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "forwarded", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "delivered_at", "INTEGER"),
     ("messages", "read_at", "INTEGER"),
@@ -159,6 +160,7 @@ fn chat_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chat> {
         last,
         participants: serde_json::from_str(&participants).unwrap_or_default(),
         read_only: row.get(14)?,
+        community: row.get(17)?,
         ephemeral_expiration: row
             .get::<_, Option<u32>>(16)?
             .filter(|expiration| *expiration != 0),
@@ -300,6 +302,15 @@ impl Archive {
                 serde_json::to_string(participants).unwrap_or_else(|_| "[]".into()),
                 read_only
             ],
+        )?;
+        Ok(())
+    }
+
+    /// Persists whether a group is the parent container of a Community.
+    pub fn set_group_community(&self, id: &str, community: bool) -> Result<()> {
+        self.connection.execute(
+            "UPDATE chats SET community = ?2 WHERE id = ?1",
+            params![id, community],
         )?;
         Ok(())
     }
@@ -1929,5 +1940,33 @@ mod media_path_tests {
             .clear_media_path("a@s.whatsapp.net", "p1")
             .expect("cleared");
         assert!(archive.media_paths().expect("lists").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod zapext_community_tests {
+    use super::*;
+
+    #[test]
+    fn community_state_is_independent_from_admin_only_posting() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1-2@g.us";
+        archive.ensure_chat(chat, "Group").expect("chat");
+        archive
+            .set_group_info(chat, Some("Admin only"), &[], true)
+            .expect("group info");
+        archive
+            .set_group_community(chat, false)
+            .expect("community state");
+        let row = archive.chat(chat).expect("chat").expect("exists");
+        assert!(row.read_only);
+        assert!(!row.community);
+
+        archive
+            .set_group_community(chat, true)
+            .expect("community state");
+        let row = archive.chat(chat).expect("chat").expect("exists");
+        assert!(row.read_only);
+        assert!(row.community);
     }
 }

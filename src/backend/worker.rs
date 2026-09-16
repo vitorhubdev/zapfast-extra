@@ -47,6 +47,7 @@ use crate::paths::AppDirs;
 const SYNC_QUIET: Duration = Duration::from_secs(20);
 /// Profile-picture cache lifetime.
 const AVATAR_FRESH: Duration = Duration::from_secs(24 * 60 * 60);
+const AVATAR_MISS_FRESH: Duration = Duration::from_secs(5 * 60);
 /// Phone history-request timeout.
 const PHONE_PATIENCE: Duration = Duration::from_secs(30);
 /// Phone history-request batch size.
@@ -961,6 +962,7 @@ impl Worker {
                         name: (!metadata.subject.is_empty()).then(|| metadata.subject.clone()),
                         participants,
                         read_only: metadata.is_announcement && !admin,
+                        community: metadata.is_parent_group,
                         // GroupEphemeralSettings carries a trigger mode, not a
                         // timestamp; a zero setting timestamp keeps later
                         // authoritative updates (protocol messages) able to
@@ -2789,6 +2791,7 @@ impl Worker {
                 name,
                 participants,
                 read_only,
+                community,
                 ephemeral_expiration,
                 ephemeral_setting_timestamp,
             } => {
@@ -2796,6 +2799,7 @@ impl Worker {
                 let _ =
                     self.archive
                         .set_group_info(&chat, name.as_deref(), &participants, read_only);
+                let _ = self.archive.set_group_community(&chat, community);
                 if let Some(expiration) = ephemeral_expiration {
                     let _ = self.archive.set_ephemeral(
                         &chat,
@@ -3501,7 +3505,13 @@ impl Worker {
                 .modified()
                 .ok()
                 .and_then(|modified| modified.elapsed().ok())
-                .is_some_and(|age| age < AVATAR_FRESH)
+                .is_some_and(|age| {
+                    age < if metadata.len() > 0 {
+                        AVATAR_FRESH
+                    } else {
+                        AVATAR_MISS_FRESH
+                    }
+                })
         {
             let path = (metadata.len() > 0).then_some(path);
             self.emit(Event::Avatar { id, full, path });
@@ -3515,7 +3525,18 @@ impl Worker {
                 .filter_map(|id| Self::jid_of(&id))
                 .collect()
         } else {
-            Self::jid_of(&id).into_iter().collect()
+            let mut candidates: Vec<Jid> = Self::jid_of(&id).into_iter().collect();
+            if let Some(phone) = crate::model::phone_of(&id)
+                && let Some(lid) = self
+                    .lid_to_pn
+                    .iter()
+                    .find_map(|(lid, pn)| (pn == phone).then_some(lid))
+                && let Some(jid) = Self::jid_of(&format!("{lid}@lid"))
+                && !candidates.contains(&jid)
+            {
+                candidates.push(jid);
+            }
+            candidates
         };
         if candidates.is_empty() {
             self.emit(Event::Avatar {

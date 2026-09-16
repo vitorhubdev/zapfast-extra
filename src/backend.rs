@@ -350,6 +350,7 @@ pub enum Command {
         name: Option<String>,
         participants: Vec<String>,
         read_only: bool,
+        community: bool,
         ephemeral_expiration: Option<u32>,
         ephemeral_setting_timestamp: Option<i64>,
     },

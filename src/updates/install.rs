@@ -251,7 +251,7 @@ pub fn verify_version(executable: &Path, expected: &str) -> Result<()> {
                 .take(4096)
                 .read_to_string(&mut version)?;
             ensure!(
-                version.trim() == format!("zapfast {expected}"),
+                version.trim() == format!("zapext {expected}"),
                 "The downloaded app has the wrong version"
             );
             return Ok(());

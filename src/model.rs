@@ -51,6 +51,8 @@ pub struct Chat {
     pub participants: Vec<String>,
     /// Whether this is an announcement group where we cannot post.
     pub read_only: bool,
+    /// Whether this group is the parent container of a WhatsApp Community.
+    pub community: bool,
     /// Disappearing-message duration in seconds, if enabled.
     pub ephemeral_expiration: Option<u32>,
 }
@@ -81,6 +83,7 @@ impl Chat {
             last: None,
             participants: Vec::new(),
             read_only: false,
+            community: false,
             ephemeral_expiration: None,
         }
     }
@@ -91,6 +94,11 @@ impl Chat {
 
     pub fn muted(&self, now: i64) -> bool {
         matches!(self.muted_until, Some(0)) || self.muted_until.is_some_and(|until| until > now)
+    }
+
+    /// Whether this row belongs in the separate channels/communities view.
+    pub fn is_channel_or_community(&self) -> bool {
+        self.id.ends_with("@newsletter") || self.community
     }
 
     /// Direct-chat phone number as digits.

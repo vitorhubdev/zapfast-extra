@@ -224,6 +224,23 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         results(app, ui);
         return;
     }
+    if !app.show_archived {
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(!app.show_channels, "Chats & groups")
+                .clicked()
+            {
+                app.show_channels = false;
+            }
+            if ui
+                .selectable_label(app.show_channels, "Channels & communities")
+                .clicked()
+            {
+                app.show_channels = true;
+            }
+        });
+        ui.add_space(6.0);
+    }
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();
     let archived = app.archived_count();
     let show_archive_row = !app.show_archived && archived > 0;

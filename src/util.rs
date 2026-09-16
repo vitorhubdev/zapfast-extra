@@ -323,6 +323,22 @@ pub fn tray_template_rgba(size: usize) -> Vec<u8> {
     rgba
 }
 
+/// Digits from a user-entered phone number.
+pub fn phone_digits(text: &str) -> String {
+    text.chars().filter(|ch| ch.is_ascii_digit()).collect()
+}
+
+/// Match a stored international WhatsApp number against a formatted query.
+/// Suffix matching allows DDD + local number without requiring country code.
+pub fn phone_matches(phone: &str, query: &str) -> bool {
+    let phone = phone_digits(phone);
+    let query = phone_digits(query);
+    if query.len() < 4 {
+        return false;
+    }
+    phone == query || phone.ends_with(&query) || query.ends_with(&phone)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -430,5 +446,20 @@ mod tests {
         assert_eq!(icon[3], 0);
         let middle = (16 * 32 + 16) * 4;
         assert_eq!(icon[middle + 3], 255);
+    }
+}
+
+#[cfg(test)]
+mod zapext_phone_search_tests {
+    use super::*;
+
+    #[test]
+    fn phone_search_accepts_country_code_ddd_and_formatting() {
+        let stored = "5575991234567";
+        assert!(phone_matches(stored, "+55 (75) 99123-4567"));
+        assert!(phone_matches(stored, "(75) 99123-4567"));
+        assert!(phone_matches(stored, "75991234567"));
+        assert!(!phone_matches(stored, "71991234567"));
+        assert!(!phone_matches(stored, "75"));
     }
 }

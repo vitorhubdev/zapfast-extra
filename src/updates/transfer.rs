@@ -30,7 +30,9 @@ impl Source {
     fn release(&self, version: &str) -> String {
         match self {
             Self::GitHub => {
-                format!("https://api.github.com/repos/crmne/zapfast/releases/tags/v{version}")
+                format!(
+                    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/tags/v{version}"
+                )
             }
             #[cfg(feature = "demo")]
             Self::Local(base) => format!("{base}/latest.json"),
@@ -154,7 +156,7 @@ pub fn download_for(
     );
     let policy = source.clone();
     let http = reqwest::blocking::Client::builder()
-        .user_agent(concat!("ZapFast/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("ZapExt/{}", super::ZAPEXT_VERSION))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(15 * 60))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -206,7 +208,7 @@ pub fn download_for(
                 url.host_str() == Some("github.com")
                     && url.path()
                         == format!(
-                            "/crmne/zapfast/releases/download/v{}/{}",
+                            "/vitorhubdev/zapfast-extra/releases/download/v{}/{}",
                             release.version, candidate.name
                         ),
                 "Update asset does not belong to this release"
