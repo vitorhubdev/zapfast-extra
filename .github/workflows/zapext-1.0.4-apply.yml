@@ -7,6 +7,7 @@ on:
       - .github/scripts/apply-zapext-1.0.4.py
       - .github/scripts/finalize-zapext-1.0.4.py
       - .github/scripts/zapext-logo.webp.b64
+      - .github/scripts/zapext-logo.*.b64
       - .github/workflows/zapext-1.0.4-apply.yml
   workflow_dispatch:
 
@@ -41,6 +42,35 @@ jobs:
         with:
           key: zapext-1.0.4-final
 
+      - name: Prepare chunked ZapExt logo source
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/scripts/finalize-zapext-1.0.4.py')
+          text = path.read_text(encoding='utf-8')
+          old = '''source_b64 = ROOT / ".github/scripts/zapext-logo.webp.b64"
+          source = ROOT / ".zapext-logo-source.webp"
+          source.write_bytes(base64.b64decode(source_b64.read_text(encoding="utf-8").strip()))'''
+          new = '''source_parts = sorted((ROOT / ".github/scripts").glob("zapext-logo.[0-9][0-9].b64"))
+          if not source_parts:
+              raise SystemExit("ZapExt logo source chunks are missing")
+          encoded_logo = "".join(part.read_text(encoding="utf-8").strip() for part in source_parts)
+          source = ROOT / ".zapext-logo-source.webp"
+          source.write_bytes(base64.b64decode(encoded_logo, validate=True))'''
+          if old not in text:
+              raise SystemExit('logo loader block not found')
+          text = text.replace(old, new, 1)
+          old_cleanup = '''source_b64.unlink(missing_ok=True)
+          (ROOT / ".github/scripts/finalize-zapext-1.0.4.py").unlink(missing_ok=True)'''
+          new_cleanup = '''for part in source_parts:
+              part.unlink(missing_ok=True)
+          (ROOT / ".github/scripts/zapext-logo.webp.b64").unlink(missing_ok=True)
+          (ROOT / ".github/scripts/finalize-zapext-1.0.4.py").unlink(missing_ok=True)'''
+          if old_cleanup not in text:
+              raise SystemExit('logo cleanup block not found')
+          path.write_text(text.replace(old_cleanup, new_cleanup, 1), encoding='utf-8')
+          PY
+
       - name: Apply ZapExt 1.0.4 functional changes
         run: python3 .github/scripts/apply-zapext-1.0.4.py
 
@@ -56,6 +86,9 @@ jobs:
           bash -n packaging/macos/verify.sh
           test "$(cat VERSION)" = "1.0.4"
           grep -q 'vitorhubdev/zapfast-extra/releases/latest' src/updates.rs
+          test -s assets/zapext.png
+          test -s packaging/windows/zapfast.ico
+          test -s packaging/macos/icon-1024.png
 
       - name: Validate Windows-specific notification code
         run: cargo check --locked --target x86_64-pc-windows-gnu
