@@ -1016,6 +1016,35 @@ pub fn recording_path(dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// A video file gives up its soundtrack once its metadata leads.
+    ///
+    /// Rodio and symphonia want the moov atom before the media, which is
+    /// what -movflags +faststart writes. A clip whose metadata sits at the
+    /// end is not recognized at all, and that is what an in-app video player
+    /// has to work around.
+    #[test]
+    fn a_videos_soundtrack_decodes_when_its_metadata_leads() {
+        // The clip is made here, so the test skips without ffmpeg.
+        let dir = std::env::temp_dir().join(format!("zapfast-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("clip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            return;
+        }
+        let spooled = decode_to_spool(&path).expect("the soundtrack decodes");
+        assert!(spooled.frames > 0, "the clip is not empty");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn test_spool(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
             "zapfast-audio-test-{}-{name}.pcm",

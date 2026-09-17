@@ -2,6 +2,16 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.17] - 2026-09-17
+
+### Tests
+
+- Added a_videos_soundtrack_decodes_when_its_metadata_leads. It pins what the
+  audio path can do with a video today: rodio and symphonia decode the AAC
+  track of an mp4 when the moov atom leads the file (ffmpeg's +faststart) and
+  refuse the same clip when it sits at the end. Playing videos in the app is
+  the next piece of work and this is the constraint it has to handle.
+
 ## [1.0.16] - 2026-09-17
 
 ### Changed
