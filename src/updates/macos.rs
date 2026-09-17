@@ -168,20 +168,21 @@ impl Mounted {
 fn image_bundle(root: &Path) -> Result<PathBuf> {
     // Prefer the current ZapExt bundle; still accept legacy names when
     // upgrading from ZapFast/FastsApp or rolling back.
+    //
+    // A name that exists but is not a real directory (a symlink left by a disk
+    // image) is skipped so the next candidate can win, and only a disk image
+    // without any usable bundle is an error.
+    let mut invalid = false;
     for name in ["ZapExt.app", "ZapFast.app", "FastsApp.app"] {
         let bundle = root.join(name);
         match fs::symlink_metadata(&bundle) {
-            Ok(metadata) => {
-                ensure!(
-                    metadata.is_dir(),
-                    "The disk image has an invalid app bundle"
-                );
-                return Ok(bundle);
-            }
+            Ok(metadata) if metadata.is_dir() => return Ok(bundle),
+            Ok(_) => invalid = true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
     }
+    ensure!(!invalid, "The disk image has an invalid app bundle");
     anyhow::bail!("The disk image has no ZapExt app bundle")
 }
 

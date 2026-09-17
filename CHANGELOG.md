@@ -2,6 +2,12 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.6] - 2026-09-17
+
+### Fixed
+
+- The macOS updater no longer gives up when a disk image carries a name that is not a real app bundle (a symlink, for example). It skips that name and keeps looking, so an upgrade or a rollback still finds the usable bundle; a disk image with nothing usable still reports an invalid app bundle. The `renamed_images_prefer_the_new_bundle_and_still_accept_old_images` test that caught this now passes on macOS.
+
 ## [1.0.5] - 2026-09-17
 
 ### Fixed
