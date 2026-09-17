@@ -400,6 +400,25 @@ mod emoji_tests {
         assert_eq!(move_emoji_selection(20, 25, 10, Key::ArrowDown), 20);
         assert_eq!(move_emoji_selection(24, 25, 10, Key::ArrowRight), 24);
     }
+
+    #[test]
+    fn favourites_come_first_and_unknown_ones_are_dropped() {
+        let saved = vec![
+            std::path::PathBuf::from("a"),
+            std::path::PathBuf::from("b"),
+            std::path::PathBuf::from("c"),
+        ];
+        let favorites = vec![
+            std::path::PathBuf::from("c"),
+            std::path::PathBuf::from("gone"),
+        ];
+        let (first, rest) = favourite_first(&saved, &favorites);
+        assert_eq!(first, vec![std::path::PathBuf::from("c")]);
+        assert_eq!(
+            rest,
+            vec![std::path::PathBuf::from("a"), std::path::PathBuf::from("b"),]
+        );
+    }
 }
 
 // --- stickers -----------------------------------------------------------
@@ -411,6 +430,27 @@ struct StickerChoices {
     forget: Option<std::path::PathBuf>,
     heal: Vec<std::path::PathBuf>,
     preview: Option<std::path::PathBuf>,
+    favorite: Option<std::path::PathBuf>,
+}
+
+/// Splits saved stickers into favourites and the rest, keeping both in order.
+fn favourite_first(
+    saved: &[std::path::PathBuf],
+    favorites: &[std::path::PathBuf],
+) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
+    let known: std::collections::HashSet<&std::path::Path> =
+        saved.iter().map(|path| path.as_path()).collect();
+    let favorites: Vec<std::path::PathBuf> = favorites
+        .iter()
+        .filter(|path| known.contains(path.as_path()))
+        .cloned()
+        .collect();
+    let rest = saved
+        .iter()
+        .filter(|path| !favorites.contains(path))
+        .cloned()
+        .collect();
+    (favorites, rest)
 }
 
 fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
@@ -433,6 +473,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         return;
     }
     let saved = app.stickers_saved.clone();
+    let (favorites, rest) = favourite_first(&saved, &app.stickers_favorites);
     let packs = app.sticker_packs.clone();
     let recent = app.stickers.clone();
     let mut choices = StickerChoices::default();
@@ -441,9 +482,22 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         .id_salt("sticker-grid")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if !saved.is_empty() {
+            if !favorites.is_empty() {
+                theme::text(ui, "Favourites", theme::semibold(12.5), palette.secondary);
+                sticker_grid(
+                    ui,
+                    palette,
+                    &favorites,
+                    true,
+                    false,
+                    &favorites,
+                    &mut choices,
+                );
+                ui.add_space(8.0);
+            }
+            if !rest.is_empty() {
                 theme::text(ui, "My stickers", theme::semibold(12.5), palette.secondary);
-                sticker_grid(ui, palette, &saved, true, false, &mut choices);
+                sticker_grid(ui, palette, &rest, true, false, &favorites, &mut choices);
                 ui.add_space(8.0);
             }
             for pack in &packs {
@@ -464,7 +518,15 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         }
                     });
                 });
-                sticker_grid(ui, palette, &pack.stickers, false, false, &mut choices);
+                sticker_grid(
+                    ui,
+                    palette,
+                    &pack.stickers,
+                    false,
+                    false,
+                    &favorites,
+                    &mut choices,
+                );
                 ui.add_space(8.0);
             }
             if !recent.is_empty() {
@@ -476,7 +538,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 );
                 // Recent copies live in caches the app owns, so broken tiles
                 // heal instead of warning forever.
-                sticker_grid(ui, palette, &recent, false, true, &mut choices);
+                sticker_grid(ui, palette, &recent, false, true, &favorites, &mut choices);
             }
         });
     if let Some(path) = choices.save {
@@ -493,6 +555,9 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     }
     if let Some(path) = choices.forget {
         app.actions.push(Action::ForgetSticker(path));
+    }
+    if let Some(path) = choices.favorite {
+        app.actions.push(Action::FavoriteSticker(path));
     }
     if let Some(dir) = delete_pack {
         app.actions.push(Action::DeleteStickerPack(dir));
@@ -568,6 +633,7 @@ fn sticker_grid(
     stickers: &[std::path::PathBuf],
     saved: bool,
     cache: bool,
+    favorites: &[std::path::PathBuf],
     choices: &mut StickerChoices,
 ) {
     let columns = 5;
@@ -621,6 +687,23 @@ fn sticker_grid(
                             "Save sticker",
                         ) {
                             choices.save = Some(path.clone());
+                        }
+                        if favorites.contains(path) {
+                            if widgets::menu_item(
+                                ui,
+                                palette,
+                                Some(Icon::PinOff),
+                                "Remove from favourites",
+                            ) {
+                                choices.favorite = Some(path.clone());
+                            }
+                        } else if widgets::menu_item(
+                            ui,
+                            palette,
+                            Some(Icon::Pin),
+                            "Add to favourites",
+                        ) {
+                            choices.favorite = Some(path.clone());
                         }
                     });
                 if response

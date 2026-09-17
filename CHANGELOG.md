@@ -2,6 +2,22 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.16] - 2026-09-17
+
+### Changed
+
+- Right-clicking a sticker in the picker can mark it as a favourite or clear
+  the mark. The sticker tab leads with a Favourites section, then the rest of
+  your saved stickers, then imported packs and the phone's recent list. The
+  list lives in the encrypted archive, so it survives a restart and stays on
+  this machine.
+
+### Tests
+
+- Added sticker_favourites_toggle_and_survive_a_damaged_list, which covers
+  marking, clearing and a corrupted stored list, and
+  favourites_come_first_and_unknown_ones_are_dropped.
+
 ## [1.0.15] - 2026-09-17
 
 ### Changed

@@ -108,7 +108,8 @@ without embedding a browser engine.
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
 - **Emoji and sticker picker.** Search emoji and save stickers
-  with a right-click. The sticker tab lists saved stickers first, then imported
+  with a right-click, which also marks a sticker as a favourite or clears the
+  mark; favourites are listed first. The sticker tab lists saved stickers next, then imported
   packs, then the phone's recent list and the stickers you sent; a sticker that
   only passed through a chat is never offered. Clicking a sticker previews it
   for confirmation before sending, and the picker reopens on the last used

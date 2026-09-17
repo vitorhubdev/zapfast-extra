@@ -2766,6 +2766,12 @@ impl Worker {
                 self.fetch_missing_stickers();
                 self.emit_stickers();
             }
+            Command::FavoriteSticker { path } => {
+                if let Err(error) = self.archive.toggle_sticker_favorite(&path) {
+                    log::warn!("could not store the sticker favourite: {error}");
+                }
+                self.emit_stickers();
+            }
             Command::SearchChat { chat, query } => {
                 let hits = self
                     .archive
@@ -3763,10 +3769,12 @@ impl Worker {
             Err(error) => log::warn!("could not list stickers: {error}"),
         }
         list.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
+        let favorites = self.archive.sticker_favorites().unwrap_or_default();
         self.emit(Event::Stickers {
             saved: self.saved_stickers(),
             packs: self.sticker_packs(),
             recent: list.into_iter().map(|(_, path)| path).collect(),
+            favorites,
         });
     }
 

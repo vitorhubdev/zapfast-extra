@@ -784,6 +784,8 @@ pub enum Action {
     SaveSticker(PathBuf),
     /// Removes a saved sticker.
     ForgetSticker(PathBuf),
+    /// Marks a sticker as a favourite, or clears the mark.
+    FavoriteSticker(PathBuf),
     /// Imports a sticker pack from a signal.art link.
     ImportStickerUrl(String),
     /// Selects and imports a .wastickers or zip file.

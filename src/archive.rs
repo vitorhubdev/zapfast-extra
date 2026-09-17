@@ -1194,6 +1194,34 @@ impl Archive {
         rows.collect()
     }
 
+    /// Sticker files the reader marked as favourites, newest first.
+    pub fn sticker_favorites(&self) -> Result<Vec<std::path::PathBuf>> {
+        let Some(raw) = self.meta("sticker_favorites")? else {
+            return Ok(Vec::new());
+        };
+        // A damaged list counts as empty instead of failing the picker.
+        Ok(serde_json::from_str(&raw).unwrap_or_default())
+    }
+
+    /// Adds or removes a favourite and reports its new state.
+    pub fn toggle_sticker_favorite(&self, path: &Path) -> Result<bool> {
+        let mut favorites = self.sticker_favorites()?;
+        let added = match favorites.iter().position(|known| known == path) {
+            Some(index) => {
+                favorites.remove(index);
+                false
+            }
+            None => {
+                favorites.insert(0, path.to_path_buf());
+                true
+            }
+        };
+        if let Ok(raw) = serde_json::to_string(&favorites) {
+            self.set_meta("sticker_favorites", &raw)?;
+        }
+        Ok(added)
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.connection
             .query_row(
@@ -1853,6 +1881,24 @@ pub(crate) mod tests {
 mod sticker_tests {
     use super::*;
     use crate::model::{Content, Delivery, Media, MediaState};
+    #[test]
+    fn sticker_favourites_toggle_and_survive_a_damaged_list() {
+        let archive = Archive::in_memory().expect("opens");
+        let path = std::path::PathBuf::from("/stickers/frog.webp");
+        assert!(archive.sticker_favorites().expect("fresh").is_empty());
+        assert!(archive.toggle_sticker_favorite(&path).expect("adds"));
+        assert_eq!(
+            archive.sticker_favorites().expect("list"),
+            vec![path.clone()]
+        );
+        assert!(!archive.toggle_sticker_favorite(&path).expect("removes"));
+        assert!(archive.sticker_favorites().expect("list").is_empty());
+        // A damaged list counts as empty instead of failing the picker.
+        archive
+            .set_meta("sticker_favorites", "{ not json")
+            .expect("damage");
+        assert!(archive.sticker_favorites().expect("damaged").is_empty());
+    }
 
     fn sticker(chat: &str, id: &str, timestamp: i64, path: Option<&str>, from_me: bool) -> Message {
         Message {

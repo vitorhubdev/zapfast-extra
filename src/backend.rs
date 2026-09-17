@@ -278,6 +278,10 @@ pub enum Command {
     },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
+    /// Marks a sticker as a favourite, or clears the mark.
+    FavoriteSticker {
+        path: PathBuf,
+    },
     /// Searches the open chat's messages.
     SearchChat {
         chat: ChatId,
@@ -484,6 +488,8 @@ pub enum Event {
         saved: Vec<PathBuf>,
         packs: Vec<StickerPack>,
         recent: Vec<PathBuf>,
+        /// Sticker files the reader marked as favourites, newest first.
+        favorites: Vec<PathBuf>,
     },
     /// In-chat search hits, or why the search failed.
     ChatSearch {

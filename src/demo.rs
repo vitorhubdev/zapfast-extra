@@ -1253,6 +1253,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                     stickers: vec![sticker.clone(); 6],
                 }];
                 app.stickers = vec![sticker; 7];
+                app.stickers_favorites = app.stickers_saved[..2].to_vec();
             }
             other => {
                 if app.chat(other).is_some() {

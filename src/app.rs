@@ -218,6 +218,8 @@ pub struct App {
     pub stickers: Vec<PathBuf>,
     /// Saved stickers, newest first.
     pub stickers_saved: Vec<PathBuf>,
+    /// Sticker files marked as favourites, newest first.
+    pub stickers_favorites: Vec<PathBuf>,
     /// Imported sticker packs, newest first.
     pub sticker_packs: Vec<StickerPack>,
     /// Whether the sticker list is loading.
@@ -436,6 +438,7 @@ impl App {
             selection_view: Default::default(),
             stickers: Vec::new(),
             stickers_saved: Vec::new(),
+            stickers_favorites: Vec::new(),
             sticker_packs: Vec::new(),
             stickers_pending: false,
             sticker_import_pending: false,
@@ -1200,10 +1203,12 @@ impl App {
                     saved,
                     packs,
                     recent,
+                    favorites,
                 } => {
                     self.stickers_saved = saved;
                     self.sticker_packs = packs;
                     self.stickers = recent;
+                    self.stickers_favorites = favorites;
                     self.stickers_pending = false;
                     self.sticker_import_pending = false;
                 }
@@ -2506,6 +2511,9 @@ impl App {
             }
             Action::DeleteStickerPack(dir) => {
                 self.backend.send(Command::DeleteStickerPack { dir });
+            }
+            Action::FavoriteSticker(path) => {
+                self.backend.send(Command::FavoriteSticker { path });
             }
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
