@@ -2,6 +2,12 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.7] - 2026-09-17
+
+### Fixed
+
+- The Windows executable reports the fork version in its file properties (`1.0.7`) instead of the upstream crate version, both as the file version and as the product version, while the crate keeps the upstream package version for compatibility.
+
 ## [1.0.6] - 2026-09-17
 
 ### Fixed
