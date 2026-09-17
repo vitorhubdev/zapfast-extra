@@ -148,12 +148,18 @@ jobs:
             target/x86_64-apple-darwin/release/zapfast \
             -output universal/zapfast
 
-      # The two per-target build trees are several gigabytes together, and
-      # making the disk image runs out of space while they are still there.
-      # Nothing after this point reads them: the packaging steps use the
-      # universal binary.
-      - name: Free the per-target build trees
-        run: rm -rf target/aarch64-apple-darwin target/x86_64-apple-darwin
+      # Making the disk image needs room, and nothing after this point reads
+      # the build tree or the toolchains a macOS runner carries for other
+      # languages.
+      - name: Free disk space
+        run: |
+          df -h /
+          rm -rf target
+          sudo rm -rf /Users/runner/Library/Android/sdk
+          sudo rm -rf /usr/local/share/dotnet /Users/runner/.dotnet
+          sudo rm -rf /Library/Frameworks/Mono.framework
+          rm -rf "$HOME/Library/Caches/Homebrew"
+          df -h /
 
       - uses: ruby/setup-ruby@v1
         with:
