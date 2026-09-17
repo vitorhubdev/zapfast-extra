@@ -2367,6 +2367,7 @@ impl Worker {
                 }
             }
             Command::Download { chat, message } => self.download(chat, message),
+            Command::HealSticker { path } => self.heal_sticker(&path),
             Command::FetchAvatar { id, full } => self.fetch_avatar(id, full),
             Command::EditText {
                 chat,
@@ -3186,6 +3187,20 @@ impl Worker {
         }
     }
 
+    /// Rejects downloads that could never display, before they are filed.
+    /// An empty file, or image bytes no decoder accepts, would otherwise sit
+    /// in the cache showing an error tile until cleared by hand. Runs off the
+    /// async runtime because decoding can take a moment on large files.
+    fn validate_media_bytes(bytes: &[u8], mime: &str) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Err("The download came back empty".to_owned());
+        }
+        if mime.starts_with("image/") && image::load_from_memory(bytes).is_err() {
+            return Err("The download is not a readable picture".to_owned());
+        }
+        Ok(())
+    }
+
     fn download(&mut self, chat: ChatId, id: String) {
         let Some(client) = self.client.clone() else {
             self.emit(Event::Media {
@@ -3332,7 +3347,7 @@ impl Worker {
                 }
             };
             let result = match client.download(&*downloadable).await {
-                Ok(bytes) => keep(bytes).await,
+                Ok(bytes) => Ok(bytes),
                 Err(error) => {
                     let text = error.to_string();
                     let expired = ["403", "404", "410"].iter().any(|code| text.contains(code));
@@ -3350,7 +3365,7 @@ impl Worker {
                                 Ok(MediaRetryResult::Success { direct_path }) => {
                                     match refreshed(direct_path) {
                                         Some(again) => match client.download(&*again).await {
-                                            Ok(bytes) => keep(bytes).await,
+                                            Ok(bytes) => Ok(bytes),
                                             Err(error) => Err(error.to_string()),
                                         },
                                         None => Err(text),
@@ -3368,6 +3383,21 @@ impl Worker {
                         _ => Err(text),
                     }
                 }
+            };
+            let result = match result {
+                Ok(bytes) => {
+                    let mime = mime.clone();
+                    let checked = tokio::task::spawn_blocking(move || {
+                        Self::validate_media_bytes(&bytes, &mime).map(|()| bytes)
+                    })
+                    .await;
+                    match checked {
+                        Ok(Ok(bytes)) => keep(bytes).await,
+                        Ok(Err(error)) => Err(error),
+                        Err(join) => Err(join.to_string()),
+                    }
+                }
+                Err(error) => Err(error),
             };
             let _ = commands.send(Command::Downloaded { chat, id, result });
         });
@@ -3448,6 +3478,33 @@ impl Worker {
             }
             Err(error) => log::warn!("could not list unfetched stickers: {error}"),
         }
+    }
+
+    /// Evicts a cached file that never decodes and fetches it again.
+    ///
+    /// Phone-cache copies are cleared and re-downloaded through the sticker
+    /// fetcher; chat-media copies are cleared and re-downloaded as
+    /// attachments. Anything else (saved stickers, imported packs) is the
+    /// user's own file and is left alone.
+    fn heal_sticker(&mut self, path: &Path) {
+        let _ = std::fs::remove_file(path);
+        if path.starts_with(self.dirs.sticker_cache_dir()) {
+            if let Some(hash) = path.file_stem().and_then(|stem| stem.to_str()) {
+                let _ = self.archive.clear_sticker_path(hash);
+            }
+            self.fetch_missing_stickers();
+            self.emit_stickers();
+            return;
+        }
+        let Ok(list) = self.archive.media_paths() else {
+            return;
+        };
+        let Some((chat, id, _)) = list.into_iter().find(|(_, _, known)| known == path) else {
+            return;
+        };
+        let _ = self.archive.clear_media_path(&chat, &id);
+        self.emit_message(&chat, &id);
+        self.download(chat, id);
     }
 
     /// Returns distinct downloaded stickers by most recent use.
@@ -5356,7 +5413,9 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
 
 #[cfg(test)]
 mod tests {
+    use super::receipt_tests::worker;
     use super::*;
+    use crate::model::MediaState;
 
     #[test]
     fn only_transient_download_failures_are_repeated() {
@@ -5371,6 +5430,79 @@ mod tests {
         assert!(!retriable_download("status 404"));
         assert!(!retriable_download("gone: 410"));
         assert!(!retriable_download("Attachment download keys are missing"));
+    }
+
+    #[test]
+    fn empty_and_unreadable_downloads_are_rejected_before_filing() {
+        assert!(Worker::validate_media_bytes(&[], "image/webp").is_err());
+        assert!(Worker::validate_media_bytes(b"not a picture", "image/webp").is_err());
+        assert!(Worker::validate_media_bytes(b"not a picture", "image/jpeg").is_err());
+        // Non-image attachments are not the picture pipeline's business.
+        assert!(Worker::validate_media_bytes(b"not a picture", "application/pdf").is_ok());
+        let mut png = Vec::new();
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encodes");
+        assert!(Worker::validate_media_bytes(&png, "image/png").is_ok());
+    }
+
+    #[test]
+    fn healing_a_broken_copy_clears_it_for_redownload() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker
+            .archive
+            .ensure_chat("a@s.whatsapp.net", "A")
+            .expect("chat");
+        let dir = std::env::temp_dir().join(format!("zapfast-heal-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let broken = dir.join("broken.webp");
+        std::fs::write(&broken, b"not a picture").expect("writes");
+        let message = Message {
+            id: "s1".into(),
+            chat: "a@s.whatsapp.net".into(),
+            sender: "a@s.whatsapp.net".into(),
+            sender_name: None,
+            from_me: false,
+            timestamp: 10,
+            content: Content::Sticker {
+                media: Media {
+                    mime: "image/webp".into(),
+                    size: 13,
+                    width: Some(512),
+                    height: Some(512),
+                    path: Some(broken.clone()),
+                    state: MediaState::Idle,
+                },
+                animated: false,
+            },
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        worker
+            .archive
+            .insert_message(&message, None)
+            .expect("inserted");
+        worker.heal_sticker(&broken);
+        assert!(!broken.exists(), "the broken copy is gone");
+        let stored = worker
+            .archive
+            .message("a@s.whatsapp.net", "s1")
+            .expect("reads")
+            .expect("row");
+        assert!(
+            matches!(&stored.content, Content::Sticker { media, .. } if media.path.is_none()),
+            "the archive record is cleared so the worker downloads it again"
+        );
+        // Unknown files are ignored instead of erroring.
+        worker.heal_sticker(std::path::Path::new("/definitely/not/here.webp"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

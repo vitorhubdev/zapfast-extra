@@ -2,6 +2,20 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.8] - 2026-09-17
+
+### Fixed
+
+- Clicking a sticker now previews it first: a confirmation dialog shows the sticker with Send and Cancel, and sending closes both the dialog and the picker. The Send button stays disabled when the sticker file is gone.
+- The picker reopens on the last used tab (emoji, GIF or stickers) instead of always starting on emoji, and remembers the choice across restarts.
+- Chat and search rows show Brazilian numbers in the national shape again: names stored before that grouping landed are normalized on display, and contact rows no longer show raw digits.
+- Downloads that could never display are rejected before filing: empty files and image bytes no decoder accepts now fail the download (with the usual quiet retries) instead of sitting in the cache as permanent error tiles.
+- A picture, sticker or picker tile whose filed file never decodes heals itself once: the broken copy is deleted and downloaded again (phone-cache copies through the sticker fetcher, chat copies as attachments), keeping the loading state meanwhile. Only bytes that come back broken too end up as an error. Saved stickers and imported packs are never touched.
+
+### Tests
+
+- Added `stored_number_names_display_in_the_national_shape`, `opening_the_picker_remembers_its_tab`, `sending_a_sticker_closes_its_confirm_dialog`, `broken_pictures_heal_exactly_once`, `empty_and_unreadable_downloads_are_rejected_before_filing` and `healing_a_broken_copy_clears_it_for_redownload`; the demo tour now confirms the sticker dialog through its Send button like a user would.
+
 ## [1.0.7] - 2026-09-17
 
 ### Fixed

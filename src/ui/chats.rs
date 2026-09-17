@@ -46,7 +46,7 @@ fn header(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     Frame::new()
         .inner_margin(Margin {
-            left: 14,
+            left: 18,
             right: 10,
             top: 12,
             bottom: 8,
@@ -149,7 +149,12 @@ fn macos_header(app: &mut App, ui: &mut egui::Ui) {
     drag.max.y = drag.min.y + 60.0;
     super::titlebar_drag(ui, drag);
     Frame::new()
-        .inner_margin(Margin::symmetric(14, 8))
+        .inner_margin(Margin {
+            left: 18,
+            right: 14,
+            top: 8,
+            bottom: 8,
+        })
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(44.0);
@@ -507,7 +512,7 @@ fn contact_row(app: &mut App, ui: &mut egui::Ui, contact: &Contact) {
         if let Some(phone) = crate::model::phone_of(&contact.id) {
             let phone_line = widgets::line(
                 ui,
-                &format!("+{phone}"),
+                &crate::util::phone(phone),
                 theme::regular(13.0),
                 palette.dim,
                 rect.right() - 14.0 - left,

@@ -668,7 +668,10 @@ impl App {
             && !chat.name.is_empty()
             && !chat.name.chars().all(|c| c.is_ascii_digit())
         {
-            return chat.name.clone();
+            // Names stored before the Brazilian grouping landed keep the old
+            // generic shape; normalize them on display instead of migrating
+            // every archived row.
+            return crate::util::display_phone_name(&chat.name);
         }
         match crate::model::phone_of(id) {
             Some(digits) => crate::util::phone(digits),
@@ -2041,6 +2044,9 @@ impl App {
                 } else {
                     self.picker = Some(tab);
                     self.picker_search.clear();
+                    // Reopening the picker returns to this tab, even after a restart.
+                    self.settings.picker_tab = tab;
+                    self.actions.push(Action::SettingsChanged);
                     self.picker_focus = tab == PickerTab::Emoji;
                     self.emoji_selected = 0;
                     if tab == PickerTab::Stickers {
@@ -2118,6 +2124,9 @@ impl App {
                 self.backend.send(Command::SaveSticker { path });
                 self.toast("Sticker saved");
             }
+            Action::HealSticker { path } => {
+                self.backend.send(Command::HealSticker { path });
+            }
             Action::ForgetSticker(path) => {
                 self.backend.send(Command::ForgetSticker { path });
             }
@@ -2136,6 +2145,7 @@ impl App {
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
                     self.backend.send(Command::SendSticker { chat, path });
+                    self.dialog = None;
                     self.picker = None;
                     self.scroll_to_bottom = true;
                     self.at_bottom = true;
@@ -2825,6 +2835,41 @@ mod tests {
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    #[test]
+    fn opening_the_picker_remembers_its_tab() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.apply(Action::TogglePicker(PickerTab::Stickers), &ctx);
+        assert_eq!(app.picker, Some(PickerTab::Stickers));
+        assert_eq!(app.settings.picker_tab, PickerTab::Stickers);
+        // Closing keeps the memory; reopening returns to it.
+        app.apply(Action::TogglePicker(PickerTab::Stickers), &ctx);
+        assert_eq!(app.picker, None);
+        assert_eq!(app.settings.picker_tab, PickerTab::Stickers);
+        // The choice survives a settings round trip; old files open on emoji.
+        let back: Settings =
+            serde_json::from_str(&serde_json::to_string(&app.settings).unwrap()).unwrap();
+        assert_eq!(back.picker_tab, PickerTab::Stickers);
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.picker_tab, PickerTab::Emoji);
+    }
+
+    #[test]
+    fn sending_a_sticker_closes_its_confirm_dialog() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.open_chat = Some("chat".to_owned());
+        app.dialog = Some(Dialog::ConfirmSticker {
+            path: std::path::PathBuf::from("sticker.webp"),
+        });
+        app.apply(
+            Action::SendSticker(std::path::PathBuf::from("sticker.webp")),
+            &ctx,
+        );
+        assert!(app.dialog.is_none());
+        assert_eq!(app.picker, None);
     }
 
     #[test]

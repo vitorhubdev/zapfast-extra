@@ -15,7 +15,6 @@ use crate::app::{App, Conversation};
 use crate::markup;
 use crate::model::{
     Action, Chat, ChatId, Content, Delivery, Dialog, LinkPreview, Media, MediaState, Message,
-    PickerTab,
 };
 use crate::theme::{self, Icon, Palette};
 
@@ -830,7 +829,13 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     );
                     app.picker_anchor = Some(smile.rect);
                     if smile.clicked() {
-                        app.actions.push(Action::TogglePicker(PickerTab::Emoji));
+                        if app.picker.is_some() {
+                            app.actions.push(Action::ClosePicker);
+                        } else {
+                            // Reopen on the last used tab instead of emoji.
+                            app.actions
+                                .push(Action::TogglePicker(app.settings.picker_tab));
+                        }
                     }
                 }
                 let field_width = ui.available_width() - button_width - 10.0;
@@ -2868,6 +2873,23 @@ fn forget_retries(ui: &egui::Ui, message: &Message) {
         .data_mut(|data| data.remove_temp::<PictureRetries>(retry_id(message)));
 }
 
+/// Claims the single self-heal for a message whose filed file never decodes.
+///
+/// The worker deletes the broken copy and downloads a fresh one. While the
+/// fresh copy is missing the tile keeps its loading state; only bytes that
+/// come back broken too end up as an error.
+fn claim_heal(ui: &egui::Ui, message: &Message) -> bool {
+    ui.ctx().data_mut(|data| {
+        let state = data.get_temp_mut_or_default::<PictureRetries>(retry_id(message));
+        if state.healed {
+            return false;
+        }
+        state.healed = true;
+        state.attempts = 0;
+        true
+    })
+}
+
 fn retry_id(message: &Message) -> egui::Id {
     egui::Id::new(("picture-retry", &message.chat, &message.id))
 }
@@ -2882,6 +2904,8 @@ const PICTURE_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis
 struct PictureRetries {
     attempts: u32,
     last: Option<std::time::Instant>,
+    /// Whether the broken copy was already evicted for a fresh download.
+    healed: bool,
 }
 
 /// Decides what the next paint of a broken picture does.
@@ -2950,14 +2974,27 @@ fn picture(
                                 );
                             }
                             Err(_) if matches!(quiet_retry(ui, message), PictureRetry::Stop) => {
-                                ui.painter().rect_filled(rect, 6.0, palette.surface);
-                                theme::paint_icon(
-                                    ui,
-                                    Icon::CircleAlert,
-                                    rect,
-                                    24.0,
-                                    palette.danger,
-                                );
+                                if claim_heal(ui, message) {
+                                    actions.push(Action::HealSticker { path: path.clone() });
+                                    ui.painter().rect_filled(rect, 6.0, palette.surface);
+                                    theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                                } else if path.exists()
+                                    || matches!(media.state, MediaState::Failed(_))
+                                {
+                                    ui.painter().rect_filled(rect, 6.0, palette.surface);
+                                    theme::paint_icon(
+                                        ui,
+                                        Icon::CircleAlert,
+                                        rect,
+                                        24.0,
+                                        palette.danger,
+                                    );
+                                } else {
+                                    // The broken copy is gone and its
+                                    // replacement is on its way.
+                                    ui.painter().rect_filled(rect, 6.0, palette.surface);
+                                    theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                                }
                             }
                             _ => {
                                 // Retry quietly, like a picture still loading.
@@ -3023,15 +3060,27 @@ fn picture(
                 let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                 if ui.is_rect_visible(rect) {
                     if matches!(quiet_retry(ui, message), PictureRetry::Stop) {
-                        ui.painter().rect_filled(rect, 6.0, palette.surface);
-                        theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, palette.danger);
-                        ui.painter().text(
-                            rect.center() + vec2(0.0, 24.0),
-                            Align2::CENTER_CENTER,
-                            "Could not display this picture. Click to open it.",
-                            theme::regular(11.5),
-                            palette.secondary,
-                        );
+                        if claim_heal(ui, message) {
+                            actions.push(Action::HealSticker { path: path.clone() });
+                            ui.painter().rect_filled(rect, 6.0, palette.surface);
+                            theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                        } else if path.exists() || matches!(media.state, MediaState::Failed(_)) {
+                            ui.painter().rect_filled(rect, 6.0, palette.surface);
+                            theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, palette.danger);
+                            ui.painter().text(
+                                rect.center() + vec2(0.0, 24.0),
+                                Align2::CENTER_CENTER,
+                                "Could not display this picture. Click to open it.",
+                                theme::regular(11.5),
+                                palette.secondary,
+                            );
+                        } else {
+                            // The broken copy is gone and its replacement is
+                            // on its way; keep loading instead of erroring.
+                            ui.ctx().forget_image(&uri);
+                            ui.painter().rect_filled(rect, 6.0, palette.surface);
+                            theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                        }
                     } else {
                         // A cache file still being written, or a decode that
                         // needs another pass: keep loading quietly.
@@ -3639,6 +3688,37 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broken_pictures_heal_exactly_once() {
+        let ctx = egui::Context::default();
+        let message = Message {
+            id: "m1".into(),
+            chat: "a@s.whatsapp.net".into(),
+            sender: "a@s.whatsapp.net".into(),
+            sender_name: None,
+            from_me: false,
+            timestamp: 0,
+            content: Content::text("hi"),
+            status: Delivery::None,
+            delivered_at: None,
+            read_at: None,
+            quoted: None,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        let claimed = std::cell::Cell::new((false, false));
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let first = claim_heal(ui, &message);
+            let second = claim_heal(ui, &message);
+            claimed.set((first, second));
+        });
+        output.textures_delta.clear();
+        assert_eq!(claimed.get(), (true, false));
+    }
 
     #[test]
     fn picture_retries_are_spaced_and_bounded() {

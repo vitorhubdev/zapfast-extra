@@ -76,6 +76,8 @@ pub struct Settings {
     pub names_from_contacts: bool,
     /// Also add saved contacts to the phone's address book.
     pub save_contacts_to_phone: bool,
+    /// Picker tab reopened above the composer. Old files default to emoji.
+    pub picker_tab: crate::model::PickerTab,
 }
 
 impl Default for Settings {
@@ -102,6 +104,7 @@ impl Default for Settings {
             download_updates_automatically: false,
             names_from_contacts: true,
             save_contacts_to_phone: true,
+            picker_tab: crate::model::PickerTab::Emoji,
         }
     }
 }

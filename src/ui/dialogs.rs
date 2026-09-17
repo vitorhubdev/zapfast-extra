@@ -34,6 +34,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::NewContact => 380.0,
                 Dialog::ChatInfo(_) => 360.0,
                 Dialog::Forward { .. } => 420.0,
+                Dialog::ConfirmSticker { .. } => 340.0,
                 Dialog::CreatePoll(_) => 420.0,
             });
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -46,11 +47,53 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::NewContact => new_contact(app, ui),
                 Dialog::ChatInfo(id) => chat_info(app, ui, &id),
                 Dialog::Forward { chat, message } => forward(app, ui, &chat, &message),
+                Dialog::ConfirmSticker { path } => confirm_sticker(app, ui, &path),
             }
         });
     if response.should_close() {
         app.actions.push(Action::CloseDialog);
     }
+}
+
+fn confirm_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
+    let palette = app.palette;
+    title(ui, app, "Send this sticker?");
+    let side = 180.0;
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+        if ui.is_rect_visible(rect) {
+            ui.painter().rect_filled(rect, 8.0, palette.surface);
+            egui::Image::new(crate::util::image_uri(path))
+                .fit_to_exact_size(vec2(side - 16.0, side - 16.0))
+                .paint_at(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), vec2(side - 16.0, side - 16.0)),
+                );
+        }
+    });
+    let exists = path.exists();
+    if !exists {
+        theme::paragraph(
+            ui,
+            "This sticker file is gone, so there is nothing to send.",
+            theme::regular(13.0),
+            palette.secondary,
+        );
+    }
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let send = ui.add_enabled_ui(exists, |ui| {
+                theme::pill_button(ui, &palette, "Send sticker", true).clicked()
+            });
+            if send.inner {
+                app.actions.push(Action::SendSticker(path.to_path_buf()));
+            }
+            if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
 }
 
 fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, message: &str) {

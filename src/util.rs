@@ -274,6 +274,26 @@ fn brazilian_phone(digits: &str) -> Option<String> {
     Some(format!("+55 {area} {head} {tail}"))
 }
 
+/// Reformats a stored name that is really a phone number.
+///
+/// Chats named before the Brazilian grouping landed keep the old generic
+/// shape in the archive. Address-book and profile names pass through
+/// untouched; a name made only of digits and phone formatting that holds a
+/// full number comes back in the readable shape (Brazilian when it applies).
+pub fn display_phone_name(name: &str) -> String {
+    let digits: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.len() < 10 {
+        return name.to_owned();
+    }
+    if name
+        .chars()
+        .all(|c| c.is_ascii_digit() || "+ .-()/".contains(c))
+    {
+        return phone(&digits);
+    }
+    name.to_owned()
+}
+
 /// Stable id-derived avatar hue.
 pub fn hue(seed: &str) -> f32 {
     let mut hash: u32 = 2_166_136_261;
@@ -487,6 +507,23 @@ mod tests {
         assert_eq!(phone("557596815245"), "+55 75 9681 5245");
         // A DDD outside the country's range stays on the generic grouping.
         assert_eq!(phone("5505995399345"), "+55 059 953 993 45");
+    }
+
+    #[test]
+    fn stored_number_names_display_in_the_national_shape() {
+        // Rows named before the Brazilian grouping keep the generic shape in
+        // the archive; display normalizes them without migrating rows.
+        assert_eq!(display_phone_name("+55 758 351 114 1"), "+55 75 8351 1141");
+        assert_eq!(display_phone_name("+55 759 968 152 4"), "+55 75 9968 1524");
+        assert_eq!(
+            display_phone_name("+55 75 9 9539 9345"),
+            "+55 75 9 9539 9345"
+        );
+        // Real names, short strings and digit-only ids pass through.
+        assert_eq!(display_phone_name("Amor"), "Amor");
+        assert_eq!(display_phone_name("Mae ❤"), "Mae ❤");
+        assert_eq!(display_phone_name("54"), "54");
+        assert_eq!(display_phone_name(""), "");
     }
 
     #[test]

@@ -276,6 +276,12 @@ pub enum Command {
     },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
+    /// Evicts a cached file that never decodes, clears its archive record
+    /// and fetches it again. Saved stickers and imported packs are the
+    /// user's own files and are never touched.
+    HealSticker {
+        path: PathBuf,
+    },
     React {
         chat: ChatId,
         message: String,

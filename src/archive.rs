@@ -898,6 +898,15 @@ impl Archive {
         Ok(())
     }
 
+    /// Forgets a phone sticker's file so it downloads again.
+    pub fn clear_sticker_path(&self, hash: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE stickers SET path = NULL WHERE hash = ?1",
+            params![hash],
+        )?;
+        Ok(())
+    }
+
     /// Returns raw messages for re-deriving fields in newer versions.
     pub fn rows_with_raw(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
         let mut statement = self

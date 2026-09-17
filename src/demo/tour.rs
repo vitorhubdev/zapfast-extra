@@ -206,6 +206,8 @@ fn script() -> Vec<Cue> {
     add(17.4, Click(left));
     add(18.0, Move(Sticker));
     add(18.5, Click(left));
+    add(19.1, Move(Label("Send sticker")));
+    add(19.5, Click(left));
     add(
         20.2,
         Key(egui::Key::ArrowDown, Modifiers::ALT, "Alt + ↓ · Next chat"),

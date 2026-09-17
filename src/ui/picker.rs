@@ -553,9 +553,10 @@ fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 /// What a click or the right-click menu asked of a sticker tile.
 #[derive(Default)]
 struct StickerChoices {
-    send: Option<std::path::PathBuf>,
     save: Option<std::path::PathBuf>,
     forget: Option<std::path::PathBuf>,
+    heal: Vec<std::path::PathBuf>,
+    preview: Option<std::path::PathBuf>,
 }
 
 fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
@@ -588,7 +589,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         .show(ui, |ui| {
             if !saved.is_empty() {
                 theme::text(ui, "My stickers", theme::semibold(12.5), palette.secondary);
-                sticker_grid(ui, palette, &saved, true, &mut choices);
+                sticker_grid(ui, palette, &saved, true, false, &mut choices);
                 ui.add_space(8.0);
             }
             for pack in &packs {
@@ -609,7 +610,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                         }
                     });
                 });
-                sticker_grid(ui, palette, &pack.stickers, false, &mut choices);
+                sticker_grid(ui, palette, &pack.stickers, false, false, &mut choices);
                 ui.add_space(8.0);
             }
             if !recent.is_empty() {
@@ -619,14 +620,22 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     theme::semibold(12.5),
                     palette.secondary,
                 );
-                sticker_grid(ui, palette, &recent, false, &mut choices);
+                // Recent copies live in caches the app owns, so broken tiles
+                // heal instead of warning forever.
+                sticker_grid(ui, palette, &recent, false, true, &mut choices);
             }
         });
-    if let Some(path) = choices.send {
-        app.actions.push(Action::SendSticker(path));
-    }
     if let Some(path) = choices.save {
         app.actions.push(Action::SaveSticker(path));
+    }
+    for path in choices.heal {
+        app.actions.push(Action::HealSticker { path });
+    }
+    if let Some(path) = choices.preview {
+        app.actions
+            .push(Action::ShowDialog(crate::model::Dialog::ConfirmSticker {
+                path,
+            }));
     }
     if let Some(path) = choices.forget {
         app.actions.push(Action::ForgetSticker(path));
@@ -704,6 +713,7 @@ fn sticker_grid(
     palette: &Palette,
     stickers: &[std::path::PathBuf],
     saved: bool,
+    cache: bool,
     choices: &mut StickerChoices,
 ) {
     let columns = 5;
@@ -739,7 +749,7 @@ fn sticker_grid(
                             _ => false,
                         };
                     if !played {
-                        sticker_picture(ui, path, shown);
+                        sticker_picture(ui, palette, path, shown, cache, choices);
                     }
                 }
                 egui::Popup::context_menu(&response)
@@ -763,7 +773,8 @@ fn sticker_grid(
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    choices.send = Some(path.clone());
+                    // Clicking only previews: sending asks first.
+                    choices.preview = Some(path.clone());
                 }
             }
         });
@@ -786,8 +797,43 @@ fn moves(path: &Path) -> bool {
         && head.windows(4).any(|window| window == b"ANIM")
 }
 
-fn sticker_picture(ui: &egui::Ui, path: &Path, rect: Rect) {
-    egui::Image::new(crate::util::image_uri(path))
-        .fit_to_exact_size(rect.size())
-        .paint_at(ui, rect);
+/// Paths whose broken copy was already evicted for a fresh download.
+#[derive(Clone, Default)]
+struct HealedStickers(std::collections::HashSet<std::path::PathBuf>);
+
+/// Claims the single self-heal for a cache tile that never decodes.
+fn claim_heal_path(ui: &egui::Ui, path: &Path) -> bool {
+    ui.ctx().data_mut(|data| {
+        data.get_temp_mut_or_default::<HealedStickers>(egui::Id::new("sticker-heal"))
+            .0
+            .insert(path.to_path_buf())
+    })
+}
+
+/// Paints a sticker tile, healing cache copies that never decode.
+///
+/// Saved stickers and imported packs are the user's own files: a tile that
+/// fails keeps egui's own warning. Phone and recent copies live in caches
+/// the app owns, so the first persistent failure deletes the broken copy
+/// and asks the worker for a fresh one instead of warning forever.
+fn sticker_picture(
+    ui: &egui::Ui,
+    palette: &Palette,
+    path: &Path,
+    rect: Rect,
+    cache: bool,
+    choices: &mut StickerChoices,
+) {
+    let image = egui::Image::new(crate::util::image_uri(path)).fit_to_exact_size(rect.size());
+    match image.load_for_size(ui.ctx(), rect.size()) {
+        Ok(_) => image.paint_at(ui, rect),
+        _ if cache && claim_heal_path(ui, path) => {
+            choices.heal.push(path.to_path_buf());
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 8.0, palette.surface);
+                theme::paint_spinner(ui, rect, 20.0, palette.accent);
+            }
+        }
+        _ => image.paint_at(ui, rect),
+    }
 }

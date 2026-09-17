@@ -98,7 +98,10 @@ without embedding a browser engine.
 - **Emoji, GIF, and sticker picker.** Search emoji and GIFs, and save stickers
   with a right-click. The sticker tab lists saved stickers first, then imported
   packs, then the phone's recent list and the stickers you sent; a sticker that
-  only passed through a chat is never offered. Emoji autocomplete and picker
+  only passed through a chat is never offered. Clicking a sticker previews it
+  for confirmation before sending, and the picker reopens on the last used
+  tab. Tiles that fail to load retry with a fresh download instead of
+  sticking on an error. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
   GIF search needs a free GIPHY API key unless the build includes one.
 - **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`

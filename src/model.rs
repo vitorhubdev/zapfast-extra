@@ -464,8 +464,10 @@ pub enum Page {
 }
 
 /// The tabs of the picker above the composer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PickerTab {
+    #[default]
     Emoji,
     Gifs,
     Stickers,
@@ -512,6 +514,10 @@ pub enum Dialog {
     Forward {
         chat: ChatId,
         message: String,
+    },
+    /// Confirms sending a sticker, showing it first.
+    ConfirmSticker {
+        path: PathBuf,
     },
     CreatePoll(ChatId),
 }
@@ -641,6 +647,10 @@ pub enum Action {
     },
     CloseMentions,
     SendSticker(PathBuf),
+    /// Deletes a cached file that never decodes and downloads it again.
+    HealSticker {
+        path: PathBuf,
+    },
     /// Saves a sticker for the picker.
     SaveSticker(PathBuf),
     /// Removes a saved sticker.
