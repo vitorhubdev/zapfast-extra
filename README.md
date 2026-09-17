@@ -61,7 +61,9 @@ without embedding a browser engine.
   recover previously lost mute settings and pin order, without relinking.
 - **Voice messages.** Play, seek, record, reply with, and send voice messages
   in the chat. The app normalizes quiet recordings and handles OGG/Opus
-  without external tools.
+  without external tools. A chip on every audio bubble walks through 1x, 1.5x
+  and 2x, and Settings offers the same. When a clip ends, the next one in the
+  chat plays on its own unless you turn that off (Settings, Audio).
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
   You can swap these keys in Settings. The composer is focused when you open
   or return to a conversation; invoking search keeps focus in search, and

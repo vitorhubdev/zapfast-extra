@@ -2,6 +2,24 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.13] - 2026-09-17
+
+### Changed
+
+- Voice messages and audio play faster when you want them to. Every audio
+  bubble carries a speed chip that walks through 1x, 1.5x and 2x, and Settings
+  has the same control under Audio. The choice is saved. Speed is playback
+  only, so the file, the waveform and the played receipt are unchanged.
+- When a voice message or audio clip reaches its end, the next one in the same
+  chat starts on its own, passing over text and clips without a file, the way
+  the phone behaves. Settings has a switch for it.
+
+### Tests
+
+- Added autoplay_takes_the_next_audio_that_has_a_file,
+  the_speed_button_walks_the_supported_speeds and
+  audio_speed_walks_a_fixed_cycle.
+
 ## [1.0.12] - 2026-09-17
 
 ### Changed

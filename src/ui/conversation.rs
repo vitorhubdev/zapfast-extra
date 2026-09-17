@@ -1251,6 +1251,8 @@ struct View<'a> {
     avatars: &'a HashMap<String, Option<PathBuf>>,
     now: i64,
     player: &'a crate::audio::Player,
+    /// Playback speed for voice messages and audio.
+    audio_speed: f32,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
     /// Multi-select mode: row taps toggle instead of opening.
     selecting: bool,
@@ -1297,6 +1299,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         avatars: &avatars,
         now: crate::util::now(),
         player: &app.player,
+        audio_speed: app.settings.audio_speed,
         copy_rows: app.copy_rows.as_ref(),
         selecting: !app.selected.is_empty(),
         selected: app.selected.clone(),
@@ -3747,7 +3750,29 @@ fn voice_player(
                     MediaState::Failed(error) => format!("{error}. Click to retry."),
                     _ => shown,
                 };
-                theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                let speed = crate::settings::snap_audio_speed(view.audio_speed);
+                let label = if speed.fract() == 0.0 {
+                    format!("{}x", speed as i32)
+                } else {
+                    format!("{speed}x")
+                };
+                // An explicit direction keeps the chip at the far end of the
+                // time row in outgoing bubbles too.
+                ui.allocate_ui_with_layout(
+                    vec2(wave_width, 16.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        theme::text(ui, text, theme::regular(11.5), palette.secondary);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if theme::link(ui, label, theme::medium(11.5), palette.accent)
+                                .on_hover_text("Playback speed")
+                                .clicked()
+                            {
+                                actions.push(Action::CycleAudioSpeed);
+                            }
+                        });
+                    },
+                );
             });
         },
     );

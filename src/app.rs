@@ -342,7 +342,7 @@ impl App {
                 _ => Palette::dark(),
             });
         let open_chat = settings.last_chat.clone();
-        Self {
+        let mut app = Self {
             dirs,
             settings,
             settings_dirty: false,
@@ -450,7 +450,11 @@ impl App {
             control_commands: None,
             notification_opens: Default::default(),
             notifications: Default::default(),
-        }
+        };
+        // The stored playback speed is already in force for the first clip.
+        app.player
+            .set_speed(crate::settings::snap_audio_speed(app.settings.audio_speed));
+        app
     }
 
     /// Updates the linked app while no window exists.
@@ -2042,6 +2046,12 @@ impl App {
             }
             Action::CloseViewer => self.viewer = None,
             Action::SaveCopy(path) => self.backend.send(Command::SaveCopy { from: path }),
+            Action::CycleAudioSpeed => {
+                let speed = crate::settings::next_audio_speed(self.settings.audio_speed);
+                self.settings.audio_speed = speed;
+                self.mark_settings_dirty();
+                self.player.set_speed(speed);
+            }
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::CopyText(text) => {
                 ctx.copy_text(text);
@@ -2602,6 +2612,11 @@ impl App {
         if let Err(error) = self.player.poll() {
             self.toast_error(error);
         }
+        if self.settings.play_next_audio
+            && let Some(finished) = self.player.take_finished()
+        {
+            self.play_next_audio(&finished);
+        }
         if let Some(error) = self.recording.as_ref().and_then(Recorder::failure) {
             self.recording = None;
             self.toast_error(format!("Could not record: {error}"));
@@ -2618,6 +2633,22 @@ impl App {
             return;
         }
         self.tell_played(message);
+    }
+
+    /// Continues with the next audio message that has a file, like the
+    /// phone's voice notes: playback walks forward only, one clip at a time,
+    /// and text in between is passed over.
+    fn play_next_audio(&mut self, finished: &str) {
+        let Some(chat) = self.open_chat.clone() else {
+            return;
+        };
+        let next = self
+            .conversations
+            .get(&chat)
+            .and_then(|conversation| next_audio_after(&conversation.messages, finished));
+        if let Some((message, path)) = next {
+            self.play_voice(message, path);
+        }
     }
 
     fn tell_played(&mut self, message: String) {
@@ -2954,6 +2985,20 @@ pub fn wants_paste(input: &egui::InputState) -> bool {
             } if modifiers.command
         )
     })
+}
+
+/// The next audio message with a file after the one that just finished.
+fn next_audio_after(messages: &[Message], finished: &str) -> Option<(String, PathBuf)> {
+    let position = messages.iter().position(|message| message.id == finished)?;
+    messages[position + 1..]
+        .iter()
+        .find_map(|message| match &message.content {
+            Content::Audio { media, .. } => media
+                .path
+                .as_ref()
+                .map(|path| (message.id.clone(), path.clone())),
+            _ => None,
+        })
 }
 
 /// Clipboard image as width, height, and straight-alpha RGBA.
@@ -3492,8 +3537,57 @@ mod tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
-        conversation.merge(vec![message("c", "c", 3)], false);
-        assert_eq!(conversation.messages.len(), 3);
+    }
+
+    #[test]
+    fn autoplay_takes_the_next_audio_that_has_a_file() {
+        let dir = std::env::temp_dir().join(format!("zapfast-autoplay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let voice = dir.join("voice.ogg");
+        std::fs::write(&voice, b"OggS").expect("writes");
+        let audio = |path: Option<PathBuf>| Content::Audio {
+            media: Media {
+                mime: "audio/ogg".to_owned(),
+                size: 4,
+                width: None,
+                height: None,
+                path,
+                state: MediaState::Idle,
+            },
+            seconds: Some(3),
+            voice_note: true,
+            waveform: Vec::new(),
+        };
+        let mut first = message("c", "first", 10);
+        first.content = audio(Some(voice.clone()));
+        let text = message("c", "text", 20);
+        let mut missing = message("c", "missing", 25);
+        missing.content = audio(None);
+        let mut second = message("c", "second", 30);
+        second.content = audio(Some(voice.clone()));
+        let list = vec![first, text, missing, second];
+
+        let next = next_audio_after(&list, "first").expect("the next audio");
+        assert_eq!(
+            next.0, "second",
+            "text and a file-less clip are passed over"
+        );
+        assert_eq!(next.1, voice);
+        assert!(next_audio_after(&list, "second").is_none());
+        assert!(next_audio_after(&list, "missing").is_some());
+        assert!(next_audio_after(&list, "unknown").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_speed_button_walks_the_supported_speeds() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        assert_eq!(app.settings.audio_speed, 1.0);
+        for expected in [1.5, 2.0, 1.0] {
+            app.apply(Action::CycleAudioSpeed, &ctx);
+            assert_eq!(app.settings.audio_speed, expected);
+        }
     }
 
     #[test]

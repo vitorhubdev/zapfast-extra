@@ -677,6 +677,8 @@ pub enum Action {
     CloseViewer,
     /// Asks for a path and saves a copy of a file the app shows.
     SaveCopy(PathBuf),
+    /// Steps the audio playback speed through its fixed cycle.
+    CycleAudioSpeed,
     OpenUrl(String),
     CopyText(String),
     /// Starts a reply to a message in the open chat.

@@ -78,6 +78,10 @@ pub struct Player {
     decoding: Option<Decoding>,
     /// Generated waveforms for clips that did not include one.
     bars: HashMap<String, Vec<u8>>,
+    /// Playback speed applied to every clip.
+    speed: f32,
+    /// The message that finished playing, reported once for autoplay.
+    finished: Option<String>,
 }
 
 struct Loaded {
@@ -223,7 +227,25 @@ impl Player {
             loaded: None,
             decoding: None,
             bars: HashMap::new(),
+            speed: 1.0,
+            finished: None,
         }
+    }
+
+    /// Sets the playback speed of this clip and the ones after it.
+    ///
+    /// Rodio speeds a clip up by resampling, so the voice rises in pitch the
+    /// same way WhatsApp's own faster playback does.
+    pub fn set_speed(&mut self, speed: f32) {
+        self.speed = speed.clamp(0.5, 3.0);
+        if let Some((_, sink)) = &self.output {
+            sink.set_speed(self.speed);
+        }
+    }
+
+    /// The message that just reached its end, reported once.
+    pub fn take_finished(&mut self) -> Option<String> {
+        self.finished.take()
     }
 
     /// Plays or pauses a message. Finished clips decode again; new clips decode first.
@@ -258,6 +280,7 @@ impl Player {
         self.output = None;
         self.loaded = None;
         self.decoding = None;
+        self.finished = None;
     }
 
     /// Deletes the spool file behind the loaded clip, if any.
@@ -398,6 +421,7 @@ impl Player {
                 if let Clip::File { spool, .. } = &loaded.clip {
                     let _ = std::fs::remove_file(spool);
                 }
+                self.finished = Some(loaded.message.clone());
                 loaded.clip = Clip::Released;
             }
             self.output = None;
@@ -497,6 +521,7 @@ impl Player {
         }
         let (_, sink) = self.output.as_ref().expect("just opened");
         sink.clear();
+        sink.set_speed(self.speed);
         // Seeking never copies the tail anymore: memory clips play from the
         // shared samples at an offset, file clips stream from their spool.
         let base = match start {

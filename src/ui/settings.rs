@@ -122,6 +122,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     toggle(ui, app, "Save contacts to the phone's address book", "Also add contacts saved here to your phone's address book. When off, they remain WhatsApp contacts. Names sync to linked devices either way.", |settings| &mut settings.save_contacts_to_phone);
                     toggle(ui, app, "Show shortcut hints", "", |settings| &mut settings.show_shortcut_hints);
 
+                    section(ui, app, "Audio");
+                    widgets::setting_row(
+                        ui,
+                        &palette,
+                        "Playback speed",
+                        "Voice messages and audio play at this speed. The same control sits in every audio bubble.",
+                        |ui| {
+                            let speed = crate::settings::snap_audio_speed(app.settings.audio_speed);
+                            let label = if speed.fract() == 0.0 {
+                                format!("{}x", speed as i32)
+                            } else {
+                                format!("{speed}x")
+                            };
+                            if theme::soft_button(ui, &palette, None, &label, false).clicked() {
+                                app.actions.push(Action::CycleAudioSpeed);
+                            }
+                        },
+                    );
+                    toggle(ui, app, "Play the next audio automatically", "When a voice message or audio clip ends, continue with the next one in the same chat.", |settings| &mut settings.play_next_audio);
+
                     section(ui, app, "Window");
                     toggle(ui, app, "Keep running when the window closes", "Keep ZapExt linked in the system tray. Quit from the tray menu or with Ctrl+Q.", |settings| &mut settings.keep_running_in_background);
                     toggle(ui, app, "Notify about new messages", "Show desktop notifications when the window is hidden, in the background, or showing another chat. Muted chats do not notify you.", |settings| &mut settings.notifications);
