@@ -2,7 +2,7 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
-## [1.0.5] - 2026-09-16
+## [1.0.5] - 2026-09-17
 
 ### Fixed
 
