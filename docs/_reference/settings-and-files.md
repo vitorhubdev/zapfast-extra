@@ -16,7 +16,6 @@ ZapFast follows each platform's conventions. On Linux:
 | Attachments | `~/.cache/zapfast/media/` | Yes; available files download again when viewed |
 | Profile pictures | `~/.cache/zapfast/avatars/` | Always |
 | Stickers | `~/.cache/zapfast/stickers/` | Always |
-| GIF search stills | `~/.cache/zapfast/gifs/` | Always |
 | Last run's log | `~/.local/state/zapfast/zapfast.log` | Always |
 | Crash log | `~/.local/state/zapfast/panic.log` | Always |
 
@@ -54,9 +53,6 @@ Changes on the Settings page are saved to `settings.json` immediately:
   window closes.
 - **Notifications**: use desktop notifications with the chat picture.
 - **Check for updates**: ask GitHub once a day whether a newer release exists.
-- **GIPHY API key**: required for GIF search unless the build includes one.
-  Set `ZAPFAST_GIPHY_KEY` at compile time to include a default key.
-  The earlier `FASTSAPP_GIPHY_KEY` remains a fallback for existing builds.
 
 ## The log
 

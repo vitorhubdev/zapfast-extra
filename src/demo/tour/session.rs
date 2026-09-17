@@ -108,11 +108,6 @@ pub fn respond(app: &mut App) {
                 );
                 append(app, row);
             }
-            Command::SearchGifs { .. } => {
-                // The offline results were rendered before the tour began.
-                app.gif_pending = false;
-                app.gif_error = None;
-            }
             Command::RecentStickers => app.stickers_pending = false,
             Command::React {
                 chat,

@@ -1,4 +1,4 @@
-//! The picker above the composer: emoji, GIFs, and stickers.
+//! The picker above the composer: emoji and stickers.
 
 use std::path::Path;
 
@@ -64,7 +64,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         egui::Layout::top_down(egui::Align::Min),
                         |ui| match tab {
                             PickerTab::Emoji => emoji_tab(app, ui, &palette),
-                            PickerTab::Gifs => gif_tab(app, ui, &palette),
                             PickerTab::Stickers => sticker_tab(app, ui, &palette),
                         },
                     );
@@ -93,7 +92,6 @@ fn tabs(app: &mut App, ui: &mut egui::Ui, palette: &Palette, current: PickerTab)
     ui.horizontal(|ui| {
         let entries = [
             (PickerTab::Emoji, Icon::Smile, "Emoji"),
-            (PickerTab::Gifs, Icon::Gif, "GIF"),
             (PickerTab::Stickers, Icon::Sticker, "Stickers"),
         ];
         let spacing = ui.spacing().item_spacing.x;
@@ -401,150 +399,6 @@ mod emoji_tests {
         assert_eq!(move_emoji_selection(10, 25, 10, Key::ArrowUp), 0);
         assert_eq!(move_emoji_selection(20, 25, 10, Key::ArrowDown), 20);
         assert_eq!(move_emoji_selection(24, 25, 10, Key::ArrowRight), 24);
-    }
-}
-
-// --- GIFs ---------------------------------------------------------------
-
-fn gif_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
-    // Ask for a key when none is set or GIPHY rejects it.
-    let bad_key = app.gif_error.as_ref().is_some_and(|error| error.bad_key);
-    if app.settings.effective_giphy_key().is_none() || bad_key {
-        ui.add_space(8.0);
-        if let Some(error) = app.gif_error.as_ref().filter(|error| error.bad_key) {
-            theme::paragraph(ui, &error.message, theme::regular(13.0), palette.danger);
-            ui.add_space(6.0);
-        }
-        theme::paragraph(
-            ui,
-            if bad_key {
-                "This GIPHY API key was rejected. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
-            } else {
-                "GIF search needs a GIPHY API key. Create a free key at developers.giphy.com and paste it here. It is saved in your settings."
-            },
-            theme::regular(13.0),
-            palette.text,
-        );
-        ui.add_space(6.0);
-        if theme::link(
-            ui,
-            "developers.giphy.com",
-            theme::medium(13.0),
-            palette.link,
-        )
-        .clicked()
-        {
-            app.actions
-                .push(Action::OpenUrl("https://developers.giphy.com/".to_owned()));
-        }
-        ui.add_space(6.0);
-        Frame::new()
-            .fill(palette.surface)
-            .corner_radius(CornerRadius::same(theme::RADIUS))
-            .inner_margin(Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut app.settings.giphy_key)
-                        .hint_text(
-                            egui::RichText::new("GIPHY API key")
-                                .color(palette.dim)
-                                .font(theme::regular(13.5)),
-                        )
-                        .font(theme::regular(13.5))
-                        .text_color(palette.text)
-                        .frame(Frame::NONE)
-                        .desired_width(f32::INFINITY),
-                );
-                if response.changed() {
-                    app.actions.push(Action::SettingsChanged);
-                }
-                if response.lost_focus() && !app.settings.giphy_key.trim().is_empty() {
-                    app.actions.push(Action::SearchGifs(String::new()));
-                }
-            });
-        return;
-    }
-    let mut query = app.picker_search.clone();
-    let submit = ui.memory(|memory| memory.has_focus(egui::Id::new("gif-search")))
-        && ui.input_mut(|input| input.consume_key(Modifiers::NONE, Key::Enter));
-    search_box(
-        ui,
-        palette,
-        "gif-search",
-        &mut query,
-        "Search GIFs via GIPHY",
-    );
-    if query != app.picker_search {
-        app.picker_search = query.clone();
-    }
-    if submit && query.trim() != app.gif_query.trim() {
-        app.actions.push(Action::SearchGifs(query));
-    }
-    if app.gif_pending {
-        ui.horizontal(|ui| {
-            theme::spinner(ui, 16.0, palette.accent);
-            theme::text(ui, "Searching…", theme::regular(12.5), palette.secondary);
-        });
-    } else if let Some(error) = &app.gif_error {
-        theme::paragraph(ui, &error.message, theme::regular(13.0), palette.danger);
-    }
-    let results = app.gif_results.clone();
-    let columns = 3;
-    let gap = 6.0;
-    let tile_width = (ui.available_width() - gap * (columns as f32 - 1.0)) / columns as f32;
-    let mut picked = None;
-    egui::ScrollArea::vertical()
-        .id_salt("gif-grid")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(gap, gap);
-            for row in results.chunks(columns) {
-                ui.horizontal(|ui| {
-                    for gif in row {
-                        let ratio =
-                            (gif.height.max(1) as f32 / gif.width.max(1) as f32).clamp(0.5, 1.4);
-                        let size = vec2(tile_width, (tile_width * ratio).min(150.0));
-                        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
-                        if ui.is_rect_visible(rect) {
-                            ui.painter().rect_filled(rect, 6.0, palette.surface);
-                            if let Some(still) = &gif.still {
-                                egui::Image::new(crate::util::image_uri(still))
-                                    .fit_to_exact_size(size)
-                                    .corner_radius(6.0)
-                                    .paint_at(ui, rect);
-                            }
-                            if response.hovered() {
-                                ui.painter().rect_stroke(
-                                    rect,
-                                    6.0,
-                                    Stroke::new(2.0, palette.accent),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                        }
-                        if response
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
-                            picked = Some(gif.clone());
-                        }
-                    }
-                });
-            }
-            if results.is_empty() && !app.gif_pending && app.gif_error.is_none() {
-                ui.add_space(20.0);
-                ui.vertical_centered(|ui| {
-                    theme::text(
-                        ui,
-                        "Search for a GIF or browse trending results.",
-                        theme::regular(13.0),
-                        palette.secondary,
-                    );
-                });
-            }
-        });
-    if let Some(gif) = picked {
-        app.actions.push(Action::SendGif(gif));
     }
 }
 

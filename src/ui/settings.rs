@@ -128,28 +128,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     toggle(ui, app, "Download updates automatically", "Download and verify new releases in the background. You choose when to restart. Native packages and Flatpak update through their package manager.", |settings| &mut settings.download_updates_automatically);
                     toggle(ui, app, "Check for updates", "Ask GitHub once a day whether a newer ZapExt release exists. The request identifies only ZapExt and its version.", |settings| &mut settings.check_for_updates);
 
-                    widgets::setting_row(
-                        ui,
-                        &palette,
-                        "GIPHY API key",
-                        if crate::settings::BUILT_IN_GIPHY_KEY.is_some() {
-                            "Used for GIF search. This build includes a key. Enter a key from developers.giphy.com to replace it."
-                        } else {
-                            "Required for GIF search. Get a free key from developers.giphy.com."
-                        },
-                        |ui| {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut app.settings.giphy_key)
-                                    .font(theme::regular(13.0))
-                                    .text_color(palette.text)
-                                    .desired_width(220.0),
-                            );
-                            if response.changed() {
-                                app.actions.push(Action::SettingsChanged);
-                            }
-                        },
-                    );
-
                     section(ui, app, "Account");
                     let name = app.me_name.clone().unwrap_or_default();
                     let me = app.me.clone().unwrap_or_default();

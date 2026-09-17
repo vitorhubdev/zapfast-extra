@@ -485,7 +485,6 @@ pub const FREQUENT_FORWARD_SCORE: u32 = 5;
 pub enum PickerTab {
     #[default]
     Emoji,
-    Gifs,
     Stickers,
 }
 
@@ -495,25 +494,6 @@ pub struct StickerPack {
     pub name: String,
     pub dir: PathBuf,
     pub stickers: Vec<PathBuf>,
-}
-
-/// GIF search failure.
-#[derive(Clone, Debug, PartialEq)]
-pub struct GifError {
-    pub message: String,
-    /// GIPHY rejected the API key.
-    pub bad_key: bool,
-}
-
-/// A GIF found through GIPHY.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Gif {
-    pub id: String,
-    /// Downloaded still-frame path.
-    pub still: Option<PathBuf>,
-    pub mp4: String,
-    pub width: u32,
-    pub height: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -717,9 +697,6 @@ pub enum Action {
         first: String,
         last: String,
     },
-    /// Searches GIFs or lists trending results for an empty query.
-    SearchGifs(String),
-    SendGif(Gif),
     React {
         chat: ChatId,
         message: String,

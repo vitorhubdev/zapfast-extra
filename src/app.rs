@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Waker};
 use crate::model::{
-    Action, Chat, ChatId, Contact, Content, Delivery, Dialog, Gif, GifError, Media, MediaState,
-    Message, Page, PickerTab, StickerPack, Toast, ToastKind,
+    Action, Chat, ChatId, Contact, Content, Delivery, Dialog, Media, MediaState, Message, Page,
+    PickerTab, StickerPack, Toast, ToastKind,
 };
 use crate::paths::AppDirs;
 use crate::settings::{Settings, ThemeChoice};
@@ -187,11 +187,6 @@ pub struct App {
     pub copy_rows: std::sync::Arc<std::sync::Mutex<Vec<crate::transcript::Row>>>,
     /// Previous message-list rect used by the selection hook.
     pub selection_view: std::sync::Arc<std::sync::Mutex<Option<egui::Rect>>>,
-    pub gif_query: String,
-    pub gif_results: Vec<Gif>,
-    /// Whether a GIF search is active.
-    pub gif_pending: bool,
-    pub gif_error: Option<GifError>,
     pub stickers: Vec<PathBuf>,
     /// Saved stickers, newest first.
     pub stickers_saved: Vec<PathBuf>,
@@ -399,10 +394,6 @@ impl App {
             played_told: HashSet::new(),
             copy_rows: Default::default(),
             selection_view: Default::default(),
-            gif_query: String::new(),
-            gif_results: Vec::new(),
-            gif_pending: false,
-            gif_error: None,
             stickers: Vec::new(),
             stickers_saved: Vec::new(),
             sticker_packs: Vec::new(),
@@ -1114,21 +1105,6 @@ impl App {
                     } else {
                         self.avatar_requests.remove(&id);
                         self.avatars.insert(id, path);
-                    }
-                }
-                Event::Gifs { query, results } => {
-                    if query == self.gif_query {
-                        self.gif_pending = false;
-                        match results {
-                            Ok(results) => {
-                                self.gif_results = results;
-                                self.gif_error = None;
-                            }
-                            Err(error) => {
-                                self.gif_results.clear();
-                                self.gif_error = Some(error);
-                            }
-                        }
                     }
                 }
                 Event::Stickers {
@@ -2150,9 +2126,6 @@ impl App {
                             && self.sticker_packs.is_empty();
                         self.backend.send(Command::RecentStickers);
                     }
-                    if tab == PickerTab::Gifs && self.gif_results.is_empty() {
-                        self.actions.push(Action::SearchGifs(String::new()));
-                    }
                 }
             }
             Action::ClosePicker => {
@@ -2241,25 +2214,6 @@ impl App {
                 if let Some(chat) = self.open_chat.clone() {
                     self.backend.send(Command::SendSticker { chat, path });
                     self.dialog = None;
-                    self.picker = None;
-                    self.scroll_to_bottom = true;
-                    self.at_bottom = true;
-                    self.refocus_composer(ctx);
-                }
-            }
-            Action::SearchGifs(query) => {
-                self.gif_query = query.clone();
-                self.gif_pending = true;
-                self.gif_error = None;
-                self.backend.send(Command::SearchGifs {
-                    query,
-                    key: self.settings.effective_giphy_key().unwrap_or_default(),
-                });
-            }
-            Action::SendGif(gif) => {
-                if let Some(chat) = self.open_chat.clone() {
-                    self.toast("Sending GIF…");
-                    self.backend.send(Command::SendGif { chat, gif });
                     self.picker = None;
                     self.scroll_to_bottom = true;
                     self.at_bottom = true;
@@ -3029,7 +2983,11 @@ mod tests {
         app.apply(Action::CheckUpdatesNow, &ctx);
         // Offline: tapping explains instead of spinning forever.
         assert!(!app.update_checking);
-        assert!(app.toasts.iter().any(|toast| toast.message.contains("Connect to check")));
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("Connect to check"))
+        );
         // Pretend a check is in flight; every worker answer resolves it.
         app.update_checking = true;
         events.send(Event::UpdateUpToDate).unwrap();

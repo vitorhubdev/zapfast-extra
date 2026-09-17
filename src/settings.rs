@@ -62,8 +62,6 @@ pub struct Settings {
     pub show_shortcut_hints: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
-    /// User GIPHY API key. Empty uses the optional built-in key.
-    pub giphy_key: String,
     /// Keep the app linked in the tray when the window closes.
     pub keep_running_in_background: bool,
     /// Desktop notifications while away from the chat.
@@ -77,6 +75,7 @@ pub struct Settings {
     /// Also add saved contacts to the phone's address book.
     pub save_contacts_to_phone: bool,
     /// Picker tab reopened above the composer. Old files default to emoji.
+    #[serde(default, deserialize_with = "picker_tab_from_name")]
     pub picker_tab: crate::model::PickerTab,
 }
 
@@ -97,7 +96,6 @@ impl Default for Settings {
             last_chat: None,
             show_shortcut_hints: true,
             recent_emoji: Vec::new(),
-            giphy_key: String::new(),
             keep_running_in_background: true,
             notifications: true,
             check_for_updates: true,
@@ -109,13 +107,6 @@ impl Default for Settings {
     }
 }
 
-/// Optional build-time GIPHY key from `ZAPFAST_GIPHY_KEY`.
-/// The previous name remains accepted for existing build setups.
-pub const BUILT_IN_GIPHY_KEY: Option<&str> = match option_env!("ZAPFAST_GIPHY_KEY") {
-    Some(key) if !key.is_empty() => Some(key),
-    _ => option_env!("FASTSAPP_GIPHY_KEY"),
-};
-
 impl Settings {
     pub(crate) fn cached_palette(&self) -> Option<crate::theme::Palette> {
         let theme = if self.custom_theme.is_some() {
@@ -126,18 +117,6 @@ impl Settings {
             None
         };
         theme.map(|theme| theme.palette)
-    }
-
-    /// Returns the user key, built-in key, or `None`.
-    pub fn effective_giphy_key(&self) -> Option<String> {
-        let own = self.giphy_key.trim();
-        if !own.is_empty() {
-            return Some(own.to_owned());
-        }
-        BUILT_IN_GIPHY_KEY
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_owned)
     }
 
     pub fn load(path: &Path) -> Self {
@@ -169,6 +148,22 @@ impl Settings {
     }
 }
 
+/// Reads the stored picker tab, mapping retired names to emoji.
+///
+/// The picker once had a GIF tab. A file written then still has to open with
+/// every other setting intact, so an unknown name falls back to emoji instead
+/// of discarding the whole file.
+fn picker_tab_from_name<'de, D>(deserializer: D) -> Result<crate::model::PickerTab, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name = String::deserialize(deserializer)?;
+    Ok(match name.as_str() {
+        "stickers" => crate::model::PickerTab::Stickers,
+        _ => crate::model::PickerTab::Emoji,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +187,18 @@ mod tests {
     }
 
     #[test]
+    fn a_retired_gif_picker_tab_keeps_the_other_settings() {
+        let settings: Settings =
+            serde_json::from_str(r#"{"picker_tab":"gifs","zoom":1.25,"enter_sends":false}"#)
+                .unwrap();
+        assert_eq!(settings.picker_tab, crate::model::PickerTab::Emoji);
+        assert_eq!(settings.zoom, 1.25);
+        assert!(!settings.enter_sends);
+        let stickers: Settings = serde_json::from_str(r#"{"picker_tab":"stickers"}"#).unwrap();
+        assert_eq!(stickers.picker_tab, crate::model::PickerTab::Stickers);
+    }
+
+    #[test]
     fn round_trips_through_disk() {
         let dir = std::env::temp_dir().join(format!("zapfast-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
@@ -203,32 +210,5 @@ mod tests {
         settings.save(&path).expect("saves");
         assert_eq!(Settings::load(&path), settings);
         let _ = std::fs::remove_dir_all(dir);
-    }
-}
-
-#[cfg(test)]
-mod giphy_tests {
-    use super::*;
-
-    #[test]
-    fn the_users_key_wins_and_is_trimmed() {
-        let settings = Settings {
-            giphy_key: "  abc  ".into(),
-            ..Settings::default()
-        };
-        assert_eq!(settings.effective_giphy_key().as_deref(), Some("abc"));
-    }
-
-    #[test]
-    fn without_a_key_of_their_own_the_built_in_one_is_used() {
-        let settings = Settings {
-            giphy_key: "   ".into(),
-            ..Settings::default()
-        };
-        let expected = BUILT_IN_GIPHY_KEY
-            .map(str::trim)
-            .filter(|key| !key.is_empty())
-            .map(str::to_owned);
-        assert_eq!(settings.effective_giphy_key(), expected);
     }
 }

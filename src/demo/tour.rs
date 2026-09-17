@@ -18,7 +18,7 @@ use std::{
 
 const PHOTO_CAPTION: &str = "A little poster for launch day ⚡";
 /// Length of the input-driven tour, excluding its optional start delay.
-pub const DURATION: Duration = Duration::from_secs(41);
+pub const DURATION: Duration = Duration::from_secs(35);
 /// Sets up the opening shot. Call only on an app populated with demo data.
 pub fn prepare(app: &mut App) {
     assert!(app.backend.is_offline(), "a tour requires an offline app");
@@ -104,10 +104,8 @@ pub fn prepare(app: &mut App) {
 #[derive(Clone, Copy)]
 enum Target {
     Label(&'static str),
-    Widget(&'static str),
     Bubble(&'static str),
     Picker,
-    Gif,
     Sticker,
 }
 
@@ -187,33 +185,18 @@ fn script() -> Vec<Cue> {
     );
     add(9.4, Move(Picker));
     add(9.8, Click(left));
-    add(10.5, Move(Label("GIF")));
+    add(10.5, Move(Label("Stickers")));
     add(10.9, Click(left));
-    add(11.5, Move(Widget("gif-search")));
-    add(11.9, Click(left));
+    add(11.5, Move(Sticker));
+    add(12.0, Click(left));
+    add(12.6, Move(Label("Send sticker")));
+    add(13.0, Click(left));
     add(
-        12.6,
-        Key(egui::Key::Enter, Modifiers::NONE, "Enter · Search GIFs"),
-    );
-    add(13.3, Move(Gif));
-    add(
-        13.8,
-        Key(egui::Key::Escape, Modifiers::NONE, "Esc · Close GIF search"),
-    );
-    add(15.9, Move(Picker));
-    add(16.3, Click(left));
-    add(17.0, Move(Label("Stickers")));
-    add(17.4, Click(left));
-    add(18.0, Move(Sticker));
-    add(18.5, Click(left));
-    add(19.1, Move(Label("Send sticker")));
-    add(19.5, Click(left));
-    add(
-        20.2,
+        14.9,
         Key(egui::Key::ArrowDown, Modifiers::ALT, "Alt + ↓ · Next chat"),
     );
     add(
-        21.6,
+        16.3,
         Key(
             egui::Key::Enter,
             Modifiers::NONE,
@@ -221,45 +204,45 @@ fn script() -> Vec<Cue> {
         ),
     );
     add(
-        23.0,
+        17.7,
         Key(egui::Key::Enter, Modifiers::NONE, "Enter · Send message"),
     );
     add(
-        24.0,
+        18.7,
         Key(egui::Key::B, command(), "Ctrl + B · Hide chat list"),
     );
     add(
-        25.0,
+        19.7,
         Key(egui::Key::B, command(), "Ctrl + B · Show chat list"),
     );
-    add(26.0, Move(Label("Rust Berlin")));
-    add(26.5, Click(left));
+    add(20.7, Move(Label("Rust Berlin")));
+    add(21.2, Click(left));
     add(
-        28.0,
+        22.7,
         Key(egui::Key::Escape, Modifiers::NONE, "Esc · Close group info"),
     );
     add(
-        28.6,
+        23.3,
         Key(egui::Key::Slash, command(), "Ctrl + / · Keyboard shortcuts"),
     );
     add(
-        31.8,
+        26.5,
         Key(egui::Key::Escape, Modifiers::NONE, "Esc · Close shortcuts"),
     );
     add(
-        32.5,
+        27.2,
         Key(egui::Key::Comma, command(), "Ctrl + , · Settings"),
     );
-    add(33.0, Move(Label("Dark")));
-    add(33.35, Click(left));
-    add(33.5, Move(Label("Light")));
-    add(33.85, Click(left));
+    add(27.7, Move(Label("Dark")));
+    add(28.05, Click(left));
+    add(28.2, Move(Label("Light")));
+    add(28.55, Click(left));
     add(
-        34.5,
+        29.2,
         Key(egui::Key::Escape, Modifiers::NONE, "Esc · Back to chats"),
     );
     add(
-        36.0,
+        30.7,
         Key(
             egui::Key::ArrowUp,
             Modifiers::ALT,
@@ -267,23 +250,22 @@ fn script() -> Vec<Cue> {
         ),
     );
     add(
-        37.5,
+        32.2,
         Key(egui::Key::Comma, command(), "Ctrl + , · Settings"),
     );
-    add(38.0, Move(Label("Light")));
-    add(38.35, Click(left));
-    add(38.5, Move(Label("Dark")));
-    add(38.85, Click(left));
+    add(32.7, Move(Label("Light")));
+    add(33.05, Click(left));
+    add(33.2, Move(Label("Dark")));
+    add(33.55, Click(left));
     add(
-        39.2,
+        33.9,
         Key(egui::Key::Escape, Modifiers::NONE, "Esc · Back to chats"),
     );
     for (start, text) in [
         (0.2, "Rust"),
         (7.1, "See you tonight! :smile"),
-        (12.1, "party"),
-        (20.8, "@mi"),
-        (21.9, " see you in the front row!"),
+        (15.5, "@mi"),
+        (16.6, " see you in the front row!"),
     ] {
         for (index, character) in text.chars().enumerate() {
             cues.push(Cue {
@@ -391,9 +373,6 @@ impl Tour {
     fn target(&self, target: Target, app: &App, ctx: &egui::Context) -> Option<Pos2> {
         match target {
             Target::Label(label) => self.labels.get(label).copied(),
-            Target::Widget(id) => ctx
-                .read_response(egui::Id::new(id))
-                .map(|r| r.rect.center()),
             Target::Bubble(message) => {
                 let id = crate::ui::conversation::bubble_id(app.open_chat.as_deref()?, message)
                     .with("rect");
@@ -403,9 +382,6 @@ impl Tour {
                 rect.is_positive().then_some(rect.center())
             }
             Target::Picker => app.picker_anchor.map(|rect| rect.center()),
-            Target::Gif => ctx
-                .read_response(egui::Id::new("gif-search"))
-                .map(|r| r.rect.left_bottom() + vec2(60.0, 55.0)),
             Target::Sticker => self
                 .labels
                 .get("My stickers")
@@ -701,8 +677,8 @@ mod tests {
         let ctx = egui::Context::default();
         app.attach(&ctx);
         let mut tour = Tour::new(None, None);
-        let mut seen = [false; 7];
-        for frame in 0..=42 * 60 {
+        let mut seen = [false; 6];
+        for frame in 0..=36 * 60 {
             let at = frame as f32 / 60.0;
             let mut input = egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1280.0, 800.0))),
@@ -719,11 +695,10 @@ mod tests {
                 tour.observe(&mut app, &ctx);
                 seen[0] |= egui::Popup::is_any_open(&ctx);
                 seen[1] |= app.reply_to.is_some();
-                seen[2] |= app.picker == Some(PickerTab::Gifs);
-                seen[3] |= app.picker == Some(PickerTab::Stickers);
-                seen[4] |= matches!(app.dialog, Some(Dialog::ChatInfo(_)));
-                seen[5] |= matches!(app.dialog, Some(Dialog::Shortcuts));
-                seen[6] |= app.settings.theme == ThemeChoice::Light;
+                seen[2] |= app.picker == Some(PickerTab::Stickers);
+                seen[3] |= matches!(app.dialog, Some(Dialog::ChatInfo(_)));
+                seen[4] |= matches!(app.dialog, Some(Dialog::Shortcuts));
+                seen[5] |= app.settings.theme == ThemeChoice::Light;
             });
             output.textures_delta.clear();
             assert!(
@@ -733,7 +708,7 @@ mod tests {
             );
         }
         assert_eq!(
-            seen, [true; 7],
+            seen, [true; 6],
             "every advertised interaction must be visible"
         );
         let ada = &app.conversations[super::super::SAMPLES[0].id];

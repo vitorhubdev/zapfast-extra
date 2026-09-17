@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::model::{Chat, ChatId, Contact, Gif, GifError, Message, PollDraft, StickerPack};
+use crate::model::{Chat, ChatId, Contact, Message, PollDraft, StickerPack};
 use crate::paths::AppDirs;
 
 // Re-exported so the picker can detect pasted Signal pack links.
@@ -276,16 +276,6 @@ pub enum Command {
         to_phone: bool,
         registered: bool,
     },
-    /// Downloads and sends a GIF as a short looping video.
-    SendGif {
-        chat: ChatId,
-        gif: Gif,
-    },
-    /// Searches GIPHY or lists trending results for an empty query.
-    SearchGifs {
-        query: String,
-        key: String,
-    },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
     /// Manual update check from the About dialog. Unlike the daily check it
@@ -340,11 +330,6 @@ pub enum Command {
     /// Internal account about-text result.
     MeInfo {
         about: Option<String>,
-    },
-    /// Internal GIPHY result.
-    GifResults {
-        query: String,
-        results: Result<Vec<Gif>, GifError>,
     },
     /// Internal file-picker result.
     Picked {
@@ -460,11 +445,6 @@ pub enum Event {
     MessageDeleted {
         chat: ChatId,
         id: String,
-    },
-    /// GIF search results or failure.
-    Gifs {
-        query: String,
-        results: Result<Vec<Gif>, GifError>,
     },
     /// Saved stickers, imported packs, and recent stickers for the picker.
     Stickers {

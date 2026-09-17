@@ -12,7 +12,7 @@ Enter sends and Shift+Enter adds a line. You can swap them in Settings.
 `*bold*`, `_italic_`, `~strike~`, and ```` ```monospace ```` ```` format
 like WhatsApp, and a message of nothing but emoji shows large.
 Mentions in a group are written with `@`; the smiley opens emoji
-(searchable), GIFs, and stickers: saved stickers, imported packs, and the
+and stickers: saved stickers, imported packs, and the
 stickers used on the phone or sent from ZapExt. A sticker that only passed
 through a chat is not offered.
 

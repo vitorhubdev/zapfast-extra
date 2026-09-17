@@ -38,8 +38,8 @@ use super::{Command, Event, LinkStatus, Waker, read_sync::ReadSync};
 use crate::app::PAGE;
 use crate::archive::Archive;
 use crate::model::{
-    Chat, ChatId, ChatKind, Contact, Content, Delivery, Gif, GifError, LinkPreview, Media,
-    MentionRef, Message, Quoted, Reaction,
+    Chat, ChatId, ChatKind, Contact, Content, Delivery, LinkPreview, Media, MentionRef, Message,
+    Quoted, Reaction,
 };
 use crate::paths::AppDirs;
 
@@ -56,8 +56,18 @@ const PHONE_BATCH: i32 = 50;
 const ON_DEMAND: i32 = 6;
 /// Maximum attachment-preview dimension.
 const THUMBNAIL_SIDE: u32 = 96;
-/// Sticker download batch size for the picker.
-const STICKER_FETCH_LIMIT: usize = 40;
+/// Concurrent downloads across media and stickers.
+///
+/// A picker page fills in from a few streams instead of a burst, so the
+/// server never sees a spike and the tiles arrive progressively.
+const DOWNLOAD_SLOTS: usize = 4;
+/// Stickers fetched per picker round.
+///
+/// The next round starts as soon as one of these lands, so a large library
+/// fills in without ever asking for everything at once.
+const STICKER_ROUND: usize = 10;
+/// Quiet attempts for one sticker before the picker leaves it alone.
+const STICKER_TRIES: u32 = 3;
 
 /// Pause between bulk-forwarded messages. One paced stream through the same
 /// single-forward path never looks like a burst to the server.
@@ -170,6 +180,35 @@ fn app_version() -> wa::device_props::AppVersion {
     }
 }
 
+/// Whether a recorded sticker file is still on disk.
+///
+/// The cache directory can be cleared between runs, so a recorded path whose
+/// file is gone counts as missing and the sticker is fetched again instead of
+/// staying invisible in the picker.
+fn sticker_file(path: &Option<PathBuf>) -> bool {
+    path.as_ref().is_some_and(|path| path.exists())
+}
+
+/// The phone's stickers that still need a file, in fetch order.
+///
+/// A recorded path whose file is gone counts as missing, a sticker already in
+/// flight is skipped, one that keeps failing is left alone for now, and the
+/// round is capped so the picker fills in steadily instead of asking for a
+/// whole library at once.
+fn stickers_to_fetch(
+    stickers: Vec<crate::archive::PhoneSticker>,
+    busy: &HashSet<String>,
+    tries: &HashMap<String, u32>,
+) -> Vec<crate::archive::PhoneSticker> {
+    stickers
+        .into_iter()
+        .filter(|sticker| !sticker_file(&sticker.path))
+        .filter(|sticker| !busy.contains(&sticker.hash))
+        .filter(|sticker| tries.get(&sticker.hash).copied().unwrap_or(0) < STICKER_TRIES)
+        .take(STICKER_ROUND)
+        .collect()
+}
+
 /// Stable sticker hash across messages and the phone's recent list.
 fn sticker_hash(sha256: Option<&[u8]>, enc_sha256: Option<&[u8]>) -> Option<String> {
     let bytes = sha256
@@ -243,7 +282,10 @@ pub async fn run(
         pending_avatars: HashMap::new(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
+        sticker_give_up: HashSet::new(),
         download_retries: HashMap::new(),
+        download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
+        sticker_tries: HashMap::new(),
         read_sync: ReadSync::default(),
         poll_decrypting: 0,
         poll_history: Default::default(),
@@ -333,8 +375,14 @@ struct Worker {
     sticker_fetches: HashSet<String>,
     /// Active chat-sticker downloads by chat and message id.
     sticker_downloads: HashSet<(ChatId, String)>,
+    /// Chat stickers that used up their quiet retries this run.
+    sticker_give_up: HashSet<(ChatId, String)>,
     /// Silent media retries per chat and message id.
     download_retries: HashMap<(ChatId, String), u32>,
+    /// Limits how many downloads run at once, media and stickers alike.
+    download_slots: Arc<tokio::sync::Semaphore>,
+    /// Failed sticker fetches by hash, so a hopeless one is left alone.
+    sticker_tries: HashMap<String, u32>,
 }
 
 /// Decoded history chunk waiting to be canonicalized and archived.
@@ -2605,15 +2653,6 @@ impl Worker {
                     self.mark_played(chat, message, sender);
                 }
             }
-            Command::SendGif { chat, gif } => self.send_gif(chat, gif),
-            Command::SearchGifs { query, key } => {
-                let commands = self.commands.clone();
-                let dir = self.dirs.cache.join("gifs");
-                tokio::task::spawn_blocking(move || {
-                    let results = search_gifs(&query, &key, &dir);
-                    let _ = commands.send(Command::GifResults { query, results });
-                });
-            }
             Command::ReceiptsPrivacy { disabled } => {
                 self.emit(Event::ReceiptsPrivacy { disabled });
             }
@@ -2692,10 +2731,10 @@ impl Worker {
                     waker.wake();
                 });
             }
-            Command::GifResults { query, results } => {
-                self.emit(Event::Gifs { query, results });
-            }
             Command::RecentStickers => {
+                // Opening the picker is a fresh ask: failures get their
+                // attempts back.
+                self.sticker_give_up.clear();
                 self.fetch_missing_stickers();
                 self.emit_stickers();
             }
@@ -2707,8 +2746,13 @@ impl Worker {
                             log::warn!("could not file sticker {hash}: {error}");
                         }
                     }
-                    Err(error) => log::warn!("sticker {hash} could not be fetched: {error}"),
+                    Err(error) => {
+                        // Leave a sticker that keeps failing alone for now.
+                        *self.sticker_tries.entry(hash.clone()).or_insert(0) += 1;
+                        log::warn!("sticker {hash} could not be fetched: {error}");
+                    }
                 }
+                self.fetch_missing_stickers();
                 self.emit_stickers();
             }
             Command::MeInfo { about } => {
@@ -2871,12 +2915,19 @@ impl Worker {
                     }
                 }
                 let for_picker = self.sticker_downloads.remove(&(chat.clone(), id.clone()));
+                if for_picker && result.is_err() {
+                    // The quiet retries are used up; do not queue it again
+                    // until the picker is opened afresh.
+                    self.sticker_give_up.insert((chat.clone(), id.clone()));
+                }
                 self.emit(Event::Media {
                     chat,
                     message: id,
                     result,
                 });
                 if for_picker {
+                    // Keep the page filling in while the reader watches.
+                    self.fetch_missing_stickers();
                     self.emit_stickers();
                 }
             }
@@ -3434,7 +3485,9 @@ impl Worker {
         };
         let dir = self.dirs.media_cache_dir();
         let commands = self.commands.clone();
+        let slots = self.download_slots.clone();
         tokio::spawn(async move {
+            let _slot = slots.acquire_owned().await;
             let keep = |bytes: Vec<u8>| {
                 let dir = dir.clone();
                 let path = media_path(&dir, &chat, &id, &mime, file_name.as_deref());
@@ -3539,10 +3592,8 @@ impl Worker {
             }
         };
         let dir = self.dirs.sticker_cache_dir();
-        for sticker in phone.into_iter().filter(|sticker| sticker.path.is_none()) {
-            if !self.sticker_fetches.insert(sticker.hash.clone()) {
-                continue;
-            }
+        for sticker in stickers_to_fetch(phone, &self.sticker_fetches, &self.sticker_tries) {
+            self.sticker_fetches.insert(sticker.hash.clone());
             let Ok(meta) = wa::StickerMetadata::decode_from_slice(&sticker.raw) else {
                 self.sticker_fetches.remove(&sticker.hash);
                 continue;
@@ -3550,8 +3601,12 @@ impl Worker {
             let client = client.clone();
             let commands = self.commands.clone();
             let dir = dir.clone();
+            let slots = self.download_slots.clone();
             let hash = sticker.hash;
             tokio::spawn(async move {
+                // Wait for a slot: the picker fills in steadily instead of
+                // asking the server for everything at once.
+                let _slot = slots.acquire_owned().await;
                 let result = async {
                     let bytes = client
                         .download(&PhoneSticker(meta))
@@ -3570,9 +3625,12 @@ impl Worker {
                 let _ = commands.send(Command::StickerFetched { hash, result });
             });
         }
-        match self.archive.stickers_without_file(STICKER_FETCH_LIMIT) {
+        match self.archive.stickers_without_file(STICKER_ROUND) {
             Ok(list) => {
                 for (chat, id) in list {
+                    if self.sticker_give_up.contains(&(chat.clone(), id.clone())) {
+                        continue;
+                    }
                     if self.sticker_downloads.insert((chat.clone(), id.clone())) {
                         self.download(chat, id);
                     }
@@ -4228,56 +4286,6 @@ impl Worker {
                         chat,
                         id: String::new(),
                         error: Some(format!("Could not send the sticker: {error}")),
-                    });
-                }
-            }
-        });
-    }
-
-    fn send_gif(&mut self, chat: ChatId, gif: Gif) {
-        let Some(client) = self.client.clone() else {
-            self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
-            return;
-        };
-        let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
-        let me = self.me();
-        tokio::spawn(async move {
-            let outcome = async {
-                let url = gif.mp4.clone();
-                let bytes = tokio::task::spawn_blocking(move || {
-                    ureq::get(&url)
-                        .call()
-                        .and_then(|mut response| response.body_mut().read_to_vec())
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| error.to_string())??;
-                let mut prepared = prepare_media(&client, bytes, "video/mp4", None, true).await?;
-                if let Content::Video { media, .. } = &mut prepared.content {
-                    media.width = Some(gif.width);
-                    media.height = Some(gif.height);
-                }
-                if let Some(video) = prepared.message.video_message.as_option_mut() {
-                    video.width = Some(gif.width);
-                    video.height = Some(gif.height);
-                }
-                file_outbound(&client, &chat, &me, &dir, prepared, None, Vec::new()).await
-            }
-            .await;
-            match outcome {
-                Ok((row, raw)) => {
-                    let _ = commands.send(Command::Outbound {
-                        chat,
-                        row: Box::new(row),
-                        raw,
-                    });
-                }
-                Err(error) => {
-                    let _ = commands.send(Command::Sent {
-                        chat,
-                        id: String::new(),
-                        error: Some(format!("Could not send the GIF: {error}")),
                     });
                 }
             }
@@ -5136,132 +5144,6 @@ async fn prepare_sticker(client: &Client, bytes: Vec<u8>) -> Result<Prepared, St
     })
 }
 
-fn percent_encode(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            _ => out.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    out
-}
-
-/// Searches GIPHY and downloads result stills. Empty queries list trending GIFs.
-fn search_gifs(query: &str, key: &str, dir: &Path) -> Result<Vec<Gif>, GifError> {
-    let plain = |message: String| GifError {
-        message,
-        bad_key: false,
-    };
-    if key.is_empty() {
-        return Err(GifError {
-            message: "GIF search needs a GIPHY API key.".to_owned(),
-            bad_key: true,
-        });
-    }
-    let url = if query.trim().is_empty() {
-        format!("https://api.giphy.com/v1/gifs/trending?api_key={key}&limit=24&rating=pg-13")
-    } else {
-        format!(
-            "https://api.giphy.com/v1/gifs/search?api_key={key}&q={}&limit=24&rating=pg-13",
-            percent_encode(query.trim())
-        )
-    };
-    let body = match ureq::get(&url).call() {
-        Ok(mut response) => response
-            .body_mut()
-            .read_to_string()
-            .map_err(|error| plain(format!("GIPHY request failed: {error}")))?,
-        // Treat 401 and 403 as API-key failures for the picker.
-        Err(ureq::Error::StatusCode(code @ (401 | 403))) => {
-            return Err(GifError {
-                message: format!("GIPHY rejected the API key (error {code})."),
-                bad_key: true,
-            });
-        }
-        Err(error) => return Err(plain(format!("GIPHY request failed: {error}"))),
-    };
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|error| plain(format!("Invalid GIPHY response: {error}")))?;
-    if let Some(message) = json["meta"]["msg"].as_str()
-        && let Some(status) = json["meta"]["status"]
-            .as_u64()
-            .filter(|status| *status >= 400)
-    {
-        return Err(GifError {
-            message: format!("GIPHY: {message}"),
-            bad_key: status == 401 || status == 403,
-        });
-    }
-    let data = json["data"]
-        .as_array()
-        .ok_or_else(|| plain("GIPHY response contained no results".to_owned()))?;
-    std::fs::create_dir_all(dir).map_err(|error| plain(error.to_string()))?;
-    let mut gifs: Vec<(Gif, Option<String>)> = data
-        .iter()
-        .filter_map(|item| {
-            let id = item["id"].as_str()?.to_owned();
-            let images = &item["images"];
-            let pick = |names: &[&str], field: &str| {
-                names
-                    .iter()
-                    .find_map(|name| images[*name][field].as_str().map(str::to_owned))
-            };
-            let mp4 = pick(&["fixed_width", "downsized_small", "original"], "mp4")?;
-            let still = pick(
-                &[
-                    "fixed_width_small_still",
-                    "fixed_width_still",
-                    "original_still",
-                ],
-                "url",
-            );
-            let number = |name: &str| {
-                images["fixed_width"][name]
-                    .as_str()
-                    .and_then(|value| value.parse::<u32>().ok())
-                    .unwrap_or(200)
-            };
-            Some((
-                Gif {
-                    id,
-                    still: None,
-                    mp4,
-                    width: number("width"),
-                    height: number("height"),
-                },
-                still,
-            ))
-        })
-        .collect();
-    std::thread::scope(|scope| {
-        for (gif, still) in &mut gifs {
-            let Some(url) = still.clone() else {
-                continue;
-            };
-            let path = dir.join(format!("{}.jpg", sanitize(&gif.id)));
-            if path.exists() {
-                gif.still = Some(path);
-                continue;
-            }
-            let slot = &mut gif.still;
-            scope.spawn(move || {
-                let fetched = ureq::get(&url)
-                    .call()
-                    .and_then(|mut response| response.body_mut().read_to_vec());
-                if let Ok(bytes) = fetched
-                    && std::fs::write(&path, bytes).is_ok()
-                {
-                    *slot = Some(path);
-                }
-            });
-        }
-    });
-    Ok(gifs.into_iter().map(|(gif, _)| gif).collect())
-}
-
 /// Copies a sent attachment to media storage and builds its archive row.
 async fn file_outbound(
     client: &Client,
@@ -5545,6 +5427,66 @@ mod tests {
     use super::receipt_tests::worker;
     use super::*;
     use crate::model::MediaState;
+
+    fn phone_sticker(
+        hash: &str,
+        path: Option<PathBuf>,
+        last_used: i64,
+    ) -> crate::archive::PhoneSticker {
+        crate::archive::PhoneSticker {
+            hash: hash.to_owned(),
+            raw: Vec::new(),
+            last_used,
+            path,
+        }
+    }
+
+    #[test]
+    fn a_cached_sticker_that_is_gone_is_fetched_again_and_stuck_ones_wait() {
+        let dir = std::env::temp_dir().join(format!("zapfast-stickers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let kept = dir.join("kept.webp");
+        std::fs::write(&kept, b"webp").expect("writes");
+        let gone = dir.join("gone.webp");
+        std::fs::write(&gone, b"webp").expect("writes");
+        std::fs::remove_file(&gone).expect("removes");
+        let list = vec![
+            phone_sticker("kept", Some(kept), 3),
+            phone_sticker("gone", Some(gone), 2),
+            phone_sticker("fresh", None, 1),
+        ];
+
+        // A recorded file that is still there is left alone; the one whose
+        // copy disappeared (a cleared cache) is fetched again.
+        let picked = stickers_to_fetch(list.clone(), &HashSet::new(), &HashMap::new());
+        let hashes: Vec<String> = picked.into_iter().map(|sticker| sticker.hash).collect();
+        assert_eq!(hashes, vec!["gone".to_owned(), "fresh".to_owned()]);
+
+        // One already in flight, and one that used up its tries, are skipped.
+        let busy: HashSet<String> = ["gone".to_owned()].into_iter().collect();
+        let picked = stickers_to_fetch(list.clone(), &busy, &HashMap::new());
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].hash, "fresh");
+        let tries = HashMap::from([("fresh".to_owned(), STICKER_TRIES)]);
+        let picked = stickers_to_fetch(list.clone(), &HashSet::new(), &tries);
+        assert_eq!(
+            picked
+                .into_iter()
+                .map(|sticker| sticker.hash)
+                .collect::<Vec<_>>(),
+            vec!["gone".to_owned()]
+        );
+
+        // A round never asks for a whole library at once.
+        let many: Vec<_> = (0..40)
+            .map(|index| phone_sticker(&format!("h{index}"), None, i64::from(index)))
+            .collect();
+        assert_eq!(
+            stickers_to_fetch(many, &HashSet::new(), &HashMap::new()).len(),
+            STICKER_ROUND
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn only_transient_download_failures_are_repeated() {
@@ -6040,7 +5982,10 @@ mod receipt_tests {
             pending_avatars: HashMap::new(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),
+            sticker_give_up: HashSet::new(),
             download_retries: HashMap::new(),
+            download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
+            sticker_tries: HashMap::new(),
             read_sync: ReadSync::default(),
             poll_decrypting: 0,
             poll_history: Default::default(),

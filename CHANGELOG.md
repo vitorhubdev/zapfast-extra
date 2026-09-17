@@ -2,6 +2,32 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.11] - 2026-09-17
+
+### Changed
+
+- The picker offers emoji and stickers only. The GIF tab and its GIPHY search
+  are gone, along with the GIPHY key setting and the `ZAPFAST_GIPHY_KEY` build
+  variable; GIFs received in chats still play in the message list. A settings
+  file written while the GIF tab existed still opens, and only the stored picker
+  tab falls back to emoji.
+
+### Fixed
+
+- The sticker picker fills in a few tiles at a time instead of asking for a
+  whole library at once: one round fetches ten stickers, the next starts as
+  soon as one of them lands, and every download in the app shares four slots.
+  A sticker that keeps failing is left alone until the picker is opened again.
+- A phone sticker whose cached file disappeared (a cleared cache directory, for
+  example) is downloaded again instead of staying invisible in the picker
+  forever, because the recorded path is now checked against the disk.
+
+### Tests
+
+- Added `a_cached_sticker_that_is_gone_is_fetched_again_and_stuck_ones_wait`
+  and `a_retired_gif_picker_tab_keeps_the_other_settings`; the demo tour now
+  covers emoji and stickers without the GIF segment, and is 35 seconds long.
+
 ## [1.0.10] - 2026-09-17
 
 ### Fixed

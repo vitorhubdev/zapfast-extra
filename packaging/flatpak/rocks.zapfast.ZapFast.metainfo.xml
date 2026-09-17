@@ -12,7 +12,7 @@
     <p>ZapExt is a community mod of ZapFast for Linux, macOS and Windows, written in Rust
     without a browser engine. Link your phone to read and send messages.</p>
     <p>Browse chats, search your local archive, send attachments and voice messages,
-    and use emoji, GIFs and stickers. Closing the window can keep the connection
+    and use emoji and stickers. Closing the window can keep the connection
     running in the system tray. ZapExt is an independent project, not affiliated
     with WhatsApp or Meta.</p>
   </description>

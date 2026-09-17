@@ -99,15 +99,15 @@ without embedding a browser engine.
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
-- **Emoji, GIF, and sticker picker.** Search emoji and GIFs, and save stickers
+- **Emoji and sticker picker.** Search emoji and save stickers
   with a right-click. The sticker tab lists saved stickers first, then imported
   packs, then the phone's recent list and the stickers you sent; a sticker that
   only passed through a chat is never offered. Clicking a sticker previews it
   for confirmation before sending, and the picker reopens on the last used
   tab. Tiles that fail to load retry with a fresh download instead of
-  sticking on an error. Emoji autocomplete and picker
+  sticking on an error, and a page fills in a few tiles at a time instead of
+  asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
-  GIF search needs a free GIPHY API key unless the build includes one.
 - **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`
   file. Animated packs remain animated. Packs are stored as WebP files on your
   computer.
@@ -354,19 +354,10 @@ upgrade. No account or additional service is needed.
 cargo run --features demo -- --demo            # sample chats, no connection
 cargo run --features demo -- --demo-page login # or settings, pair, info, light, …
 cargo run --features demo -- --demo-shot shot.png --demo-page chat,light
-cargo run --features demo -- --demo-tour      # Space starts/replays a 41-second tour
+cargo run --features demo -- --demo-tour      # Space starts/replays a 35-second tour
 cargo test --all-features                      # includes a headless layout of every screen
 cargo clippy --all-targets --all-features -- -D warnings
 ```
-
-To include a default GIPHY key for GIF search, set it at build time. A key in
-Settings overrides it:
-
-```sh
-ZAPFAST_GIPHY_KEY=your-key cargo build --release
-```
-
-The earlier `FASTSAPP_GIPHY_KEY` build variable remains supported as a fallback.
 
 `AGENTS.md` describes the architecture and the rules for changes.
 
@@ -381,15 +372,14 @@ cargo build --locked --features demo
 ./target/debug/zapfast --demo-tour --demo-size 1280x800
 ```
 
-The **ZapExt Demo** window waits for **Space**. The 41-second tour starts with
+The **ZapExt Demo** window waits for **Space**. The 35-second tour starts with
 search, switches chats with keyboard shortcuts, scrolls, right-clicks a message
-and selects Reply, types quickly, completes emoji and mentions, searches the GIF
-picker and sends a still sticker, opens group information and the shortcut list,
+and selects Reply, types quickly, completes emoji and mentions, sends a still
+sticker from the picker, opens group information and the shortcut list,
 and changes themes through Settings. It uses the normal mouse and keyboard handlers;
 a local responder handles outgoing messages with no WhatsApp connection.
-The GIF-search thumbnails and still stickers are rendered from the bundled
-Noto emoji font; demo GIF search uses these local fixtures. The tour makes no
-sound and holds its final frame. Space rebuilds the sample and replays.
+The still stickers are rendered from the bundled Noto emoji font. The tour makes
+no sound and holds its final frame. Space rebuilds the sample and replays.
 For an automatic start, add `--demo-tour-delay 5000` (milliseconds).
 Use `--demo` instead of `--demo-tour` to explore the sample chats yourself.
 For deterministic theme screenshots, `--demo-page settings,omarchy` and
