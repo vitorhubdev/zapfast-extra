@@ -3722,6 +3722,12 @@ fn attachment(
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     if response.clicked() && !auto {
         match &media.path {
+            // A PDF opens in the app's own viewer; other files keep going to
+            // the desktop.
+            Some(_) if media.mime == "application/pdf" => actions.push(Action::OpenViewer {
+                chat: view.chat.id.clone(),
+                message: message.id.clone(),
+            }),
             Some(path) => actions.push(Action::OpenFile(path.clone())),
             None if !matches!(media.state, MediaState::Downloading) => {
                 actions.push(Action::Download {

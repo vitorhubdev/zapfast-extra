@@ -508,6 +508,10 @@ pub struct Viewer {
     pub zoom: f32,
     /// Pan in points from the fitted position.
     pub offset: (f32, f32),
+    /// Page on screen when the current item is a PDF.
+    pub pdf_page: usize,
+    /// Pages the current PDF holds, once the first one has been rendered.
+    pub pdf_pages: usize,
 }
 
 impl Viewer {
@@ -528,6 +532,15 @@ impl Viewer {
         self.index = next as usize;
         self.zoom = 1.0;
         self.offset = (0.0, 0.0);
+        self.pdf_page = 0;
+        self.pdf_pages = 0;
+    }
+
+    /// Moves to another page of the PDF on screen, stopping at either end.
+    pub fn page_by(&mut self, step: i32) {
+        let last = self.pdf_pages.saturating_sub(1) as i64;
+        let next = (self.pdf_page as i64 + i64::from(step)).clamp(0, last);
+        self.pdf_page = next as usize;
     }
 
     /// Multiplies the zoom around an anchor in points from the centre.
@@ -548,8 +561,17 @@ impl Viewer {
 pub struct ViewerItem {
     pub message: String,
     pub path: PathBuf,
-    /// Stickers have no frame and no caption.
-    pub sticker: bool,
+    pub kind: ViewerKind,
+}
+
+/// What a viewer item holds and how it is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewerKind {
+    Picture,
+    /// A sticker: no frame and no caption.
+    Sticker,
+    /// A PDF, rendered one page at a time.
+    Pdf,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -664,6 +686,8 @@ pub enum Action {
     },
     /// Moves the media viewer one item forwards or backwards.
     ViewerStep(i32),
+    /// Moves to another page of the PDF in the media viewer.
+    ViewerPage(i32),
     /// Zooms the media viewer around an anchor in points from its centre.
     ViewerZoom {
         factor: f32,

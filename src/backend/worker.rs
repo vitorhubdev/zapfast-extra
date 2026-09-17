@@ -2773,6 +2773,29 @@ impl Worker {
                     .map_err(|error| error.to_string());
                 self.emit(Event::ChatSearch { chat, query, hits });
             }
+            Command::RenderPdfPage { path, page, width } => {
+                let commands = self.commands.clone();
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::pdf::render_page(&path, page, width);
+                    let _ = commands.send(Command::PdfPage {
+                        path,
+                        page,
+                        width,
+                        result,
+                    });
+                });
+            }
+            Command::PdfPage {
+                path,
+                page,
+                width,
+                result,
+            } => self.emit(Event::PdfPage {
+                path,
+                page,
+                width,
+                result,
+            }),
             Command::StickerFetched { hash, result } => {
                 self.sticker_fetches.remove(&hash);
                 match result {

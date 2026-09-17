@@ -2,6 +2,25 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.15] - 2026-09-17
+
+### Changed
+
+- PDFs open in the app instead of the desktop. The viewer renders the page on
+  this device with a pure-Rust rasteriser (hayro, so no native library has to
+  be bundled), turns the pages with the up and down arrows or the bar buttons,
+  shows where you are in the document, and keeps Save a copy and Open in the
+  default app. A page viewed closer is rasterised again at the higher
+  resolution, and a page that cannot be rendered says so instead of failing
+  quietly. Other documents and videos still open in their desktop apps.
+
+### Tests
+
+- Added a_page_renders_to_pixels_and_a_missing_one_reports, which renders a
+  hand-written PDF and checks the pixels, the page count, the asked width and
+  the missing-page error, plus the_asked_width_follows_the_zoom_within_limits;
+  the demo has a pdf page for screenshots.
+
 ## [1.0.14] - 2026-09-17
 
 ### Changed

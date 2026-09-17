@@ -87,8 +87,9 @@ without embedding a browser engine.
   the phone. Changing the default timer for new chats leaves existing chats alone.
 - **View attachments.** ZapExt downloads files up to 64 MB automatically or
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
-  polls, and link previews appear in the chat. Videos and documents open in
-  their default desktop apps. Profile pictures and downloaded images support
+  polls, and link previews appear in the chat. Videos and other documents open
+  in their default desktop apps, and a PDF opens in the app's own viewer page
+  by page. Profile pictures and downloaded images support
   Windows drive paths and filenames with spaces or non-ASCII characters.
   Clicking a picture or sticker opens a full-window viewer: scroll to zoom,
   drag to move, the arrow keys walk the chat's pictures, 0 or F fits it again,

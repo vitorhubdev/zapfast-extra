@@ -99,6 +99,7 @@ opus = "0.4"
 ogg = "0.9"
 # Converts animated Signal APNG stickers to the animated WebP used by WhatsApp.
 webp-animation = "0.10"
+hayro = "0.7.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = "8.2"

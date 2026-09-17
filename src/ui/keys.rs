@@ -8,6 +8,11 @@ use crate::model::{Action, Dialog, Page};
 /// Keys the media viewer owns: browsing, zooming, and closing.
 fn viewer_keys(app: &mut App, ctx: &egui::Context) {
     const STEP: f32 = 1.3;
+    let pdf = app
+        .viewer
+        .as_ref()
+        .and_then(|viewer| viewer.current())
+        .is_some_and(|item| item.kind == crate::model::ViewerKind::Pdf);
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
@@ -17,8 +22,14 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
         };
         key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
         key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
-        key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
-        key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+        // A PDF walks its pages with the vertical arrows.
+        if pdf {
+            key(Modifiers::NONE, Key::ArrowDown, Action::ViewerPage(1));
+            key(Modifiers::NONE, Key::ArrowUp, Action::ViewerPage(-1));
+        } else {
+            key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
+            key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+        }
         key(
             Modifiers::NONE,
             Key::Plus,

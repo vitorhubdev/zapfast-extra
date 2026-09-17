@@ -1,9 +1,11 @@
-//! Full-window viewer for a chat's pictures and stickers.
+//! Full-window viewer for a chat's pictures, stickers, and PDFs.
+
+use std::path::Path;
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
-use crate::model::Action;
+use crate::model::{Action, ViewerKind};
 use crate::theme::{self, Icon, Palette};
 
 /// Space the fitted picture leaves around itself.
@@ -19,6 +21,18 @@ const MAX_FIT: f32 = 2.5;
 /// Near-black backdrop behind the picture.
 const BACKDROP: Color32 = Color32::from_rgba_premultiplied(6, 10, 9, 245);
 
+/// What the viewer has to paint.
+enum Surface {
+    Ready {
+        id: egui::TextureId,
+        size: Vec2,
+        /// The file carries frames, so keep decoding them.
+        animated: bool,
+    },
+    Pending,
+    Failed,
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(viewer) = app.viewer.as_ref() else {
         return;
@@ -28,13 +42,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     };
     let palette = app.palette;
     let path = item.path.clone();
-    let sticker = item.sticker;
+    let kind = item.kind;
     let zoom = viewer.zoom;
     let offset = vec2(viewer.offset.0, viewer.offset.1);
     let index = viewer.index;
     let count = viewer.items.len();
+    let page = viewer.pdf_page;
+    let pages = viewer.pdf_pages;
     let mut actions = Vec::new();
     let screen = ctx.content_rect();
+    // A rendered PDF page arrives as raw pixels; the texture is made here,
+    // on the thread that owns the graphics context.
+    if kind == ViewerKind::Pdf {
+        upload_page(app, ctx, &path, page);
+    }
     egui::Area::new(egui::Id::new("viewer"))
         .fixed_pos(screen.min)
         .order(egui::Order::Foreground)
@@ -44,44 +65,41 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             let (rect, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BACKDROP);
             let area = rect.shrink(INSET);
-            let uri = crate::util::image_uri(&path);
-            let loaded = egui::Image::new(&uri).load_for_size(ctx, area.size());
+            // Remember how wide the view is, so the worker rasterises the
+            // page at the size it will be shown at.
+            app.viewer_view_width = area.width() * ctx.pixels_per_point();
+            let surface = match kind {
+                ViewerKind::Pdf => pdf_surface(app, &path, page),
+                _ => image_surface(ui, ctx, &path, area.size()),
+            };
             let mut image_rect = None;
-            match loaded {
-                Ok(egui::load::TexturePoll::Ready { texture }) => {
-                    let natural = if texture.size.x > 0.0 && texture.size.y > 0.0 {
-                        texture.size
+            match surface {
+                Surface::Ready { id, size, animated } => {
+                    let natural = if size.x > 0.0 && size.y > 0.0 {
+                        size
                     } else {
                         vec2(4.0, 3.0)
                     };
-                    let fitted = fit_scale(natural, area.size());
-                    let size = natural * fitted * zoom;
+                    let shown = natural * fit_scale(natural, area.size()) * zoom;
                     let center = area.center() + offset;
-                    let placed = Rect::from_center_size(center, size);
+                    let placed = Rect::from_center_size(center, shown);
                     image_rect = Some(placed);
                     let response =
                         ui.interact(placed, ui.id().with("picture"), Sense::click_and_drag());
                     if ui.is_rect_visible(placed) {
-                        // Animated stickers and GIFs keep playing here;
-                        // anything else uses the decoded still.
-                        match animated(&path).then(|| crate::animation::frame(ui, &path, placed)) {
-                            Some(crate::animation::Frame::Ready(frame)) => {
-                                ui.painter().image(
-                                    frame.id(),
-                                    placed,
-                                    Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
-                                    Color32::WHITE,
-                                );
-                            }
-                            _ => {
-                                ui.painter().image(
-                                    texture.id,
-                                    placed,
-                                    Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
-                                    Color32::WHITE,
-                                );
-                            }
-                        }
+                        // Animated stickers and GIFs keep playing here.
+                        let frame = animated
+                            .then(|| crate::animation::frame(ui, &path, placed))
+                            .and_then(|frame| match frame {
+                                crate::animation::Frame::Ready(texture) => Some(texture.id()),
+                                _ => None,
+                            });
+                        ui.painter().image(
+                            frame.unwrap_or(id),
+                            placed,
+                            Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
                     }
                     if response.dragged() {
                         let delta = response.drag_delta();
@@ -113,7 +131,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         }
                     }
                 }
-                Ok(egui::load::TexturePoll::Pending { .. }) => {
+                Surface::Pending => {
                     theme::paint_spinner(
                         ui,
                         Rect::from_center_size(area.center(), Vec2::splat(48.0)),
@@ -121,13 +139,29 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         palette.accent,
                     );
                 }
-                _ => {
-                    ui.ctx().forget_image(&uri);
-                    theme::paragraph(
-                        ui,
-                        "This picture could not be displayed. Retrying…",
-                        theme::regular(14.0),
-                        palette.secondary,
+                Surface::Failed => {
+                    let message = if kind == ViewerKind::Pdf {
+                        app.pdf_error
+                            .clone()
+                            .unwrap_or_else(|| "This page could not be rendered.".to_owned())
+                    } else {
+                        "This picture could not be displayed.".to_owned()
+                    };
+                    ui.scope_builder(
+                        egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                            area.center(),
+                            vec2(area.width(), 60.0),
+                        )),
+                        |ui| {
+                            ui.vertical_centered(|ui| {
+                                theme::paragraph(
+                                    ui,
+                                    message,
+                                    theme::regular(14.0),
+                                    palette.secondary,
+                                );
+                            });
+                        },
                     );
                 }
             }
@@ -142,12 +176,75 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 index,
                 count,
                 zoom,
-                sticker,
+                kind,
+                page,
+                pages,
                 &path,
                 &mut actions,
             );
         });
     app.actions.extend(actions);
+}
+
+/// Turns the pixels the worker rendered into a texture, once per page.
+fn upload_page(app: &mut App, ctx: &egui::Context, path: &Path, page: usize) {
+    let Some(rendered) = app.pdf_page.as_ref() else {
+        return;
+    };
+    if rendered.page != page {
+        return;
+    }
+    let uploaded = app
+        .pdf_texture
+        .as_ref()
+        .is_some_and(|(known, known_page, _, _)| known == path && *known_page == page);
+    if uploaded {
+        return;
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [rendered.width as usize, rendered.height as usize],
+        &rendered.rgba,
+    );
+    let texture = ctx.load_texture(
+        format!("pdf-{}-{page}", path.display()),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    app.pdf_texture = Some((path.to_path_buf(), page, rendered.width, texture));
+}
+
+/// The uploaded texture of the PDF page on screen, when it is ready.
+fn pdf_surface(app: &App, path: &Path, page: usize) -> Surface {
+    match app.pdf_texture.as_ref() {
+        Some((known, known_page, _, texture)) if known == path && *known_page == page => {
+            let [width, height] = texture.size();
+            Surface::Ready {
+                id: texture.id(),
+                size: vec2(width as f32, height as f32),
+                animated: false,
+            }
+        }
+        _ if app.pdf_error.is_some() => Surface::Failed,
+        _ => Surface::Pending,
+    }
+}
+
+/// Loads a picture or sticker through the image loader.
+fn image_surface(ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2) -> Surface {
+    let uri = crate::util::image_uri(path);
+    match egui::Image::new(&uri).load_for_size(ctx, size) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => Surface::Ready {
+            id: texture.id,
+            size: texture.size,
+            animated: animated(path),
+        },
+        Ok(egui::load::TexturePoll::Pending { .. }) => Surface::Pending,
+        Err(_) => {
+            // Drop the failed entry so the next frame tries again.
+            ui.ctx().forget_image(&uri);
+            Surface::Failed
+        }
+    }
 }
 
 /// Draws the title, the counter, and the controls over the picture.
@@ -159,16 +256,28 @@ fn chrome(
     index: usize,
     count: usize,
     zoom: f32,
-    sticker: bool,
-    path: &std::path::Path,
+    kind: ViewerKind,
+    page: usize,
+    pages: usize,
+    path: &Path,
     actions: &mut Vec<Action>,
 ) {
-    let title = if sticker {
+    let pdf = kind == ViewerKind::Pdf;
+    let title = if pdf {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "PDF".to_owned())
+    } else if kind == ViewerKind::Sticker {
         "Sticker".to_owned()
     } else {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Picture".to_owned())
+    };
+    let counter = if pdf && pages > 0 {
+        format!("page {} of {pages}", page + 1)
+    } else {
+        format!("{} of {count}", index + 1)
     };
     let top = Rect::from_min_max(
         rect.min + vec2(28.0, 20.0),
@@ -182,7 +291,7 @@ fn chrome(
                     .color(palette.text),
             );
             ui.label(
-                egui::RichText::new(format!("{} of {count}", index + 1))
+                egui::RichText::new(counter)
                     .font(theme::regular(13.0))
                     .color(palette.secondary),
             );
@@ -208,34 +317,44 @@ fn chrome(
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
         ui.horizontal(|ui| {
-            let labels = [
-                "Previous",
-                "Next",
-                "Zoom out",
-                "Zoom in",
-                "Fit",
-                "Save a copy",
-                "Open in the default app",
-            ];
+            let earlier = if pdf { "Previous page" } else { "Previous" };
+            let later = if pdf { "Next page" } else { "Next" };
+            let entries = [earlier, later, "Zoom out", "Zoom in", "Fit", "Save a copy"];
             let spacing = ui.spacing().item_spacing.x;
-            let total = labels
+            let total = entries
                 .iter()
                 .map(|label| theme::soft_button_width(ui, label, true))
                 .sum::<f32>()
-                + 64.0
-                + spacing * (labels.len() as f32);
+                + 160.0
+                + spacing * (entries.len() as f32 + 1.0);
             ui.add_space(((bar.width() - total) / 2.0).max(0.0));
-            if theme::soft_button(ui, palette, Some(Icon::ChevronLeft), "Previous", false)
-                .on_hover_text("Earlier picture (←)")
+            if theme::soft_button(ui, palette, Some(Icon::ChevronLeft), earlier, false)
+                .on_hover_text(if pdf {
+                    "Earlier page (↑)"
+                } else {
+                    "Earlier picture (←)"
+                })
                 .clicked()
             {
-                actions.push(Action::ViewerStep(-1));
+                actions.push(if pdf {
+                    Action::ViewerPage(-1)
+                } else {
+                    Action::ViewerStep(-1)
+                });
             }
-            if theme::soft_button(ui, palette, Some(Icon::ChevronRight), "Next", false)
-                .on_hover_text("Later picture (→)")
+            if theme::soft_button(ui, palette, Some(Icon::ChevronRight), later, false)
+                .on_hover_text(if pdf {
+                    "Later page (↓)"
+                } else {
+                    "Later picture (→)"
+                })
                 .clicked()
             {
-                actions.push(Action::ViewerStep(1));
+                actions.push(if pdf {
+                    Action::ViewerPage(1)
+                } else {
+                    Action::ViewerStep(1)
+                });
             }
             if theme::icon_button(
                 ui,
@@ -298,23 +417,23 @@ fn chrome(
         rect.min + vec2(28.0, 0.0),
         pos2(rect.right() - 28.0, rect.bottom() - 12.0),
     );
+    let text = if pdf {
+        "Scroll to zoom · drag to move · ↑ ↓ or ← → to turn the page · Esc to close"
+    } else {
+        "Scroll to zoom · drag to move · arrows to browse · Esc to close"
+    };
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(hint)
             .layout(Layout::bottom_up(Align::Min)),
         |ui| {
-            theme::text(
-                ui,
-                "Scroll to zoom · drag to move · arrows to browse · Esc to close",
-                theme::regular(12.0),
-                palette.dim,
-            );
+            theme::text(ui, text, theme::regular(12.0), palette.dim);
         },
     );
 }
 
 /// Whether the file may carry frames worth decoding.
-fn animated(path: &std::path::Path) -> bool {
+fn animated(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
@@ -354,10 +473,11 @@ mod tests {
 
     #[test]
     fn only_moving_formats_are_decoded_frame_by_frame() {
-        assert!(animated(std::path::Path::new("sticker.webp")));
-        assert!(animated(std::path::Path::new("loop.GIF")));
-        assert!(animated(std::path::Path::new("clip.mp4")));
-        assert!(!animated(std::path::Path::new("photo.jpg")));
-        assert!(!animated(std::path::Path::new("notes")));
+        assert!(animated(Path::new("sticker.webp")));
+        assert!(animated(Path::new("loop.GIF")));
+        assert!(animated(Path::new("clip.mp4")));
+        assert!(!animated(Path::new("photo.jpg")));
+        assert!(!animated(Path::new("notes.pdf")));
+        assert!(!animated(Path::new("notes")));
     }
 }

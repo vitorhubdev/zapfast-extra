@@ -366,6 +366,42 @@ fn tint(hue: f32, saturation: f32, value: f32) -> image::Rgb<u8> {
     ])
 }
 
+/// A small PDF for the offline demo, written by hand: three titled pages.
+fn demo_pdf(app: &App) -> std::path::PathBuf {
+    let dir = app.dirs.media_cache_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("demo-notes.pdf");
+    if path.exists() {
+        return path;
+    }
+    let page = |number: u32| {
+        format!(
+            "BT /F1 28 Tf 40 500 Td (ZapExt demo) Tj ET\n\
+BT /F1 16 Tf 40 460 Td (Page {number} of 3) Tj ET\n\
+BT /F1 12 Tf 40 420 Td (Rendered here, on this device.) Tj ET\n"
+        )
+    };
+    let mut body = String::from("%PDF-1.4\n");
+    body.push_str("1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n");
+    body.push_str("2 0 obj<</Type/Pages/Kids[3 0 R 5 0 R 7 0 R]/Count 3>>endobj\n");
+    for number in 1..=3u32 {
+        let page_object = 3 + (number - 1) * 2;
+        let contents_object = page_object + 1;
+        body.push_str(&format!(
+            "{page_object} 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 420 594]/Resources<</Font<</F1 9 0 R>>>>/Contents {contents_object} 0 R>>endobj\n"
+        ));
+        let stream = page(number);
+        body.push_str(&format!(
+            "{contents_object} 0 obj<</Length {}>>stream\n{stream}endstream\nendobj\n",
+            stream.len()
+        ));
+    }
+    body.push_str("9 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\n");
+    body.push_str("trailer<</Root 1 0 R/Size 10>>\n%%EOF\n");
+    let _ = std::fs::write(&path, body);
+    path
+}
+
 fn sample_files(app: &App) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = app.dirs.media_cache_dir();
     let _ = std::fs::create_dir_all(&dir);
@@ -516,6 +552,7 @@ pub fn populate(app: &mut App) {
     plant_avatars(app);
     // Cover every supported bubble type in the first chat.
     let (photo, sticker) = sample_files(app);
+    let pdf = demo_pdf(app);
     let ada = SAMPLES[0].id;
     let base = app.chats[0].last_activity;
     let older = base - 60 * 60 * 30;
@@ -545,18 +582,24 @@ pub fn populate(app: &mut App) {
             });
             row
         },
-        message(
-            ada,
-            "ada-doc",
-            true,
-            base + 60,
-            Content::Document {
-                media: media("application/pdf", 482_113, None, None),
-                file_name: "Notes on the Engine.pdf".into(),
-                caption: None,
-                pages: Some(12),
-            },
-        ),
+        {
+            let mut row = message(
+                ada,
+                "ada-doc",
+                true,
+                base + 60,
+                Content::Document {
+                    media: media("application/pdf", 482_113, None, None),
+                    file_name: "Notes on the Engine.pdf".into(),
+                    caption: None,
+                    pages: Some(3),
+                },
+            );
+            if let Content::Document { media, .. } = &mut row.content {
+                media.path = Some(pdf.clone());
+            }
+            row
+        },
         message(
             ada,
             "ada-voice",
@@ -847,6 +890,23 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 let chat = SAMPLES[0].id;
                 app.open_chat = Some(chat.to_owned());
                 app.open_viewer(chat, "ada-tall");
+            }
+            "pdf" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                app.open_viewer(chat, "ada-doc");
+                // The offline demo has no worker to render for it.
+                if let Some(rendered) = app
+                    .viewer
+                    .as_ref()
+                    .and_then(|viewer| viewer.current())
+                    .and_then(|item| crate::pdf::render_page(&item.path, 0, 900).ok())
+                {
+                    if let Some(viewer) = app.viewer.as_mut() {
+                        viewer.pdf_pages = rendered.pages;
+                    }
+                    app.pdf_page = Some(rendered);
+                }
             }
             "find" => {
                 let chat = SAMPLES[0].id;
@@ -1357,6 +1417,7 @@ mod tests {
             "recording",
             "viewer",
             "find",
+            "pdf",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));

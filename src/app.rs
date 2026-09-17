@@ -11,7 +11,7 @@ use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Waker};
 use crate::model::{
     Action, Chat, ChatId, Contact, Content, Delivery, Dialog, Media, MediaState, Message, Page,
-    PickerTab, StickerPack, Toast, ToastKind, Viewer, ViewerItem,
+    PickerTab, StickerPack, Toast, ToastKind, Viewer, ViewerItem, ViewerKind,
 };
 use crate::paths::AppDirs;
 use crate::settings::{Settings, ThemeChoice};
@@ -48,6 +48,8 @@ const COMPOSING_TIMEOUT: Duration = Duration::from_secs(4);
 const TYPING_TIMEOUT: Duration = Duration::from_secs(12);
 /// Pause after the last keystroke before the in-chat search runs.
 const CHAT_SEARCH_PAUSE: Duration = Duration::from_millis(250);
+/// Extra width a PDF page may be short of before it is rendered again.
+const PDF_SHARP_ENOUGH: u32 = 200;
 
 /// Loaded chat history and paging state.
 #[derive(Default)]
@@ -176,6 +178,16 @@ pub struct App {
     pub viewer: Option<Viewer>,
     /// Whether the search bar inside the open chat is showing.
     pub chat_search_open: bool,
+    /// The PDF page the worker last rendered, waiting to be uploaded.
+    pub pdf_page: Option<crate::pdf::Page>,
+    /// Path, page and width of the uploaded PDF texture.
+    pub pdf_texture: Option<(PathBuf, usize, u32, egui::TextureHandle)>,
+    /// What the worker is rendering right now.
+    pub pdf_rendering: Option<(PathBuf, usize, u32)>,
+    /// Why the last render failed.
+    pub pdf_error: Option<String>,
+    /// Width of the viewer window, reported by the view for PDF rendering.
+    pub viewer_view_width: f32,
     /// Text typed into the in-chat search bar.
     pub chat_search: String,
     /// Hits of the last answered in-chat search, newest first.
@@ -403,6 +415,11 @@ impl App {
             picker: None,
             viewer: None,
             chat_search_open: false,
+            pdf_page: None,
+            pdf_texture: None,
+            pdf_rendering: None,
+            pdf_error: None,
+            viewer_view_width: 0.0,
             chat_search: String::new(),
             chat_search_hits: Vec::new(),
             chat_search_query: String::new(),
@@ -1093,6 +1110,29 @@ impl App {
                         }
                     }
                 }
+                Event::PdfPage {
+                    path,
+                    page,
+                    width,
+                    result,
+                } => {
+                    // Ignore an answer that is no longer being waited for.
+                    if self.pdf_rendering.as_ref() == Some(&(path.clone(), page, width)) {
+                        self.pdf_rendering = None;
+                        match result {
+                            Ok(rendered) => {
+                                if let Some(viewer) = self.viewer.as_mut() {
+                                    viewer.pdf_pages = rendered.pages;
+                                }
+                                self.pdf_error = None;
+                                self.pdf_page = Some(rendered);
+                            }
+                            Err(error) => {
+                                self.pdf_error = Some(error);
+                            }
+                        }
+                    }
+                }
                 Event::PollCreated { chat, error } => {
                     self.poll_creating = false;
                     if let Some(error) = error {
@@ -1472,6 +1512,7 @@ impl App {
             self.chat_search_hits.clear();
             self.chat_search_query.clear();
             self.chat_search_at = None;
+            self.forget_pdf();
         }
         if self.open_chat.as_deref() != Some(id.as_str()) {
             if let Some(previous) = self.open_chat.take() {
@@ -1520,7 +1561,7 @@ impl App {
         }
     }
 
-    /// The chat's pictures and stickers that are on disk, oldest first.
+    /// The chat's pictures, stickers and PDFs that are on disk, oldest first.
     ///
     /// The viewer walks this list, so it only holds files it can actually
     /// show and keeps the message each one came from.
@@ -1532,16 +1573,19 @@ impl App {
             .messages
             .iter()
             .filter_map(|message| {
-                let (media, sticker) = match &message.content {
-                    Content::Image { media, .. } => (media, false),
-                    Content::Sticker { media, .. } => (media, true),
+                let (media, kind) = match &message.content {
+                    Content::Image { media, .. } => (media, ViewerKind::Picture),
+                    Content::Sticker { media, .. } => (media, ViewerKind::Sticker),
+                    Content::Document { media, .. } if media.mime == "application/pdf" => {
+                        (media, ViewerKind::Pdf)
+                    }
                     _ => return None,
                 };
                 let path = media.path.as_ref().filter(|path| path.is_file())?;
                 Some(ViewerItem {
                     message: message.id.clone(),
                     path: path.clone(),
-                    sticker,
+                    kind,
                 })
             })
             .collect()
@@ -1563,6 +1607,8 @@ impl App {
             index,
             zoom: 1.0,
             offset: (0.0, 0.0),
+            pdf_page: 0,
+            pdf_pages: 0,
         });
     }
 
@@ -1795,9 +1841,59 @@ impl App {
         if !self.typing.is_empty() || self.composing {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        self.sync_pdf_view();
         self.poll_chat_search();
     }
 
+    /// Runs the in-chat search once the typing in its field pauses.
+    /// Asks the worker for the PDF page the viewer is showing.
+    ///
+    /// The request follows the page and the zoom, and is skipped while the
+    /// same page is already sharp enough or on its way.
+    fn sync_pdf_view(&mut self) {
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.current() else {
+            return;
+        };
+        if item.kind != ViewerKind::Pdf {
+            return;
+        }
+        let path = item.path.clone();
+        let page = viewer.pdf_page;
+        let width = crate::pdf::render_width(self.viewer_view_width, viewer.zoom);
+        let sharp = self
+            .pdf_texture
+            .as_ref()
+            .is_some_and(|(known, known_page, known_width, _)| {
+                *known == path
+                    && *known_page == page
+                    && width <= known_width.saturating_add(PDF_SHARP_ENOUGH)
+            });
+        if sharp {
+            return;
+        }
+        let target = (path, page, width);
+        if self.pdf_rendering.as_ref() == Some(&target) {
+            return;
+        }
+        self.pdf_error = None;
+        self.pdf_rendering = Some(target.clone());
+        self.backend.send(Command::RenderPdfPage {
+            path: target.0,
+            page: target.1,
+            width: target.2,
+        });
+    }
+
+    /// Drops the rendered page and its texture.
+    pub fn forget_pdf(&mut self) {
+        self.pdf_page = None;
+        self.pdf_texture = None;
+        self.pdf_rendering = None;
+        self.pdf_error = None;
+    }
     /// Runs the in-chat search once the typing in its field pauses.
     fn poll_chat_search(&mut self) {
         let Some(chat) = self.open_chat.clone() else {
@@ -2007,6 +2103,7 @@ impl App {
             }
             Action::CloseChat => {
                 self.viewer = None;
+                self.forget_pdf();
                 if let Some(chat) = self.open_chat.take() {
                     self.stop_composing(&chat);
                     let draft = std::mem::take(&mut self.composer);
@@ -2100,6 +2197,11 @@ impl App {
                     viewer.step(step);
                 }
             }
+            Action::ViewerPage(step) => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.page_by(step);
+                }
+            }
             Action::ViewerZoom { factor, anchor } => {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.zoom_by(factor, anchor);
@@ -2116,7 +2218,10 @@ impl App {
                     viewer.offset = (0.0, 0.0);
                 }
             }
-            Action::CloseViewer => self.viewer = None,
+            Action::CloseViewer => {
+                self.viewer = None;
+                self.forget_pdf();
+            }
             Action::ToggleChatSearch => {
                 self.chat_search_open = !self.chat_search_open;
                 if self.chat_search_open {
@@ -3182,8 +3287,8 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("the viewer opens");
         assert_eq!(viewer.items.len(), 2, "a file that is gone is not offered");
         assert_eq!(viewer.index, 0);
-        assert!(!viewer.items[0].sticker);
-        assert!(viewer.items[1].sticker);
+        assert_eq!(viewer.items[0].kind, ViewerKind::Picture);
+        assert_eq!(viewer.items[1].kind, ViewerKind::Sticker);
 
         // Walking stops at either end and a new picture starts fitted.
         app.apply(Action::ViewerStep(-1), &ctx);

@@ -283,6 +283,12 @@ pub enum Command {
         chat: ChatId,
         query: String,
     },
+    /// Renders one page of a PDF for the media viewer.
+    RenderPdfPage {
+        path: PathBuf,
+        page: usize,
+        width: u32,
+    },
     /// Manual update check from the About dialog. Unlike the daily check it
     /// always reports back, so the button never spins forever.
     CheckUpdatesNow,
@@ -349,6 +355,13 @@ pub enum Command {
     CopySaved {
         saved: Option<PathBuf>,
         error: Option<String>,
+    },
+    /// Internal rendered PDF page.
+    PdfPage {
+        path: PathBuf,
+        page: usize,
+        width: u32,
+        result: Result<crate::pdf::Page, String>,
     },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
@@ -477,6 +490,13 @@ pub enum Event {
         chat: ChatId,
         query: String,
         hits: Result<Vec<Message>, String>,
+    },
+    /// A rendered PDF page, or why it could not be rendered.
+    PdfPage {
+        path: PathBuf,
+        page: usize,
+        width: u32,
+        result: Result<crate::pdf::Page, String>,
     },
     Media {
         chat: ChatId,

@@ -15,6 +15,7 @@ pub mod markup;
 pub mod model;
 pub mod notify;
 pub mod paths;
+pub mod pdf;
 pub mod qr;
 pub mod settings;
 pub mod single_instance;
