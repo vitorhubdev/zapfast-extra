@@ -103,6 +103,18 @@ pub enum Command {
         message: String,
         to_chat: ChatId,
     },
+    /// Internal bulk-forward receipt, with sent counts.
+    Forwarded {
+        messages: usize,
+        chats: usize,
+    },
+    /// Forwards selected messages to several chats, paced like a person
+    /// tapping through them. The worker enforces WhatsApp's destination caps.
+    ForwardMany {
+        from_chat: ChatId,
+        messages: Vec<String>,
+        to_chats: Vec<ChatId>,
+    },
     /// Updates our typing state in a chat.
     Composing {
         chat: ChatId,

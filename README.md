@@ -71,6 +71,10 @@ without embedding a browser engine.
   an emoji without leaving the composer, or `@` in a group to mention a member.
   Reply, react, edit, forward, delete, and check when a message was sent,
   delivered, or read.
+  delivered, or read. Right-click a message and choose Select,
+  then forward several messages to up to five chats at once,
+  or delete them together. Frequently forwarded messages go to
+  one chat at a time, exactly like WhatsApp.
 - **Disappearing-message timers.** Outgoing messages use the chat's known
   timer, including replies, attachments, edits, and forwards. Forwarded copies
   use the destination chat's timer. Received messages remain in the local archive

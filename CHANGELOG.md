@@ -2,6 +2,19 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.9] - 2026-09-17
+
+### Fixed
+
+- Right-click a message and choose Select to tick several messages, then forward them together or delete them together. The selection bar above the composer shows the count with Forward, Delete and a clear button; Escape also leaves selection mode.
+- Forwarding follows WhatsApp's own caps, researched against the WhatsApp Help Center, the WhatsApp Blog and the protocol library: up to five destination chats at once (the historical 20-chat limit was cut to five), or a single chat for frequently forwarded messages (forwarding score of five or more). Anything beyond the cap is cut with an explanation instead of fanning out.
+- Bulk forwards travel the same single-forward path one at a time with a short pause between sends, so a big forward never looks like a burst to the server.
+- The delete confirmation splits the batch: messages still inside the two-day revoke window go to everyone, the rest only here, with exact counts before anything happens.
+
+### Tests
+
+- Added only_plain_content_can_be_forwarded, selection_toggles_and_clears, deleting_many_splits_revocable_from_local_only, five_hops_make_a_frequently_forwarded_message and forward_destinations_keep_five_chats_or_one_for_viral; the demo tour still passes unmodified.
+
 ## [1.0.8] - 2026-09-17
 
 ### Fixed

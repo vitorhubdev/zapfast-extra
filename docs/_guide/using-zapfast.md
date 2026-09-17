@@ -18,6 +18,9 @@ through a chat is not offered.
 
 Right-click a message to reply, react, edit, forward, delete, or check when it
 was sent, delivered, and read. Hover over a reaction to see who added it.
+Choose Select in that menu to tick several messages, then forward them to up
+to five chats at once (one chat for frequently forwarded messages) or delete
+them together.
 Editing uses the composer. Press Escape to cancel.
 
 ## Stickers

@@ -146,6 +146,9 @@ pub struct App {
     pub mention_selected: usize,
     /// Reply target in the open chat.
     pub reply_to: Option<String>,
+    /// Multi-selected message ids in the open chat. Non-empty means the
+    /// selection bar is showing instead of the plain composer row.
+    pub selected: Vec<String>,
     /// Outgoing message being edited.
     pub editing: Option<String>,
     composing: bool,
@@ -211,6 +214,8 @@ pub struct App {
     pub dialog: Option<Dialog>,
     /// Chat filter in the forwarding destination dialog.
     pub forward_search: String,
+    /// Chats ticked in the forwarding destination dialog.
+    pub forward_to: Vec<ChatId>,
     pub poll_draft: crate::model::PollDraft,
     pub poll_creating: bool,
     pub poll_voting: HashSet<(ChatId, String)>,
@@ -368,6 +373,7 @@ impl App {
             mention_start: None,
             mention_selected: 0,
             reply_to: None,
+            selected: Vec::new(),
             editing: None,
             composing: false,
             last_keystroke: None,
@@ -410,6 +416,7 @@ impl App {
             page: Page::Chats,
             dialog: None,
             forward_search: String::new(),
+            forward_to: Vec::new(),
             poll_draft: Default::default(),
             poll_creating: false,
             poll_voting: HashSet::new(),
@@ -1369,6 +1376,45 @@ impl App {
         self.backend.send(Command::FetchOlder(chat.to_owned()));
     }
 
+    /// Whether a message can still be revoked for everyone: ours, intact,
+    /// and inside WhatsApp's delete window.
+    pub fn revocable(&self, chat: &str, id: &str) -> bool {
+        self.conversations
+            .get(chat)
+            .and_then(|conversation| conversation.message(id))
+            .is_some_and(|message| {
+                message.from_me
+                    && !matches!(message.content, Content::Revoked)
+                    && crate::util::now() - message.timestamp <= REVOKE_WINDOW.as_secs() as i64
+            })
+    }
+
+    /// Marks a message revoked locally and asks the phone to revoke it.
+    fn revoke_message(&mut self, chat: &str, id: &str) {
+        if let Some(message) = self
+            .conversations
+            .get_mut(chat)
+            .and_then(|conversation| conversation.message_mut(id))
+        {
+            message.content = Content::Revoked;
+        }
+        self.backend.send(Command::Revoke {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+        });
+    }
+
+    /// Drops a message from the local conversation and the archive.
+    fn delete_message_local(&mut self, chat: &str, id: &str) {
+        if let Some(conversation) = self.conversations.get_mut(chat) {
+            conversation.messages.retain(|message| message.id != id);
+        }
+        self.backend.send(Command::DeleteLocal {
+            chat: chat.to_owned(),
+            id: id.to_owned(),
+        });
+    }
+
     fn mark_read(&mut self, chat: &str) {
         self.notifications.clear(chat);
         if let Some(known) = self.chat_mut(chat) {
@@ -1402,6 +1448,7 @@ impl App {
             self.composer = self.drafts.remove(&id).unwrap_or_default();
             self.composer_mentions = self.draft_mentions.remove(&id).unwrap_or_default();
             self.reply_to = None;
+            self.selected.clear();
             self.editing = None;
         }
         self.emoji_start = None;
@@ -1850,6 +1897,7 @@ impl App {
                     }
                 }
                 self.reply_to = None;
+                self.selected.clear();
                 self.emoji_start = None;
                 self.mention_start = None;
             }
@@ -1945,6 +1993,28 @@ impl App {
                 self.dialog = None;
                 self.forward_search.clear();
             }
+            Action::ForwardMany {
+                from_chat,
+                messages,
+                to_chats,
+            } => {
+                self.backend.send(Command::ForwardMany {
+                    from_chat,
+                    messages,
+                    to_chats,
+                });
+                self.dialog = None;
+                self.forward_search.clear();
+                self.selected.clear();
+            }
+            Action::ToggleSelect(id) => {
+                if let Some(known) = self.selected.iter().position(|known| known == &id) {
+                    self.selected.remove(known);
+                } else {
+                    self.selected.push(id);
+                }
+            }
+            Action::ClearSelection => self.selected.clear(),
             Action::Edit(id) => {
                 let text = self
                     .open_chat
@@ -1975,22 +2045,35 @@ impl App {
             }
             Action::DeleteForEveryone(id) => {
                 if let Some(chat) = self.open_chat.clone() {
-                    if let Some(message) = self
-                        .conversations
-                        .get_mut(&chat)
-                        .and_then(|conversation| conversation.message_mut(&id))
-                    {
-                        message.content = Content::Revoked;
-                    }
-                    self.backend.send(Command::Revoke { chat, id });
+                    self.revoke_message(&chat, &id);
                 }
             }
             Action::DeleteForMe(id) => {
                 if let Some(chat) = self.open_chat.clone() {
-                    if let Some(conversation) = self.conversations.get_mut(&chat) {
-                        conversation.messages.retain(|message| message.id != id);
+                    self.delete_message_local(&chat, &id);
+                }
+            }
+            Action::DeleteMany { ids, for_everyone } => {
+                if let Some(chat) = self.open_chat.clone() {
+                    let mut revoked = 0usize;
+                    let mut local = 0usize;
+                    for id in &ids {
+                        if for_everyone && self.revocable(&chat, id) {
+                            self.revoke_message(&chat, id);
+                            revoked += 1;
+                        } else {
+                            self.delete_message_local(&chat, id);
+                            local += 1;
+                        }
                     }
-                    self.backend.send(Command::DeleteLocal { chat, id });
+                    self.selected.clear();
+                    self.dialog = None;
+                    match (revoked, local) {
+                        (0, 0) => {}
+                        (revoked, 0) => self.toast(format!("Deleted {revoked} for everyone")),
+                        (0, local) => self.toast(format!("Deleted {local} for you")),
+                        _ => self.toast(format!("Deleted {revoked} for everyone, {local} for you")),
+                    }
                 }
             }
             Action::Attach => {
@@ -2224,6 +2307,7 @@ impl App {
                 }
                 if matches!(&dialog, Dialog::Forward { .. }) {
                     self.forward_search.clear();
+                    self.forward_to.clear();
                 }
                 if dialog == Dialog::PairWithPhone {
                     self.pair_phone.clear();
@@ -2854,6 +2938,62 @@ mod tests {
         assert_eq!(back.picker_tab, PickerTab::Stickers);
         let old: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.picker_tab, PickerTab::Emoji);
+    }
+
+    #[test]
+    fn selection_toggles_and_clears() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.open_chat = Some("c".to_owned());
+        app.apply(Action::ToggleSelect("m1".into()), &ctx);
+        app.apply(Action::ToggleSelect("m2".into()), &ctx);
+        assert_eq!(app.selected, vec!["m1".to_owned(), "m2".to_owned()]);
+        app.apply(Action::ToggleSelect("m1".into()), &ctx);
+        assert_eq!(app.selected, vec!["m2".to_owned()]);
+        app.apply(Action::ClearSelection, &ctx);
+        assert!(app.selected.is_empty());
+        app.apply(Action::ToggleSelect("m1".into()), &ctx);
+        app.apply(Action::CloseChat, &ctx);
+        assert!(app.selected.is_empty());
+    }
+
+    #[test]
+    fn deleting_many_splits_revocable_from_local_only() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.open_chat = Some("c".to_owned());
+        let now = crate::util::now();
+        let mut fresh = message("c", "fresh", now - 60);
+        fresh.from_me = true;
+        let mut old = message("c", "old", now - REVOKE_WINDOW.as_secs() as i64 - 60);
+        old.from_me = true;
+        let incoming = message("c", "incoming", now - 60);
+        app.conversations
+            .entry("c".to_owned())
+            .or_default()
+            .messages = vec![fresh, old, incoming];
+        app.apply(
+            Action::DeleteMany {
+                ids: vec!["fresh".into(), "old".into(), "incoming".into()],
+                for_everyone: true,
+            },
+            &ctx,
+        );
+        let conversation = app.conversations.get("c").expect("chat");
+        assert!(
+            conversation
+                .messages
+                .iter()
+                .any(|row| row.id == "fresh" && matches!(row.content, Content::Revoked))
+        );
+        assert!(
+            !conversation
+                .messages
+                .iter()
+                .any(|row| row.id == "old" || row.id == "incoming")
+        );
+        assert!(app.selected.is_empty());
+        assert!(app.dialog.is_none());
     }
 
     #[test]

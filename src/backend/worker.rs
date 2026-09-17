@@ -59,6 +59,10 @@ const THUMBNAIL_SIDE: u32 = 96;
 /// Sticker download batch size for the picker.
 const STICKER_FETCH_LIMIT: usize = 40;
 
+/// Pause between bulk-forwarded messages. One paced stream through the same
+/// single-forward path never looks like a burst to the server.
+const FORWARD_PACE: Duration = Duration::from_millis(250);
+
 /// Quiet repeats of a media download before the bubble reports a failure.
 ///
 /// Network hiccups are common and invisible to the reader: the picture keeps
@@ -2312,6 +2316,24 @@ impl Worker {
                 message,
                 to_chat,
             } => self.forward_message(from_chat, message, to_chat),
+            Command::ForwardMany {
+                from_chat,
+                messages,
+                to_chats,
+            } => self.forward_many(from_chat, messages, to_chats),
+            Command::Forwarded { messages, chats } => {
+                let what = if messages == 1 {
+                    "1 message".to_owned()
+                } else {
+                    format!("{messages} messages")
+                };
+                let whereto = if chats == 1 {
+                    "1 chat".to_owned()
+                } else {
+                    format!("{chats} chats")
+                };
+                self.emit(Event::Info(format!("Forwarded {what} to {whereto}")));
+            }
             Command::Composing { chat, composing } => {
                 let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
                     return;
@@ -2985,10 +3007,7 @@ impl Worker {
             ));
             return;
         };
-        if matches!(
-            source.content,
-            Content::Revoked | Content::Unsupported { .. } | Content::Poll { .. }
-        ) {
+        if !source.content.forwardable() {
             self.emit(Event::Error("This message cannot be forwarded".to_owned()));
             return;
         }
@@ -3030,6 +3049,68 @@ impl Worker {
             message,
             expiration,
         ));
+    }
+
+    /// Forwards selected messages to several chats, paced like a person
+    /// tapping through them.
+    ///
+    /// Anything beyond WhatsApp's destination caps is cut with an
+    /// explanation instead of fanning out. Every pair still travels the
+    /// same single-forward path, one at a time.
+    fn forward_many(&mut self, from_chat: ChatId, messages: Vec<String>, to_chats: Vec<ChatId>) {
+        if messages.is_empty() || to_chats.is_empty() {
+            return;
+        }
+        if self.client.is_none() {
+            self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
+            return;
+        }
+        let frequently = messages
+            .iter()
+            .any(|id| is_frequently_forwarded(self.forwarding_score(&from_chat, id)));
+        let to_chats = cap_destinations(to_chats, frequently);
+        if to_chats.is_empty() {
+            return;
+        }
+        if frequently {
+            self.emit(Event::Info(
+                "Frequently forwarded messages go to one chat at a time".to_owned(),
+            ));
+        }
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let mut first = true;
+            for id in &messages {
+                for to in &to_chats {
+                    if !first {
+                        tokio::time::sleep(FORWARD_PACE).await;
+                    }
+                    first = false;
+                    let _ = commands.send(Command::Forward {
+                        from_chat: from_chat.clone(),
+                        message: id.clone(),
+                        to_chat: to.clone(),
+                    });
+                }
+            }
+            let _ = commands.send(Command::Forwarded {
+                messages: messages.len(),
+                chats: to_chats.len(),
+            });
+        });
+    }
+
+    /// Forwarding score of an archived message, for the frequent-forward cap.
+    /// Messages without stored data count as fresh; the send path still
+    /// refuses whatever it cannot forward.
+    fn forwarding_score(&self, chat: &str, id: &str) -> u32 {
+        self.archive
+            .raw(chat, id)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
+.map(|message| forwarding_score_of(message.get_base_message()))
+            .unwrap_or(0)
     }
 
     fn mark_read(&mut self, chat: ChatId, receipts: bool) {
@@ -4504,6 +4585,33 @@ fn forwarded_of(base: &wa::Message) -> bool {
     })
 }
 
+/// Forwarding score of a message: how many chats it already passed through.
+/// WhatsApp marks five or more as frequently forwarded.
+fn forwarding_score_of(base: &wa::Message) -> u32 {
+    context_of(base)
+        .and_then(|context| context.forwarding_score)
+        .unwrap_or(0)
+}
+
+/// Whether WhatsApp restricts a message to a single destination chat.
+fn is_frequently_forwarded(score: u32) -> bool {
+    score >= crate::model::FREQUENT_FORWARD_SCORE
+}
+
+/// Applies WhatsApp's destination caps: five chats, or one when any message
+/// was forwarded many times. Keeps the dialog order and drops repeats.
+fn cap_destinations(to_chats: Vec<ChatId>, frequently_forwarded: bool) -> Vec<ChatId> {
+    let mut chats = to_chats;
+    chats.truncate(if frequently_forwarded {
+        1
+    } else {
+        crate::model::FORWARD_CHAT_LIMIT
+    });
+    let mut seen = HashSet::new();
+    chats.retain(|chat| seen.insert(chat.clone()));
+    chats
+}
+
 /// Finds the first web address when preview metadata omits its URL.
 fn first_link(text: &str) -> Option<String> {
     text.split_whitespace()
@@ -5444,6 +5552,25 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encodes");
         assert!(Worker::validate_media_bytes(&png, "image/png").is_ok());
+    }
+
+    #[test]
+    fn five_hops_make_a_frequently_forwarded_message() {
+        assert!(!is_frequently_forwarded(0));
+        assert!(!is_frequently_forwarded(4));
+        assert!(is_frequently_forwarded(5));
+        assert!(is_frequently_forwarded(127));
+    }
+
+    #[test]
+    fn forward_destinations_keep_five_chats_or_one_for_viral() {
+        let chats: Vec<ChatId> = (0..7).map(|n| format!("{n}@s.whatsapp.net")).collect();
+        let kept = cap_destinations(chats.clone(), false);
+        assert_eq!(kept.len(), 5);
+        assert_eq!(kept, chats[..5].to_vec(), "order is kept");
+        assert_eq!(cap_destinations(chats, true).len(), 1);
+        let dups = vec!["a@s.whatsapp.net".to_owned(), "a@s.whatsapp.net".to_owned()];
+        assert_eq!(cap_destinations(dups, false).len(), 1);
     }
 
     #[test]

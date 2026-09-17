@@ -35,6 +35,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ChatInfo(_) => 360.0,
                 Dialog::Forward { .. } => 420.0,
                 Dialog::ConfirmSticker { .. } => 340.0,
+                Dialog::ConfirmDeleteMany { .. } => 420.0,
                 Dialog::CreatePoll(_) => 420.0,
             });
             ui.spacing_mut().item_spacing.y = 8.0;
@@ -46,13 +47,65 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::PairWithPhone => pair_with_phone(app, ui),
                 Dialog::NewContact => new_contact(app, ui),
                 Dialog::ChatInfo(id) => chat_info(app, ui, &id),
-                Dialog::Forward { chat, message } => forward(app, ui, &chat, &message),
+                Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::ConfirmSticker { path } => confirm_sticker(app, ui, &path),
+                Dialog::ConfirmDeleteMany { ids, revocable, .. } => {
+                    confirm_delete_many(app, ui, ids, revocable)
+                }
             }
         });
     if response.should_close() {
         app.actions.push(Action::CloseDialog);
     }
+}
+
+fn confirm_delete_many(app: &mut App, ui: &mut egui::Ui, ids: Vec<String>, revocable: usize) {
+    let palette = app.palette;
+    let total = ids.len();
+    title(ui, app, &format!("Delete {} messages?", total.max(1)));
+    let body = if revocable == 0 {
+        format!(
+            "These {total} messages are too old or not yours to revoke. They will be deleted for you."
+        )
+    } else if revocable == total {
+        format!("These {total} messages will be deleted for everyone.")
+    } else {
+        format!(
+            "{revocable} of {total} are still recent enough to delete for everyone; the rest will be deleted for you."
+        )
+    };
+    theme::paragraph(ui, &body, theme::regular(13.5), palette.text);
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if revocable > 0 && danger_button(ui, app, "Delete for everyone") {
+                app.actions.push(Action::DeleteMany {
+                    ids: ids.clone(),
+                    for_everyone: true,
+                });
+            }
+            if theme::pill_button(
+                ui,
+                &palette,
+                if revocable > 0 {
+                    "Delete for me"
+                } else {
+                    "Delete"
+                },
+                revocable == 0,
+            )
+            .clicked()
+            {
+                app.actions.push(Action::DeleteMany {
+                    ids: ids.clone(),
+                    for_everyone: false,
+                });
+            }
+            if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
 }
 
 fn confirm_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
@@ -96,9 +149,24 @@ fn confirm_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
     });
 }
 
-fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, message: &str) {
+fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String]) {
     let palette = app.palette;
-    title(ui, app, "Forward message");
+    title(
+        ui,
+        app,
+        &if messages.len() == 1 {
+            "Forward message".to_owned()
+        } else {
+            format!("Forward {} messages", messages.len())
+        },
+    );
+    theme::paragraph(
+        ui,
+        "WhatsApp allows up to 5 chats at once, or 1 chat for frequently forwarded messages.",
+        theme::regular(12.5),
+        palette.secondary,
+    );
+    ui.add_space(4.0);
     let width = ui.available_width();
     let search = super::widgets::search_field(
         ui,
@@ -129,7 +197,6 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, message: &str) {
 
     let row_height = 52.0;
     let max_height = (ui.ctx().content_rect().height() - 220.0).clamp(row_height * 3.0, 420.0);
-    let mut destination = None;
     egui::ScrollArea::vertical()
         .id_salt("forward-chats")
         .max_height(max_height)
@@ -175,12 +242,29 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, message: &str) {
                         rect.bottom() - 0.5,
                         Stroke::new(1.0, palette.outline),
                     );
+                    let box_center = pos2(rect.right() - 20.0, rect.center().y);
+                    if app.forward_to.contains(&chat.id) {
+                        ui.painter().circle_filled(box_center, 10.0, palette.accent);
+                        Icon::Check.image(egui::Color32::WHITE, 12.0).paint_at(
+                            ui,
+                            egui::Rect::from_center_size(box_center, egui::Vec2::splat(12.0)),
+                        );
+                    } else {
+                        ui.painter()
+                            .circle_stroke(box_center, 9.0, Stroke::new(1.5, palette.dim));
+                    }
                 }
                 if response
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    destination = Some(chat.id.clone());
+                    if let Some(known) = app.forward_to.iter().position(|id| id == &chat.id) {
+                        app.forward_to.remove(known);
+                    } else if app.forward_to.len() < crate::model::FORWARD_CHAT_LIMIT {
+                        app.forward_to.push(chat.id.clone());
+                    } else {
+                        app.toast("WhatsApp allows up to 5 chats per forward");
+                    }
                 }
             }
         });
@@ -197,13 +281,30 @@ fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, message: &str) {
         });
         ui.add_space(12.0);
     }
-    if let Some(to_chat) = destination {
-        app.actions.push(Action::Forward {
-            from_chat: from_chat.to_owned(),
-            message: message.to_owned(),
-            to_chat,
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        theme::text(
+            ui,
+            format!(
+                "{} of {} chats",
+                app.forward_to.len(),
+                crate::model::FORWARD_CHAT_LIMIT
+            ),
+            theme::regular(13.0),
+            palette.secondary,
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if theme::pill_button(ui, &palette, "Forward", true).clicked()
+                && !app.forward_to.is_empty()
+            {
+                app.actions.push(Action::ForwardMany {
+                    from_chat: from_chat.to_owned(),
+                    messages: messages.to_vec(),
+                    to_chats: app.forward_to.clone(),
+                });
+            }
         });
-    }
+    });
 }
 
 fn title(ui: &mut egui::Ui, app: &mut App, label: &str) {

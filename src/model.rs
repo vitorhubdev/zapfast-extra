@@ -393,6 +393,15 @@ impl Content {
             _ => None,
         }
     }
+
+    /// Whether WhatsApp lets this message be forwarded. Mirrors the worker's
+    /// send-time rule so the interface never offers a dead end.
+    pub fn forwardable(&self) -> bool {
+        !matches!(
+            self,
+            Self::Revoked | Self::Unsupported { .. } | Self::Poll { .. }
+        )
+    }
 }
 
 fn with_caption(label: &str, caption: &Option<String>) -> String {
@@ -463,6 +472,13 @@ pub enum Page {
     Settings,
 }
 
+/// Destination chats allowed per forward action, matching WhatsApp: five
+/// chats at once, or a single chat for frequently forwarded messages.
+pub const FORWARD_CHAT_LIMIT: usize = 5;
+/// Forwarding score at which WhatsApp treats a message as frequently
+/// forwarded (the protocol library jumps to its sentinel at five forwards).
+pub const FREQUENT_FORWARD_SCORE: u32 = 5;
+
 /// The tabs of the picker above the composer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -510,10 +526,16 @@ pub enum Dialog {
     /// Manually entered number for messaging or saving a contact.
     NewContact,
     ChatInfo(ChatId),
-    /// Chooses a destination for an archived message.
+    /// Chooses destinations for forwarded messages.
     Forward {
         chat: ChatId,
-        message: String,
+        messages: Vec<String>,
+    },
+    /// Confirms deleting several messages, splitting the revocable ones out.
+    ConfirmDeleteMany {
+        chat: ChatId,
+        ids: Vec<String>,
+        revocable: usize,
     },
     /// Confirms sending a sticker, showing it first.
     ConfirmSticker {
@@ -604,12 +626,23 @@ pub enum Action {
     /// Starts a reply to a message in the open chat.
     Reply(String),
     CancelReply,
-    /// Forwards an archived message to another chat.
+    /// Forwards one message to another chat.
     Forward {
         from_chat: ChatId,
         message: String,
         to_chat: ChatId,
     },
+    /// Forwards selected messages to up to five chats. The worker caps
+    /// frequently forwarded messages at one destination, like WhatsApp.
+    ForwardMany {
+        from_chat: ChatId,
+        messages: Vec<String>,
+        to_chats: Vec<ChatId>,
+    },
+    /// Toggles a message in the multi-select set of the open chat.
+    ToggleSelect(String),
+    /// Leaves multi-select mode without doing anything.
+    ClearSelection,
     /// Loads an outgoing message into the composer for editing.
     Edit(String),
     CancelEdit,
@@ -617,6 +650,12 @@ pub enum Action {
     DeleteForEveryone(String),
     /// Deletes a message locally.
     DeleteForMe(String),
+    /// Deletes selected messages: the revocable ones for everyone when
+    /// asked, everything else only here.
+    DeleteMany {
+        ids: Vec<String>,
+        for_everyone: bool,
+    },
     /// Opens the attachment picker for the current chat.
     Attach,
     SendFiles(Vec<PathBuf>),
@@ -770,6 +809,28 @@ mod tests {
             path: None,
             state: MediaState::Idle,
         }
+    }
+
+    #[test]
+    fn only_plain_content_can_be_forwarded() {
+        assert!(Content::text("hi").forwardable());
+        assert!(
+            Content::Image {
+                media: media(),
+                caption: None,
+            }
+            .forwardable()
+        );
+        assert!(!Content::Revoked.forwardable());
+        assert!(!Content::Unsupported { what: "x".into() }.forwardable());
+        assert!(
+            !Content::Poll {
+                question: "q".into(),
+                options: vec!["a".into(), "b".into()],
+                state: Default::default(),
+            }
+            .forwardable()
+        );
     }
 
     #[test]

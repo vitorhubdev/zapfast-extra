@@ -993,7 +993,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
             "forward" => {
                 app.dialog = app.open_chat.clone().map(|chat| Dialog::Forward {
                     chat,
-                    message: "ada-format".to_owned(),
+                    messages: vec!["ada-format".to_owned()],
                 });
             }
             "unlink" => app.dialog = Some(Dialog::ConfirmUnlink),

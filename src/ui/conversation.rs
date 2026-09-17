@@ -689,6 +689,93 @@ fn mention_picker(app: &mut App, ui: &mut egui::Ui, chat: &Chat, field: egui::Id
     }
 }
 
+/// Bulk-action strip shown above the composer while messages are selected.
+fn selection_strip(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
+    let palette = app.palette;
+    let existing: Vec<String> = app
+        .conversations
+        .get(&chat.id)
+        .map(|conversation| {
+            conversation
+                .messages
+                .iter()
+                .filter(|message| app.selected.contains(&message.id))
+                .map(|message| message.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    if existing.is_empty() {
+        return;
+    }
+    let forwardable: Vec<String> = existing
+        .iter()
+        .filter(|id| {
+            app.conversations
+                .get(&chat.id)
+                .and_then(|conversation| conversation.message(id))
+                .is_some_and(|message| message.content.forwardable())
+        })
+        .cloned()
+        .collect();
+    let revocable = existing
+        .iter()
+        .filter(|id| app.revocable(&chat.id, id))
+        .count();
+    Frame::new()
+        .fill(palette.surface)
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::text(
+                    ui,
+                    format!("{} selected", existing.len()),
+                    theme::semibold(13.5),
+                    palette.text,
+                );
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if theme::icon_button(
+                        ui,
+                        Icon::X,
+                        16.0,
+                        palette.secondary,
+                        palette.text,
+                        "Clear selection",
+                    )
+                    .clicked()
+                    {
+                        app.actions.push(Action::ClearSelection);
+                    }
+                    if theme::pill_button(ui, &palette, "Delete", false).clicked() {
+                        app.actions
+                            .push(Action::ShowDialog(Dialog::ConfirmDeleteMany {
+                                chat: chat.id.clone(),
+                                ids: existing.clone(),
+                                revocable,
+                            }));
+                    }
+                    if theme::pill_button(ui, &palette, "Forward", true).clicked() {
+                        if forwardable.is_empty() {
+                            app.toast("None of the selected messages can be forwarded");
+                        } else {
+                            if forwardable.len() < existing.len() {
+                                app.toast(format!(
+                                    "{} selected messages cannot be forwarded",
+                                    existing.len() - forwardable.len()
+                                ));
+                            }
+                            app.actions.push(Action::ShowDialog(Dialog::Forward {
+                                chat: chat.id.clone(),
+                                messages: forwardable,
+                            }));
+                        }
+                    }
+                });
+            });
+        });
+    ui.add_space(6.0);
+}
+
 fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     let palette = app.palette;
     egui::Panel::bottom("composer")
@@ -699,6 +786,9 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                 .inner_margin(Margin::symmetric(12, 8)),
         )
         .show(ui, |ui| {
+            if !app.selected.is_empty() {
+                selection_strip(app, ui, chat);
+            }
             if chat.read_only {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
@@ -1162,6 +1252,9 @@ struct View<'a> {
     now: i64,
     player: &'a crate::audio::Player,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
+    /// Multi-select mode: row taps toggle instead of opening.
+    selecting: bool,
+    selected: Vec<String>,
 }
 
 fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
@@ -1205,6 +1298,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         now: crate::util::now(),
         player: &app.player,
         copy_rows: app.copy_rows.as_ref(),
+        selecting: !app.selected.is_empty(),
+        selected: app.selected.clone(),
     };
     let mut actions = Vec::new();
     let mut anchored = false;
@@ -1273,10 +1368,14 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 }));
                         if let Some(response) =
                             bubble(ui, &view, message, show_sender, &mut actions)
-                            && view.anchor == Some(message.id.as_str())
                         {
-                            response.scroll_to_me(Some(Align::Center));
-                            anchored = true;
+                            if view.selecting {
+                                select_overlay(ui, &view, message, response.rect, &mut actions);
+                            }
+                            if view.anchor == Some(message.id.as_str()) {
+                                response.scroll_to_me(Some(Align::Center));
+                                anchored = true;
+                            }
                         }
                         previous = Some(message);
                     }
@@ -1584,6 +1683,72 @@ fn bubble(
         },
     );
     response
+}
+
+/// Checkbox and click catcher for multi-select mode.
+///
+/// Painted last so a row tap toggles the message instead of opening whatever
+/// sits under the pointer. The box sits outside the bubble, on the side the
+/// message comes from.
+fn select_overlay(
+    ui: &mut egui::Ui,
+    view: &View<'_>,
+    message: &Message,
+    rect: egui::Rect,
+    actions: &mut Vec<Action>,
+) {
+    let palette = view.palette;
+    let chosen = view.selected.iter().any(|id| id == &message.id);
+    if chosen {
+        let wash = palette.accent;
+        ui.painter().rect_filled(
+            rect,
+            8.0,
+            egui::Color32::from_rgba_unmultiplied(wash.r(), wash.g(), wash.b(), 26),
+        );
+    }
+    let center = egui::pos2(
+        if message.from_me {
+            rect.right() + 13.0
+        } else {
+            rect.left() - 13.0
+        },
+        rect.center().y,
+    );
+    let check = egui::Rect::from_center_size(center, egui::Vec2::splat(20.0));
+    if ui.is_rect_visible(check) {
+        if chosen {
+            ui.painter().circle_filled(center, 10.0, palette.accent);
+            Icon::Check.image(egui::Color32::WHITE, 12.0).paint_at(
+                ui,
+                egui::Rect::from_center_size(center, egui::Vec2::splat(12.0)),
+            );
+        } else {
+            ui.painter()
+                .circle_stroke(center, 9.0, egui::Stroke::new(1.5, palette.dim));
+        }
+    }
+    // The row catcher goes last so it wins taps over attachments; the box
+    // gets its own target because it sits outside the bubble.
+    let row = ui.interact(
+        rect,
+        egui::Id::new(("select", &message.chat, &message.id)),
+        egui::Sense::click(),
+    );
+    let box_hit = ui.interact(
+        check,
+        egui::Id::new(("select-box", &message.chat, &message.id)),
+        egui::Sense::click(),
+    );
+    if row
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        || box_hit
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+    {
+        actions.push(Action::ToggleSelect(message.id.clone()));
+    }
 }
 
 /// Clamps message-selection drags to the view while the pointer is outside it.
@@ -2229,15 +2394,19 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     {
         actions.push(Action::Reply(message.id.clone()));
     }
-    if !matches!(
-        message.content,
-        Content::Revoked | Content::Unsupported { .. } | Content::Poll { .. }
-    ) && widgets::menu_item(ui, &palette, Some(Icon::Forward), "Forward")
+    if message.content.forwardable()
+        && widgets::menu_item(ui, &palette, Some(Icon::Forward), "Forward")
     {
         actions.push(Action::ShowDialog(Dialog::Forward {
             chat: chat.clone(),
-            message: message.id.clone(),
+            messages: vec![message.id.clone()],
         }));
+    }
+    if !matches!(message.content, Content::Revoked)
+        && widgets::menu_item(ui, &palette, Some(Icon::Check), "Select")
+    {
+        actions.push(Action::ToggleSelect(message.id.clone()));
+        ui.close();
     }
     let text = match &message.content {
         Content::Text { text, .. } => Some(text.clone()),
