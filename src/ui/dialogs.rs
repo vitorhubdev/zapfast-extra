@@ -399,6 +399,17 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             ));
         }
     });
+    ui.add_space(10.0);
+    if app.update_checking {
+        theme::text(
+            ui,
+            "Checking for updates…",
+            theme::regular(13.0),
+            palette.secondary,
+        );
+    } else if theme::pill_button(ui, &palette, "Check for updates", false).clicked() {
+        app.actions.push(Action::CheckUpdatesNow);
+    }
 }
 
 fn confirm_unlink(app: &mut App, ui: &mut egui::Ui) {

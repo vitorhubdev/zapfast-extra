@@ -690,6 +690,8 @@ pub enum Action {
     HealSticker {
         path: PathBuf,
     },
+    /// Manual update check from the About dialog.
+    CheckUpdatesNow,
     /// Saves a sticker for the picker.
     SaveSticker(PathBuf),
     /// Removes a saved sticker.

@@ -237,6 +237,8 @@ pub struct App {
     /// A newer release than this build, once GitHub has said so.
     pub update: Option<crate::updates::Release>,
     last_update_check: Option<Instant>,
+    /// A manual update check is waiting for the worker's answer.
+    pub update_checking: bool,
     pub show_update: bool,
     pub update_download: crate::updates::DownloadState,
     pub update_support: Option<Result<crate::updates::install::Installation, String>>,
@@ -433,6 +435,7 @@ impl App {
             actions: Vec::new(),
             update: None,
             last_update_check: None,
+            update_checking: false,
             show_update: false,
             update_download: Default::default(),
             update_support: None,
@@ -1195,6 +1198,15 @@ impl App {
                         self.toast(format!("ZapExt {} is available", notice.version));
                     }
                     self.update = Some(notice);
+                    self.update_checking = false;
+                }
+                Event::UpdateUpToDate => {
+                    self.update_checking = false;
+                    self.toast("You're on the latest version");
+                }
+                Event::UpdateCheckFailed(error) => {
+                    self.update_checking = false;
+                    self.toast_error(format!("Could not check for updates: {error}"));
                 }
                 Event::UpdateSupport(result) => {
                     self.update_support = Some(result);
@@ -2401,6 +2413,18 @@ impl App {
                 self.inspect_update();
             }
             Action::CloseUpdate => self.show_update = false,
+            Action::CheckUpdatesNow => {
+                if self.update_checking {
+                    return;
+                }
+                if self.backend.is_offline() {
+                    self.toast("Connect to check for updates");
+                    return;
+                }
+                self.update_checking = true;
+                self.last_update_check = Some(Instant::now());
+                self.backend.send(Command::CheckUpdatesNow);
+            }
             Action::DownloadUpdate => self.download_update(),
             Action::InstallUpdate => {
                 if matches!(
@@ -2994,6 +3018,52 @@ mod tests {
         );
         assert!(app.selected.is_empty());
         assert!(app.dialog.is_none());
+    }
+
+    #[test]
+    fn manual_update_check_reports_all_outcomes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let ctx = egui::Context::default();
+        app.apply(Action::CheckUpdatesNow, &ctx);
+        // Offline: tapping explains instead of spinning forever.
+        assert!(!app.update_checking);
+        assert!(app.toasts.iter().any(|toast| toast.message.contains("Connect to check")));
+        // Pretend a check is in flight; every worker answer resolves it.
+        app.update_checking = true;
+        events.send(Event::UpdateUpToDate).unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.update_checking);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("latest version"))
+        );
+        app.update_checking = true;
+        events
+            .send(Event::UpdateCheckFailed("offline".to_owned()))
+            .unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.update_checking);
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| matches!(toast.kind, ToastKind::Error))
+        );
+        app.update_checking = true;
+        events
+            .send(Event::UpdateAvailable {
+                version: "9.9.9".into(),
+                url: "https://example.com".into(),
+            })
+            .unwrap();
+        app.background_frame(&ctx);
+        assert!(!app.update_checking);
+        assert_eq!(
+            app.update.as_ref().map(|notice| notice.version.as_str()),
+            Some("9.9.9")
+        );
     }
 
     #[test]

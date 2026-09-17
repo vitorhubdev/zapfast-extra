@@ -2,6 +2,16 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.10] - 2026-09-17
+
+### Fixed
+
+- The About dialog has a Check for updates button next to the version. It reports all three outcomes (available, already latest, failed) instead of checking silently once a day, and never gets stuck spinning.
+
+### Tests
+
+- Added manual_update_check_reports_all_outcomes, covering the button flow from tap through update-found, up-to-date and failure answers.
+
 ## [1.0.9] - 2026-09-17
 
 ### Fixed

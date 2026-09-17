@@ -2671,6 +2671,27 @@ impl Worker {
                     }
                 });
             }
+            Command::CheckUpdatesNow => {
+                let events = self.events.clone();
+                let waker = self.waker.clone();
+                tokio::task::spawn_blocking(move || {
+                    match crate::updates::newer_release() {
+                        Ok(Some(release)) => {
+                            let _ = events.send(Event::UpdateAvailable {
+                                version: release.version,
+                                url: release.url,
+                            });
+                        }
+                        Ok(None) => {
+                            let _ = events.send(Event::UpdateUpToDate);
+                        }
+                        Err(error) => {
+                            let _ = events.send(Event::UpdateCheckFailed(error.to_string()));
+                        }
+                    }
+                    waker.wake();
+                });
+            }
             Command::GifResults { query, results } => {
                 self.emit(Event::Gifs { query, results });
             }
@@ -3109,7 +3130,7 @@ impl Worker {
             .ok()
             .flatten()
             .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
-.map(|message| forwarding_score_of(message.get_base_message()))
+            .map(|message| forwarding_score_of(message.get_base_message()))
             .unwrap_or(0)
     }
 

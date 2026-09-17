@@ -288,6 +288,9 @@ pub enum Command {
     },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
+    /// Manual update check from the About dialog. Unlike the daily check it
+    /// always reports back, so the button never spins forever.
+    CheckUpdatesNow,
     /// Evicts a cached file that never decodes, clears its archive record
     /// and fetches it again. Saved stickers and imported packs are the
     /// user's own files and are never touched.
@@ -499,6 +502,10 @@ pub enum Event {
         version: String,
         url: String,
     },
+    /// A manual check found nothing newer.
+    UpdateUpToDate,
+    /// A manual check failed, with the reason.
+    UpdateCheckFailed(String),
     UpdateSupport(Result<crate::updates::install::Installation, String>),
     UpdateProgress {
         received: u64,
