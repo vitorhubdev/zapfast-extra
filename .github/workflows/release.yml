@@ -116,6 +116,12 @@ jobs:
 
   macos:
     name: macOS universal app
+    # Temporarily off: the macOS runner ran out of disk while making the DMG
+    # (hdiutil: create failed - No space left on device) with 90 GB free, and
+    # the release waited on it. Set the repository variable RELEASE_MACOS to
+    # off to skip it, delete the variable to bring it back. While it is off,
+    # remember to put macos back in the publish job's needs list.
+    if: vars.RELEASE_MACOS != 'off'
     runs-on: macos-latest
     env:
       # Complete Apple credentials enable native-packages signing/notarization.
@@ -235,7 +241,7 @@ jobs:
 
   publish:
     name: GitHub release
-    needs: [build, macos, flatpak]
+    needs: [build, flatpak]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7
