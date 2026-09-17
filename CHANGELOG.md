@@ -2,6 +2,30 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.18] - 2026-09-17
+
+### Fixed
+
+- The PDF viewer only replaced the page on screen when a different page
+  arrived, so a page rendered again at a higher resolution after a zoom was
+  thrown away and the worker was asked for it on every frame. A sharper render
+  of the page now takes the place of the one in memory.
+- A sticker marked as a favourite only showed up in the Favourites section
+  when it was also one of your saved stickers. The section now holds every
+  marked sticker that is still on disk, wherever it came from, and leaves out
+  the ones whose copy is gone.
+- A clip that finished while the next-audio setting was off no longer starts
+  playing when the setting is turned on later.
+- Typing in the chat search keeps working after a result is clicked: the field
+  takes focus back.
+
+### Tests
+
+- Added a_rendered_pdf_page_reaches_the_viewer_and_stale_ones_are_dropped,
+  covering the page hand-off, a stale answer, the page limits and the close
+  path, and reworked favourites_come_first_and_unknown_ones_are_dropped around
+  real files on disk.
+
 ## [1.0.17] - 2026-09-17
 
 ### Tests

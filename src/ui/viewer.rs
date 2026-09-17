@@ -64,7 +64,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             ui.set_height(screen.height());
             let (rect, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BACKDROP);
-            let area = rect.shrink(INSET);
+            let area = usable_area(rect);
             // Remember how wide the view is, so the worker rasterises the
             // page at the size it will be shown at.
             app.viewer_view_width = area.width() * ctx.pixels_per_point();
@@ -194,11 +194,13 @@ fn upload_page(app: &mut App, ctx: &egui::Context, path: &Path, page: usize) {
     if rendered.page != page {
         return;
     }
-    let uploaded = app
-        .pdf_texture
-        .as_ref()
-        .is_some_and(|(known, known_page, _, _)| known == path && *known_page == page);
-    if uploaded {
+    // A sharper render of the page on screen replaces the one in memory; an
+    // older, coarser one is left alone.
+    if let Some((known, known_page, known_width, _)) = app.pdf_texture.as_ref()
+        && known == path
+        && *known_page == page
+        && *known_width >= rendered.width
+    {
         return;
     }
     let image = egui::ColorImage::from_rgba_unmultiplied(
@@ -430,6 +432,15 @@ fn chrome(
             theme::text(ui, text, theme::regular(12.0), palette.dim);
         },
     );
+}
+
+/// Whether the file may carry frames worth decoding.
+fn usable_area(rect: Rect) -> Rect {
+    let inset = INSET
+        .min(rect.width() / 3.0)
+        .min(rect.height() / 3.0)
+        .max(0.0);
+    rect.shrink(inset)
 }
 
 /// Whether the file may carry frames worth decoding.

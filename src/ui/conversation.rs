@@ -347,6 +347,8 @@ fn chat_find(app: &mut App, ui: &mut egui::Ui, _chat: &Chat) {
                         chat: hit.chat.clone(),
                         message: hit.id.clone(),
                     });
+                    // Keep typing in the field while walking the hits.
+                    app.chat_search_focus = true;
                 }
             }
         });

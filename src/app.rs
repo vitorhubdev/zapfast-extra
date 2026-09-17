@@ -2823,8 +2823,10 @@ impl App {
         if let Err(error) = self.player.poll() {
             self.toast_error(error);
         }
-        if self.settings.play_next_audio
-            && let Some(finished) = self.player.take_finished()
+        // The answer is taken either way: a clip that ended while the setting
+        // was off must not start playing when it is turned back on.
+        if let Some(finished) = self.player.take_finished()
+            && self.settings.play_next_audio
         {
             self.play_next_audio(&finished);
         }
@@ -3750,6 +3752,100 @@ mod tests {
         assert_eq!(ids, vec!["a", "b", "c"]);
     }
 
+    #[test]
+    fn a_rendered_pdf_page_reaches_the_viewer_and_stale_ones_are_dropped() {
+        let dir = std::env::temp_dir().join(format!("zapfast-pdf-view-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join("notes.pdf");
+        std::fs::write(&file, b"%PDF-1.4").expect("writes");
+        let chat = "1@s.whatsapp.net";
+        let home = tempfile::tempdir().unwrap();
+        let (mut app, events) = App::headless(AppDirs::under(home.path()), Settings::default());
+        let ctx = egui::Context::default();
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        let mut row = message(chat, "doc", 10);
+        row.content = Content::Document {
+            media: Media {
+                mime: "application/pdf".to_owned(),
+                size: 8,
+                width: None,
+                height: None,
+                path: Some(file.clone()),
+                state: MediaState::Idle,
+            },
+            file_name: "notes.pdf".to_owned(),
+            caption: None,
+            pages: None,
+        };
+        app.conversations.insert(
+            chat.into(),
+            Conversation {
+                requested: true,
+                complete: true,
+                messages: vec![row],
+                ..Default::default()
+            },
+        );
+
+        app.apply(
+            Action::OpenViewer {
+                chat: chat.into(),
+                message: "doc".into(),
+            },
+            &ctx,
+        );
+        let viewer = app.viewer.as_ref().expect("the viewer opens");
+        assert_eq!(viewer.items[0].kind, ViewerKind::Pdf);
+        assert_eq!(viewer.pdf_page, 0);
+
+        // The worker answers the request that is in flight.
+        let page = |page: usize, pages: usize, width: u32| crate::pdf::Page {
+            page,
+            pages,
+            width,
+            height: width * 2,
+            rgba: vec![0; 8],
+        };
+        app.pdf_rendering = Some((file.clone(), 0, 900));
+        events
+            .send(Event::PdfPage {
+                path: file.clone(),
+                page: 0,
+                width: 900,
+                result: Ok(page(0, 3, 900)),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.pdf_page.as_ref().map(|page| page.width), Some(900));
+        assert!(app.pdf_rendering.is_none());
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_pages, 3);
+
+        // An answer for a width nobody waits for is ignored.
+        events
+            .send(Event::PdfPage {
+                path: file.clone(),
+                page: 1,
+                width: 200,
+                result: Ok(page(1, 3, 200)),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.pdf_page.as_ref().map(|page| page.page), Some(0));
+
+        // Pages stop at either end.
+        app.apply(Action::ViewerPage(1), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 1);
+        app.apply(Action::ViewerPage(9), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 2);
+        app.apply(Action::ViewerPage(-9), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 0);
+
+        // Closing leaves nothing behind.
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(app.viewer.is_none());
+        assert!(app.pdf_page.is_none() && app.pdf_texture.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
     #[test]
     fn the_in_chat_search_opens_fills_and_closes() {
         let directory = tempfile::tempdir().unwrap();

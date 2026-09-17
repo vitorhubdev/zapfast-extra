@@ -404,20 +404,31 @@ mod emoji_tests {
     #[test]
     fn favourites_come_first_and_unknown_ones_are_dropped() {
         let saved = vec![
-            std::path::PathBuf::from("a"),
-            std::path::PathBuf::from("b"),
-            std::path::PathBuf::from("c"),
+            std::path::PathBuf::from("a.webp"),
+            std::path::PathBuf::from("b.webp"),
         ];
-        let favorites = vec![
-            std::path::PathBuf::from("c"),
-            std::path::PathBuf::from("gone"),
-        ];
-        let (first, rest) = favourite_first(&saved, &favorites);
-        assert_eq!(first, vec![std::path::PathBuf::from("c")]);
+        // The files have to exist: a favourite whose copy is gone is dropped.
+        let dir = std::env::temp_dir().join(format!("zapfast-favourites-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let mut saved: Vec<std::path::PathBuf> =
+            saved.into_iter().map(|path| dir.join(path)).collect();
+        let gone = dir.join("gone.webp");
+        let phone = dir.join("phone.webp");
+        for path in saved.iter().chain([&gone, &phone]) {
+            std::fs::write(path, b"webp").expect("writes");
+        }
+        std::fs::remove_file(&gone).expect("removes");
+        // A favourite may come from the phone's list rather than the saved ones.
+        let favorites = vec![phone.clone(), gone, saved[1].clone()];
+        let (first, rest) = favourite_sections(&saved, &favorites);
+        assert_eq!(first, vec![phone, saved[1].clone()]);
         assert_eq!(
             rest,
-            vec![std::path::PathBuf::from("a"), std::path::PathBuf::from("b"),]
+            vec![saved[0].clone()],
+            "a favourite leaves My stickers"
         );
+        saved.clear();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -433,16 +444,17 @@ struct StickerChoices {
     favorite: Option<std::path::PathBuf>,
 }
 
-/// Splits saved stickers into favourites and the rest, keeping both in order.
-fn favourite_first(
+/// Splits the sticker tab into favourites and the saved stickers left over.
+///
+/// A favourite may come from anywhere (saved, an imported pack, the phone's
+/// recent list), so the section holds every marked file that is still on disk.
+fn favourite_sections(
     saved: &[std::path::PathBuf],
     favorites: &[std::path::PathBuf],
 ) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
-    let known: std::collections::HashSet<&std::path::Path> =
-        saved.iter().map(|path| path.as_path()).collect();
     let favorites: Vec<std::path::PathBuf> = favorites
         .iter()
-        .filter(|path| known.contains(path.as_path()))
+        .filter(|path| path.is_file())
         .cloned()
         .collect();
     let rest = saved
@@ -473,7 +485,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         return;
     }
     let saved = app.stickers_saved.clone();
-    let (favorites, rest) = favourite_first(&saved, &app.stickers_favorites);
+    let (favorites, rest) = favourite_sections(&saved, &app.stickers_favorites);
     let packs = app.sticker_packs.clone();
     let recent = app.stickers.clone();
     let mut choices = StickerChoices::default();
