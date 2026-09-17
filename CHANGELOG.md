@@ -13,6 +13,8 @@ All notable changes to the ZapExt fork are recorded here.
 - The sticker picker offers saved stickers, imported packs, the phone's recent list, and the stickers the user sent. Stickers that merely passed through a chat are no longer listed or downloaded, even when their file is cached.
 - A media download that fails for a transient reason (dropped connection, busy server) repeats quietly with backoff (1s, 3s, 8s, 20s) while the bubble keeps its loading state, so the reader sees the picture instead of an error. Expired media (403/404/410, already re-requested once) still reports immediately.
 - A picture or sticker whose local file cannot be decoded yet keeps its loading state and retries quietly, instead of showing `Could not display this picture`, and only reports after the attempts are used up.
+- A sticker or GIF whose decoder failed once (a file still being written, a decode that ran out of memory) is decoded again after 30 seconds instead of staying blank for the rest of the session, and a decode that never finishes is forgotten the same way.
+- The quiet retry of a picture holds a bounded budget (five attempts, 600 ms apart) and releases its per-message state as soon as the picture shows.
 - Notifications use a grouped `NotificationTarget` (chat, message, opener) so `cargo clippy -D warnings` passes on all platforms; clicking still opens the exact message.
 - The `icon_has_clear_corners_and_visible_interior` test passes on Linux, macOS, and Windows, and a mark that cannot be decoded at all still falls back to a plain disc instead of a malformed icon.
 - Fork version handling trims `VERSION` everywhere (window title, CLI `--version`, User-Agent, update checks) and tests assert the trimmed value instead of a hardcoded number.
@@ -23,7 +25,7 @@ All notable changes to the ZapExt fork are recorded here.
 
 ### Tests
 
-- Added `brazilian_numbers_follow_the_national_shape`, `the_installed_vector_logo_stays_scalable`, `only_transient_download_failures_are_repeated`, and `the_picker_lists_the_stickers_the_user_sent`; `app_icon_scales_and_falls_back_without_panicking` now asserts the raster artwork is what the window and tray start from and that the vector still rasterizes.
+- Added `brazilian_numbers_follow_the_national_shape`, `the_installed_vector_logo_stays_scalable`, `only_transient_download_failures_are_repeated`, `the_picker_lists_the_stickers_the_user_sent`, `a_failure_that_aged_out_is_decoded_again`, and `picture_retries_are_spaced_and_bounded`; `app_icon_scales_and_falls_back_without_panicking` now asserts the raster artwork is what the window and tray start from and that the vector still rasterizes.
 - Added `notification_target_keeps_chat_and_message_together`, expanded `lines` edge cases, `zapext_version_is_clean_and_comparable`, `version_parsing_rejects_bad_input`, `app_icon_scales_and_falls_back_without_panicking`, `search_keys_ignore_case_and_accents`, `phone_digits_and_grouping_cover_edge_cases`, expanded phone-search and portable-filename cases, and expanded macOS bundle-rename coverage.
 
 ### Docs

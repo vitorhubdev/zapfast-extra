@@ -2855,33 +2855,52 @@ enum PictureRetry {
 /// so a decoder that needs another pass or a file still being written gets one
 /// without the reader ever seeing an error.
 fn quiet_retry(ui: &egui::Ui, message: &Message) -> PictureRetry {
-    const ATTEMPTS: u32 = 5;
-    const WAIT: std::time::Duration = std::time::Duration::from_millis(600);
     let now = std::time::Instant::now();
     ui.ctx().data_mut(|data| {
-        let state = data.get_temp_mut_or_insert_with(retry_id(message), || (0u32, now));
-        if state.0 >= ATTEMPTS {
-            return PictureRetry::Stop;
-        }
-        if now.duration_since(state.1) >= WAIT {
-            state.0 += 1;
-            state.1 = now;
-        }
-        PictureRetry::Wait
+        let state = data.get_temp_mut_or_default::<PictureRetries>(retry_id(message));
+        retry_decision(state, now)
     })
 }
 
 /// Forgets the retries counted for a message, once its picture shows.
 fn forget_retries(ui: &egui::Ui, message: &Message) {
-    ui.ctx().data_mut(|data| {
-        let state = data
-            .get_temp_mut_or_insert_with(retry_id(message), || (0u32, std::time::Instant::now()));
-        state.0 = 0;
-    });
+    ui.ctx()
+        .data_mut(|data| data.remove_temp::<PictureRetries>(retry_id(message)));
 }
 
 fn retry_id(message: &Message) -> egui::Id {
     egui::Id::new(("picture-retry", &message.chat, &message.id))
+}
+
+/// Attempts allowed before a picture reports its error.
+const PICTURE_RETRY_ATTEMPTS: u32 = 5;
+/// Wait between quiet retries of a picture that failed to load.
+const PICTURE_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// Retries counted for one message, kept in egui's own memory.
+#[derive(Clone, Default)]
+struct PictureRetries {
+    attempts: u32,
+    last: Option<std::time::Instant>,
+}
+
+/// Decides what the next paint of a broken picture does.
+///
+/// Frames arrive continuously while a spinner is up, so an attempt is only
+/// spent once the wait since the last one has passed; after the budget the
+/// caller shows its error instead.
+fn retry_decision(state: &mut PictureRetries, now: std::time::Instant) -> PictureRetry {
+    if state.attempts >= PICTURE_RETRY_ATTEMPTS {
+        return PictureRetry::Stop;
+    }
+    if state
+        .last
+        .is_none_or(|last| now.duration_since(last) >= PICTURE_RETRY_WAIT)
+    {
+        state.attempts += 1;
+        state.last = Some(now);
+    }
+    PictureRetry::Wait
 }
 
 /// Draws an image or sticker, using its preview until downloaded. Returns its width.
@@ -3620,6 +3639,34 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn picture_retries_are_spaced_and_bounded() {
+        let start = std::time::Instant::now();
+        let mut state = PictureRetries::default();
+        assert!(matches!(
+            retry_decision(&mut state, start),
+            PictureRetry::Wait
+        ));
+        assert_eq!(state.attempts, 1);
+        // Frames keep arriving while the spinner is up: one attempt at a time.
+        assert!(matches!(
+            retry_decision(&mut state, start),
+            PictureRetry::Wait
+        ));
+        assert_eq!(state.attempts, 1);
+        for round in 2..=PICTURE_RETRY_ATTEMPTS {
+            let at = start + PICTURE_RETRY_WAIT * round;
+            assert!(matches!(retry_decision(&mut state, at), PictureRetry::Wait));
+            assert_eq!(state.attempts, round);
+        }
+        // The budget is spent, so the caller reports the failure.
+        let later = start + PICTURE_RETRY_WAIT * 10;
+        assert!(matches!(
+            retry_decision(&mut state, later),
+            PictureRetry::Stop
+        ));
+    }
 
     fn media(w: Option<u32>, h: Option<u32>) -> Media {
         Media {

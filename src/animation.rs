@@ -19,6 +19,12 @@ const MAX_WIDTH: u32 = 320;
 const MAX_FRAMES: usize = 150;
 /// Time an unseen animation remains decoded.
 const IDLE: Duration = Duration::from_secs(20);
+/// Time a failed or stuck decode is remembered before trying again.
+///
+/// A sticker whose file was still being written, or a decoder that ran out of
+/// memory once, must not be blank for the rest of the session: the entry is
+/// forgotten and the next paint decodes it again, silently.
+const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Maximum concurrent decoders.
 const MAX_DECODERS: usize = 2;
 /// Global texture-frame budget. Least-recently-used animations are removed first.
@@ -47,8 +53,8 @@ struct Playing {
 }
 
 enum Entry {
-    Decoding,
-    Failed,
+    Decoding(Instant),
+    Failed(Instant),
     Ready(Playing),
 }
 
@@ -121,7 +127,7 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
                     last_drawn: Instant::now(),
                 })
             }
-            _ => Entry::Failed,
+            _ => Entry::Failed(Instant::now()),
         };
         entries.insert(arrived_path, entry);
     }
@@ -129,7 +135,7 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
     let now = Instant::now();
     entries.retain(|_, entry| match entry {
         Entry::Ready(playing) => now.duration_since(playing.last_drawn) < IDLE,
-        _ => true,
+        Entry::Failed(at) | Entry::Decoding(at) => now.duration_since(*at) < RETRY_AFTER,
     });
     let mut resident: usize = entries
         .values()
@@ -175,8 +181,8 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             }
             Frame::Ready(playing.frames[chosen].0.clone())
         }
-        Some(Entry::Decoding) => Frame::Pending,
-        Some(Entry::Failed) => Frame::Unavailable,
+        Some(Entry::Decoding(_)) => Frame::Pending,
+        Some(Entry::Failed(_)) => Frame::Unavailable,
         None => {
             if DECODING.load(std::sync::atomic::Ordering::Acquire) >= MAX_DECODERS {
                 // Retry shortly when all decoder slots are busy.
@@ -185,7 +191,7 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             }
             DECODING.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
             let slot = DecodeSlot;
-            entries.insert(path.to_path_buf(), Entry::Decoding);
+            entries.insert(path.to_path_buf(), Entry::Decoding(now));
             let file = path.to_path_buf();
             let ctx = ctx.clone();
             let spawned = std::thread::Builder::new()
@@ -204,7 +210,7 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
                     ctx.request_repaint();
                 });
             if spawned.is_err() {
-                entries.insert(path.to_path_buf(), Entry::Failed);
+                entries.insert(path.to_path_buf(), Entry::Failed(Instant::now()));
                 return Frame::Unavailable;
             }
             Frame::Pending
@@ -516,6 +522,51 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_failure_that_aged_out_is_decoded_again() {
+        let ctx = egui::Context::default();
+        let path = std::path::Path::new("sticker-that-failed.webp");
+        // A decode failure remembered long ago must not keep the sticker blank.
+        {
+            let cache = super::cache(&ctx);
+            cache.0.lock().unwrap().insert(
+                path.to_path_buf(),
+                super::Entry::Failed(Instant::now() - RETRY_AFTER - Duration::from_secs(1)),
+            );
+        }
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(1.0),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(200.0, 200.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 50.0));
+                assert!(matches!(
+                    super::frame(ui, path, rect),
+                    super::Frame::Pending
+                ));
+            },
+        );
+        // The frame's texture deltas belong to a real painting context.
+        output.textures_delta.clear();
+        let cache = super::cache(&ctx);
+        let entries = cache.0.lock().unwrap();
+        let retried = match entries.get(path) {
+            Some(super::Entry::Decoding(at)) | Some(super::Entry::Failed(at)) => {
+                at.elapsed() < RETRY_AFTER
+            }
+            _ => false,
+        };
+        assert!(
+            retried,
+            "a stale failure must be forgotten and decoded again"
+        );
+    }
 
     /// Verifies animated WebP frame disposal.
     #[test]
