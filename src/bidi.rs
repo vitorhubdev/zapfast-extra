@@ -25,6 +25,15 @@ use egui::epaint::{Mesh, Vec2};
 /// Lays out `job` and reorders RTL paragraph runs for visual word order.
 pub fn layout_job(ui: &egui::Ui, job: egui::text::LayoutJob) -> std::sync::Arc<Galley> {
     let mut galley = ui.painter().layout_job(job);
+    // egui hands back a shared, cached galley, so every mutation below copies
+    // it first. Text without a strongly RTL paragraph needs no reordering at
+    // all: hand the cached galley back untouched instead of cloning it.
+    if !paragraph_slices(galley.text())
+        .iter()
+        .any(|p| paragraph_rtl(p))
+    {
+        return galley;
+    }
     reorder_rtl_runs(std::sync::Arc::make_mut(&mut galley));
     galley
 }
@@ -375,6 +384,26 @@ mod tests {
         for c in ['×', '1', '١', '\u{064e}'] {
             assert_eq!(strong_direction(c), None, "{c}");
         }
+    }
+
+    #[test]
+    fn ltr_text_reuses_the_cached_galley() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let mut job = LayoutJob::default();
+            job.append(
+                "Hello world",
+                0.0,
+                TextFormat::simple(FontId::proportional(14.0), Color32::WHITE),
+            );
+            let cached = ui.painter().layout_job(job.clone());
+            let laid = super::layout_job(ui, job);
+            assert!(
+                Arc::ptr_eq(&cached, &laid),
+                "text without RTL must reuse the cached galley instead of cloning it"
+            );
+        });
+        output.textures_delta.clear();
     }
 
     #[test]

@@ -573,10 +573,35 @@ pub fn circle_button(
 
 /// Draws the app logo artwork, decoded once and shared by every surface.
 pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
+    let Some(texture) = logo_texture(ui) else {
+        return;
+    };
+    let rect = egui::Rect::from_center_size(center, Vec2::splat(diameter));
+    ui.painter().image(
+        texture.id(),
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// Logo texture for this egui context, uploaded once and reused.
+///
+/// `Context::load_texture` allocates a new texture on every call, so calling
+/// it per frame would re-upload the whole image continuously. The handle lives
+/// in the context (like the emoji cache) and dies with the window.
+pub fn logo_texture(ui: &egui::Ui) -> Option<egui::TextureHandle> {
     use std::sync::{Arc, OnceLock};
     /// Logo texture side: enough detail for the largest in-app use.
     const SIDE: u32 = 320;
     static LOGO: OnceLock<Option<Arc<egui::ColorImage>>> = OnceLock::new();
+    let id = egui::Id::new("zapext-logo");
+    if let Some(known) = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<egui::TextureHandle>(id))
+    {
+        return Some(known);
+    }
     let image = LOGO.get_or_init(|| {
         let decoded = image::load_from_memory(crate::util::APP_ICON_PNG)
             .ok()?
@@ -589,20 +614,16 @@ pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
         )))
     });
     let Some(image) = image else {
-        return;
+        return None;
     };
     let texture = ui.ctx().load_texture(
         "zapext-logo",
         egui::ImageData::Color(Arc::clone(image)),
         egui::TextureOptions::LINEAR,
     );
-    let rect = egui::Rect::from_center_size(center, Vec2::splat(diameter));
-    ui.painter().image(
-        texture.id(),
-        rect,
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
+    ui.ctx()
+        .data_mut(|data| data.insert_temp(id, texture.clone()));
+    Some(texture)
 }
 
 /// A pill-shaped text button: filled for the primary action, outlined otherwise.
@@ -854,5 +875,23 @@ mod tests {
         assert_eq!(hsl(0.0, 1.0, 0.5), Color32::from_rgb(255, 0, 0));
         assert_eq!(hsl(120.0, 1.0, 0.5), Color32::from_rgb(0, 255, 0));
         assert_eq!(hsl(240.0, 1.0, 0.5), Color32::from_rgb(0, 0, 255));
+    }
+
+    #[test]
+    fn the_logo_texture_is_uploaded_once_per_context() {
+        let ctx = egui::Context::default();
+        let ids = std::cell::RefCell::new(Vec::new());
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ids.borrow_mut()
+                    .push(logo_texture(ui).map(|texture| texture.id()));
+            });
+            output.textures_delta.clear();
+        }
+        let ids = ids.into_inner();
+        // The same texture is reused across frames instead of re-uploaded.
+        assert_eq!(ids.len(), 2);
+        assert!(ids[0].is_some(), "the logo decodes");
+        assert_eq!(ids[0], ids[1]);
     }
 }

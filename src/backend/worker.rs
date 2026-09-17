@@ -890,6 +890,12 @@ impl Worker {
                 return;
             }
         }
+        // A forced request must not leave an older entry behind: without this
+        // the same group would be queried twice on the next tick, which is
+        // exactly the burst the per-tick limit exists to avoid.
+        if force {
+            self.group_info_queue.retain(|queued| queued != id);
+        }
         if !self.group_info_requested.insert(id.to_owned()) {
             return;
         }
@@ -2013,6 +2019,17 @@ impl Worker {
                 row.muted_until = chat
                     .muted_until
                     .unwrap_or_else(|| existing.as_ref().and_then(|row| row.muted_until));
+                // A metadata chunk that omits the archived flag must not
+                // silently unarchive: pin and mute already keep local state
+                // when the chunk omits them, but archived has no such guard
+                // yet. Logged without identifiers until the phone's behavior
+                // here is confirmed; see CHANGELOG 1.0.7.
+                if metadata
+                    && existing.as_ref().is_some_and(|known| known.archived)
+                    && !row.archived
+                {
+                    log::debug!("history sync cleared a locally archived chat flag");
+                }
                 if let Err(error) = self.archive.upsert_chat(&row) {
                     log::warn!("could not store chat {id}: {error}");
                     continue;
@@ -5683,6 +5700,11 @@ mod receipt_tests {
         assert_eq!(
             worker.group_info_queue.front().map(String::as_str),
             Some("1-1@g.us")
+        );
+        assert_eq!(
+            worker.group_info_queue.len(),
+            2,
+            "forcing replaces the older entry instead of duplicating it"
         );
         // Without a client, processing schedules a retry.
         worker.pump_group_info();

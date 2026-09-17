@@ -7,6 +7,17 @@ All notable changes to the ZapExt fork are recorded here.
 ### Fixed
 
 - The Windows executable reports the fork version in its file properties (`1.0.7`) instead of the upstream crate version, both as the file version and as the product version, while the crate keeps the upstream package version for compatibility.
+- Long audio attachments no longer materialize fully in memory: formats other than OGG/Opus decode to a temporary mono 48 kHz spool file and stream from disk during playback, seeking reuses the shared samples (memory) or reopens the spool (disk) instead of copying the remaining tail, and the decoded data is released when playback ends. Tapping play again decodes the original file, so replaying shows a brief loading state instead of restarting instantly.
+- Voice recordings spill raw microphone samples to disk as they arrive and convert once at the end, so a long recording peaks at one copy of the clip instead of two.
+- The in-app logo texture is uploaded once per window and reused across frames instead of re-uploaded on every frame.
+- A forced group metadata request replaces the group's older queued entry instead of duplicating it, so each group is queried at most once per tick as the rate limit intends.
+- Text without a strongly RTL paragraph reuses egui's cached galley untouched instead of cloning it on every frame; Hebrew and Arabic rendering is unchanged.
+- History sync that would clear a locally archived flag is now logged (without identifiers) so the phone's behavior can be confirmed before changing the merge rule; the flag itself is still applied as before.
+- Removed the stale one-off `release-zapext-v1.0.4.yml` workflow: it pinned the v1.0.4 tag with a version check that fails on current main, while the canonical `release.yml` already handles every `v*` tag.
+
+### Tests
+
+- Added `shared_samples_play_only_the_tail`, `file_samples_read_back_with_skip`, `spooled_conversion_matches_in_memory` (bit-exact against `voice::mono_at_rate` at 44.1 kHz stereo, 8 kHz mono and 48 kHz stereo), `spooled_waveform_matches`, `ltr_text_reuses_the_cached_galley` and `the_logo_texture_is_uploaded_once_per_context`; `group_questions_wait_in_line` now asserts a forced request replaces the older entry.
 
 ## [1.0.6] - 2026-09-17
 
