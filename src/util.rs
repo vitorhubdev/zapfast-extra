@@ -229,11 +229,19 @@ pub fn initials(name: &str) -> String {
     initials
 }
 
-/// Formats a phone number with a plus sign and grouped digits.
+/// Formats a phone number with a plus sign and readable grouping.
+///
+/// Brazilian numbers use the national shape: `+55 75 9 9539 9345` for a
+/// mobile (country code, DDD, the mobile 9, then two groups of four) and
+/// `+55 75 8351 1141` for a landline. Everything else keeps a country code
+/// followed by groups of three digits.
 pub fn phone(digits: &str) -> String {
     let digits: String = digits.chars().filter(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return String::new();
+    }
+    if let Some(formatted) = brazilian_phone(&digits) {
+        return formatted;
     }
     let mut out = String::from("+");
     for (index, character) in digits.chars().enumerate() {
@@ -246,6 +254,26 @@ pub fn phone(digits: &str) -> String {
     out
 }
 
+/// Brazilian grouping for a full number that starts with the 55 country code.
+fn brazilian_phone(digits: &str) -> Option<String> {
+    let (ddd, number) = digits.strip_prefix("55")?.split_at_checked(2)?;
+    let area: u8 = ddd.parse().ok()?;
+    if !(11..=99).contains(&area) {
+        return None;
+    }
+    let (head, tail) = match number.len() {
+        // Landline: eight digits, grouped in fours.
+        8 => (&number[..4], &number[4..]),
+        // Mobile: the 9 that marks a mobile, then eight more digits.
+        9 => match number.strip_prefix('9') {
+            Some(rest) => return Some(format!("+55 {area} 9 {} {}", &rest[..4], &rest[4..])),
+            None => (&number[..4], &number[4..]),
+        },
+        _ => return None,
+    };
+    Some(format!("+55 {area} {head} {tail}"))
+}
+
 /// Stable id-derived avatar hue.
 pub fn hue(seed: &str) -> f32 {
     let mut hash: u32 = 2_166_136_261;
@@ -256,38 +284,82 @@ pub fn hue(seed: &str) -> f32 {
     (hash % 360) as f32
 }
 
-/// Embedded SVG app logo used across platform surfaces.
+/// Raster ZapExt artwork: the window, tray, and in-app logo.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/zapext.png");
+/// Vector logo traced from the artwork, used when the raster cannot decode.
 const MARK: &[u8] = include_bytes!("../packaging/icons/zapfast.svg");
+
+fn render_svg_mark(side: u32) -> Option<Vec<u8>> {
+    let tree = resvg::usvg::Tree::from_data(MARK, &resvg::usvg::Options::default()).ok()?;
+    if !(tree.size().width() > 0.0 && tree.size().height() > 0.0) {
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(side, side)?;
+    let scale = (side as f32 / tree.size().width()).min(side as f32 / tree.size().height());
+    let tx = (side as f32 - tree.size().width() * scale) / 2.0;
+    let ty = (side as f32 - tree.size().height() * scale) / 2.0;
+    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale).post_translate(tx, ty);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    Some(
+        pixmap
+            .pixels()
+            .iter()
+            .flat_map(|pixel| {
+                let color = pixel.demultiply();
+                [color.red(), color.green(), color.blue(), color.alpha()]
+            })
+            .collect::<Vec<u8>>(),
+    )
+}
+
+fn render_png_mark(png: &[u8], size: usize) -> Option<Vec<u8>> {
+    let decoded = image::load_from_memory(png).ok()?.to_rgba8();
+    let resized = image::imageops::resize(
+        &decoded,
+        size.max(1) as u32,
+        size.max(1) as u32,
+        image::imageops::FilterType::Lanczos3,
+    );
+    Some(resized.into_raw())
+}
+
+/// Whether a rasterized icon has enough visible interior to be usable.
+fn has_visible_interior(rgba: &[u8], size: usize) -> bool {
+    if rgba.len() != size * size * 4 || size < 8 {
+        return false;
+    }
+    let mut visible_pixels = 0usize;
+    let mut max_alpha = 0u8;
+    let margin = size / 8;
+    for y in margin..(size - margin) {
+        for x in margin..(size - margin) {
+            let alpha = rgba[((y * size + x) * 4) + 3];
+            max_alpha = max_alpha.max(alpha);
+            if alpha >= 32 {
+                visible_pixels += 1;
+            }
+        }
+    }
+    let required = ((size * size) / 32).max(8);
+    max_alpha >= 64 && visible_pixels >= required
+}
 
 /// Rasterizes the logo to straight-alpha RGBA.
 pub fn app_icon_rgba(size: usize) -> Vec<u8> {
     let side = size.max(1) as u32;
-    let rendered = resvg::usvg::Tree::from_data(MARK, &resvg::usvg::Options::default())
-        .ok()
-        .and_then(|tree| {
-            let mut pixmap = resvg::tiny_skia::Pixmap::new(side, side)?;
-            let scale = side as f32 / tree.size().width();
-            resvg::render(
-                &tree,
-                resvg::tiny_skia::Transform::from_scale(scale, scale),
-                &mut pixmap.as_mut(),
-            );
-            Some(
-                pixmap
-                    .pixels()
-                    .iter()
-                    .flat_map(|pixel| {
-                        let color = pixel.demultiply();
-                        [color.red(), color.green(), color.blue(), color.alpha()]
-                    })
-                    .collect::<Vec<u8>>(),
-            )
-        });
-    match rendered {
-        Some(rgba) => rgba,
-        // Fall back to an accent disc if the embedded SVG cannot render.
-        None => plain_disc(size),
+    // The traced artwork is what users see on every platform; the vector is
+    // only a fallback, so a broken raster can never leave a blank icon.
+    if let Some(rgba) = render_png_mark(APP_ICON_PNG, size)
+        && has_visible_interior(&rgba, size.max(1))
+    {
+        return rgba;
     }
+    if let Some(rgba) = render_svg_mark(side)
+        && has_visible_interior(&rgba, size.max(1))
+    {
+        return rgba;
+    }
+    plain_disc(size)
 }
 
 fn plain_disc(size: usize) -> Vec<u8> {
@@ -333,7 +405,9 @@ pub fn phone_digits(text: &str) -> String {
 pub fn phone_matches(phone: &str, query: &str) -> bool {
     let phone = phone_digits(phone);
     let query = phone_digits(query);
-    if query.len() < 4 {
+    // A short or unknown number must never match: an empty stored number
+    // would otherwise match every query through the suffix check below.
+    if phone.len() < 4 || query.len() < 4 {
         return false;
     }
     phone == query || phone.ends_with(&query) || query.ends_with(&phone)
@@ -404,6 +478,32 @@ mod tests {
     }
 
     #[test]
+    fn brazilian_numbers_follow_the_national_shape() {
+        // Mobile: country code, DDD, the 9, then two groups of four.
+        assert_eq!(phone("5575995399345"), "+55 75 9 9539 9345");
+        // Landline: country code, DDD, then two groups of four.
+        assert_eq!(phone("557583511141"), "+55 75 8351 1141");
+        // An older mobile without the extra 9 keeps its four-four shape.
+        assert_eq!(phone("557596815245"), "+55 75 9681 5245");
+        // A DDD outside the country's range stays on the generic grouping.
+        assert_eq!(phone("5505995399345"), "+55 059 953 993 45");
+    }
+
+    #[test]
+    fn the_installed_vector_logo_stays_scalable() {
+        let svg = std::str::from_utf8(MARK).expect("the icon is text");
+        assert!(svg.contains("<path"), "the icon needs traced artwork");
+        assert!(
+            svg.contains("linearGradient"),
+            "the icon needs its gradient"
+        );
+        assert!(
+            !svg.contains("base64"),
+            "the installed icon must stay a real vector"
+        );
+    }
+
+    #[test]
     fn stamps_fall_back_to_dates() {
         let when = Timestamp::from_second(1_700_000_000)
             .expect("valid")
@@ -463,6 +563,54 @@ mod tests {
             "icon interior has too little visible coverage"
         );
     }
+
+    #[test]
+    fn app_icon_scales_and_falls_back_without_panicking() {
+        for size in [1usize, 16, 32, 64, 128] {
+            let icon = app_icon_rgba(size);
+            assert_eq!(icon.len(), size * size * 4, "size {size}");
+        }
+        // The artwork decodes and is what every icon surface starts from.
+        let png = render_png_mark(APP_ICON_PNG, 32).expect("zapext.png must decode");
+        assert_eq!(png.len(), 32 * 32 * 4);
+        assert!(has_visible_interior(&png, 32));
+        assert_eq!(app_icon_rgba(32), png);
+        // The traced vector is still a usable fallback.
+        let vector = render_svg_mark(32).expect("zapfast.svg must render");
+        assert!(has_visible_interior(&vector, 32));
+        // Degenerate and empty buffers are never considered visible.
+        assert!(!has_visible_interior(&[], 32));
+        assert!(!has_visible_interior(&vec![0u8; 32 * 32 * 4], 32));
+        assert!(!has_visible_interior(&[255u8; 10], 2));
+        // Tray template keeps alpha but forces monochrome.
+        let tray = tray_template_rgba(32);
+        assert_eq!(tray.len(), 32 * 32 * 4);
+        for pixel in tray.as_chunks::<4>().0 {
+            assert_eq!(pixel[0], 0);
+            assert_eq!(pixel[1], 0);
+            assert_eq!(pixel[2], 0);
+        }
+    }
+
+    #[test]
+    fn search_keys_ignore_case_and_accents() {
+        assert_eq!(search_key("Angel"), search_key("Ángel"));
+        assert_eq!(search_key("CAFÉ"), "cafe");
+        assert_eq!(search_key("naïve"), "naive");
+        assert_eq!(search_key("Hello"), "hello");
+        assert_eq!(search_key(""), "");
+    }
+
+    #[test]
+    fn phone_digits_and_grouping_cover_edge_cases() {
+        assert_eq!(phone_digits("+55 (75) 99123-4567"), "5575991234567");
+        assert_eq!(phone_digits("abc"), "");
+        assert_eq!(phone(""), "");
+        assert_eq!(phone("abc"), "");
+        assert!(phone("5575991234567").starts_with("+55"));
+        assert_eq!(initials("Jean-Luc Picard"), "JP");
+        assert_eq!(initials("  Mary   Jane  "), "MJ");
+    }
 }
 
 #[cfg(test)]
@@ -477,5 +625,23 @@ mod zapext_phone_search_tests {
         assert!(phone_matches(stored, "75991234567"));
         assert!(!phone_matches(stored, "71991234567"));
         assert!(!phone_matches(stored, "75"));
+    }
+
+    #[test]
+    fn phone_search_rejects_short_or_empty_queries() {
+        let stored = "5575991234567";
+        assert!(!phone_matches(stored, ""));
+        assert!(!phone_matches(stored, "123"));
+        assert!(!phone_matches("", "+55 (75) 99123-4567"));
+        assert!(!phone_matches(stored, "0000000000000"));
+    }
+
+    #[test]
+    fn phone_search_matches_both_directions() {
+        // Query longer than stored (with trunk prefix) still matches by suffix.
+        assert!(phone_matches("75991234567", "+55 (75) 99123-4567"));
+        assert!(phone_matches("5575991234567", "5575991234567"));
+        // Different DDD never matches.
+        assert!(!phone_matches("5575991234567", "5571991234567"));
     }
 }

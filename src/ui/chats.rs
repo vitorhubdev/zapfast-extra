@@ -226,16 +226,10 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
     }
     if !app.show_archived {
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(!app.show_channels, "Chats & groups")
-                .clicked()
-            {
+            if ui.selectable_label(!app.show_channels, "Chats").clicked() {
                 app.show_channels = false;
             }
-            if ui
-                .selectable_label(app.show_channels, "Channels & communities")
-                .clicked()
-            {
+            if ui.selectable_label(app.show_channels, "Channels").clicked() {
                 app.show_channels = true;
             }
         });

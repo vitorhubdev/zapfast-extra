@@ -95,16 +95,19 @@ without embedding a browser engine.
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
-- **Emoji, GIF, and sticker picker.** Search emoji and GIFs, use recent emoji
-  and stickers, and save stickers with a right-click. Emoji autocomplete and
-  picker search select their first match; use the arrow keys and Enter to
-  choose it. GIF search needs a free GIPHY API key unless the build includes
-  one.
+- **Emoji, GIF, and sticker picker.** Search emoji and GIFs, and save stickers
+  with a right-click. The sticker tab lists saved stickers first, then imported
+  packs, then the phone's recent list and the stickers you sent; a sticker that
+  only passed through a chat is never offered. Emoji autocomplete and picker
+  search select their first match; use the arrow keys and Enter to choose it.
+  GIF search needs a free GIPHY API key unless the build includes one.
 - **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`
   file. Animated packs remain animated. Packs are stored as WebP files on your
   computer.
-- **Consistent names.** Use names from your address book or public WhatsApp
-  profile names across chats, replies, mentions, and notifications.
+- **Consistent names.** Prefer names from your address book, then the profile
+  name people chose (shown as `~Name`), across chats, replies, mentions, and
+  notifications. Chats without either show a readable number, including the
+  Brazilian shape `+55 75 9 9539 9345`.
 - **Groups.** See members, sender names, and sender pictures. Announcement
   groups are read-only for non-admins.
 - **Presence.** See online, last-seen, and typing status, and send your typing
@@ -237,7 +240,12 @@ cargo install --path .
 zapfast
 ```
 
-The desktop file and icon are in `packaging/`.
+The desktop file and icon are in `packaging/`. The window, tray, executable,
+bundle, and desktop icons are generated from the master logo artwork with
+`python scripts/make-icons.py --source logo.png` (needs Pillow, NumPy, and
+SciPy); the script writes `assets/zapext.png`, `packaging/icons/zapfast.svg`,
+`packaging/macos/icon-1024.png`, and `packaging/windows/zapfast.ico` so every
+surface shows the same mark.
 
 `whatsapp-rust` is pinned to a Git commit because version 0.7.0 on crates.io
 enables a `simd` feature that needs nightly Rust. The pinned commit builds on

@@ -181,6 +181,21 @@ const SAMPLES: &[Sample] = &[
         archived: true,
         lines: &[(false, "Reminder: your appointment is on Tuesday at 9:30.")],
     },
+    // A number that is not in any address book, shown the way WhatsApp shows
+    // it: country code, DDD, the mobile 9, then two groups of four.
+    Sample {
+        id: "5575995399345@s.whatsapp.net",
+        name: "+55 75 9 9539 9345",
+        minutes_ago: 60 * 24 * 4,
+        unread: 1,
+        pinned: false,
+        muted: false,
+        archived: false,
+        lines: &[
+            (false, "Bom dia! Tudo pronto para amanhã?"),
+            (true, "Tudo sim, chego às 9."),
+        ],
+    },
 ];
 
 fn media(mime: &str, size: u64, width: Option<u32>, height: Option<u32>) -> Media {

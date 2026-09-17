@@ -12,8 +12,9 @@ Enter sends and Shift+Enter adds a line. You can swap them in Settings.
 `*bold*`, `_italic_`, `~strike~`, and ```` ```monospace ```` ```` format
 like WhatsApp, and a message of nothing but emoji shows large.
 Mentions in a group are written with `@`; the smiley opens emoji
-(searchable), GIFs, and stickers, including the stickers used on the
-phone.
+(searchable), GIFs, and stickers: saved stickers, imported packs, and the
+stickers used on the phone or sent from ZapExt. A sticker that only passed
+through a chat is not offered.
 
 Right-click a message to reply, react, edit, forward, delete, or check when it
 was sent, delivered, and read. Hover over a reaction to see who added it.
@@ -22,7 +23,8 @@ Editing uses the composer. Press Escape to cancel.
 ## Stickers
 
 Right-click a sticker in a chat or the picker to save it. Saved stickers
-appear in the **Saved** row. To import a pack, click **Find packs**, copy a
+appear under **My stickers**, and the stickers used on your phone under
+**Recent from phone**. To import a pack, click **Find packs**, copy a
 `signal.art` link from [signalstickers.org](https://signalstickers.org), and
 paste it into the field. You can also open a `.wastickers` file. Animated
 stickers remain animated and play on hover. Use the delete button beside a

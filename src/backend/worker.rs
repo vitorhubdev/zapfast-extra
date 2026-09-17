@@ -59,6 +59,17 @@ const THUMBNAIL_SIDE: u32 = 96;
 /// Sticker download batch size for the picker.
 const STICKER_FETCH_LIMIT: usize = 40;
 
+/// Quiet repeats of a media download before the bubble reports a failure.
+///
+/// Network hiccups are common and invisible to the reader: the picture keeps
+/// its loading state while these run, and only the last failure is shown.
+const MEDIA_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(8),
+    Duration::from_secs(20),
+];
+
 fn account_allows_receipts(
     settings: &whatsapp_rust::wacore::iq::privacy::PrivacySettingsResponse,
 ) -> bool {
@@ -123,9 +134,28 @@ impl Downloadable for PhoneSticker {
     }
 }
 
+/// Whether a failed download is worth repeating quietly.
+///
+/// Expired media (403/404/410, already re-requested once) and the terminal
+/// message the downloader reports for it are final. Anything else can be a
+/// dropped connection or a busy server and deserves another try.
+fn retriable_download(error: &str) -> bool {
+    const FINAL: [&str; 5] = [
+        "403",
+        "404",
+        "410",
+        "No longer available",
+        // Without the keys in the archived message no attempt can succeed.
+        "keys are missing",
+    ];
+    !FINAL.iter().any(|code| error.contains(code))
+}
+
 /// App version in WhatsApp device-property format.
+/// Uses the ZapExt fork version so new pairings show the fork identity;
+/// existing pairings keep their old name until relinking (see README Files).
 fn app_version() -> wa::device_props::AppVersion {
-    let mut parts = env!("CARGO_PKG_VERSION")
+    let mut parts = crate::updates::zapext_version()
         .split('.')
         .map(|part| part.parse::<u32>().ok());
     wa::device_props::AppVersion {
@@ -209,6 +239,7 @@ pub async fn run(
         pending_avatars: HashMap::new(),
         sticker_fetches: HashSet::new(),
         sticker_downloads: HashSet::new(),
+        download_retries: HashMap::new(),
         read_sync: ReadSync::default(),
         poll_decrypting: 0,
         poll_history: Default::default(),
@@ -298,6 +329,8 @@ struct Worker {
     sticker_fetches: HashSet<String>,
     /// Active chat-sticker downloads by chat and message id.
     sticker_downloads: HashSet<(ChatId, String)>,
+    /// Silent media retries per chat and message id.
+    download_retries: HashMap<(ChatId, String), u32>,
 }
 
 /// Decoded history chunk waiting to be canonicalized and archived.
@@ -610,7 +643,7 @@ impl Worker {
             // WhatsApp reads the linked-device name, version, and icon at pairing.
             .with_device_props(
                 DevicePropsOverride::new()
-                    .with_os("ZapFast")
+                    .with_os("ZapExt")
                     .with_version(app_version())
                     .with_platform_type(wa::device_props::PlatformType::DESKTOP),
             )
@@ -755,6 +788,9 @@ impl Worker {
     }
 
     /// Returns the best current chat name.
+    ///
+    /// WhatsApp shows the address-book name first, then the profile name its
+    /// owner chose (marked with a tilde), and only then the number itself.
     fn chat_name(&self, id: &str, push_name: Option<&str>) -> String {
         if id == self.me() {
             return "You".to_owned();
@@ -767,14 +803,15 @@ impl Worker {
         {
             return name;
         }
-        if let Some(digits) = crate::model::phone_of(id) {
-            return crate::util::phone(digits);
-        }
         if let Some(name) = push_name
             .filter(|name| !name.is_empty())
             .or_else(|| self.contacts.get(id)?.push_name.as_deref())
+            .filter(|name| !name.is_empty())
         {
             return format!("~{name}");
+        }
+        if let Some(digits) = crate::model::phone_of(id) {
+            return crate::util::phone(digits);
         }
         fallback_name(id)
     }
@@ -1110,7 +1147,7 @@ impl Worker {
             }
             E::ClientOutdated(_) => {
                 self.set_status(LinkStatus::Failed(
-                    "WhatsApp rejected this version of ZapFast. Update the app".to_owned(),
+                    "WhatsApp rejected this version of ZapExt. Update the app".to_owned(),
                 ));
             }
             E::Messages(batch) => {
@@ -1366,7 +1403,9 @@ impl Worker {
             full_name: None,
             push_name: None,
         });
-        if contact.full_name == name {
+        // A nameless update (a LID pairing, a status change) must not erase
+        // the name the address book already gave us.
+        if contact.full_name == name || (name.is_none() && contact.full_name.is_some()) {
             return;
         }
         contact.full_name = name;
@@ -2754,8 +2793,21 @@ impl Worker {
                 }
             }
             Command::Downloaded { chat, id, result } => {
-                if let Ok(path) = &result {
-                    let _ = self.archive.set_media_path(&chat, &id, path);
+                match &result {
+                    Ok(path) => {
+                        let _ = self.archive.set_media_path(&chat, &id, path);
+                        self.download_retries.remove(&(chat.clone(), id.clone()));
+                    }
+                    Err(error) => {
+                        let key = (chat.clone(), id.clone());
+                        if retriable_download(error) && self.schedule_media_retry(&key) {
+                            // Keep the bubble loading: a transient failure is
+                            // repeated quietly, and the picture appears on its
+                            // own without an error the reader has to dismiss.
+                            return;
+                        }
+                        self.download_retries.remove(&key);
+                    }
                 }
                 let for_picker = self.sticker_downloads.remove(&(chat.clone(), id.clone()));
                 self.emit(Event::Media {
@@ -3302,6 +3354,27 @@ impl Worker {
             };
             let _ = commands.send(Command::Downloaded { chat, id, result });
         });
+    }
+
+    /// Queues another quiet attempt of a download that failed.
+    ///
+    /// Returns true when the repeat was scheduled, so the interface stays in
+    /// its loading state; false means the attempts are exhausted and the
+    /// failure has to be reported.
+    fn schedule_media_retry(&mut self, key: &(ChatId, String)) -> bool {
+        let attempts = self.download_retries.entry(key.clone()).or_insert(0);
+        if *attempts as usize >= MEDIA_RETRY_DELAYS.len() {
+            return false;
+        }
+        let delay = MEDIA_RETRY_DELAYS[*attempts as usize];
+        *attempts += 1;
+        let (chat, message) = key.clone();
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            let _ = commands.send(Command::Download { chat, message });
+        });
+        true
     }
 
     /// Downloads missing recent and archived stickers for the picker.
@@ -5269,6 +5342,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_transient_download_failures_are_repeated() {
+        assert!(retriable_download("connection reset by peer"));
+        assert!(retriable_download("request timed out"));
+        assert!(retriable_download("media could not be decrypted"));
+        // Expired media is final: the phone was already asked to re-upload.
+        assert!(!retriable_download(
+            "No longer available on WhatsApp's servers"
+        ));
+        assert!(!retriable_download("HTTP 403"));
+        assert!(!retriable_download("status 404"));
+        assert!(!retriable_download("gone: 410"));
+        assert!(!retriable_download("Attachment download keys are missing"));
+    }
+
+    #[test]
     fn fallback_names_read_as_phones_or_ids() {
         assert_eq!(
             fallback_name("393331234567@s.whatsapp.net"),
@@ -5650,6 +5738,7 @@ mod receipt_tests {
             pending_avatars: HashMap::new(),
             sticker_fetches: HashSet::new(),
             sticker_downloads: HashSet::new(),
+            download_retries: HashMap::new(),
             read_sync: ReadSync::default(),
             poll_decrypting: 0,
             poll_history: Default::default(),

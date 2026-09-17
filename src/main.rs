@@ -10,10 +10,13 @@ const APP_NAME: &str = "ZapExt";
 const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;
 
 fn app_title(demo: bool) -> String {
+    // Trim once so a trailing newline in VERSION never leaks into the window
+    // title or `--version` output.
+    let version = zapfast::updates::zapext_version();
     if demo {
-        format!("{APP_NAME} Demo - {APP_VERSION}")
+        format!("{APP_NAME} Demo - {version}")
     } else {
-        format!("{APP_NAME} - {APP_VERSION}")
+        format!("{APP_NAME} - {version}")
     }
 }
 
@@ -513,8 +516,13 @@ mod tests {
 
     #[test]
     fn zapext_title_includes_version() {
-        assert_eq!(APP_VERSION, "1.0.4");
-        assert_eq!(app_title(false), "ZapExt - 1.0.4");
+        let version = zapfast::updates::zapext_version();
+        assert!(!version.is_empty());
+        assert_eq!(APP_VERSION.trim(), version);
+        assert_eq!(app_title(false), format!("ZapExt - {version}"));
+        assert_eq!(app_title(true), format!("ZapExt Demo - {version}"));
+        // VERSION file is the single source of truth.
+        assert_eq!(version, include_str!("../VERSION").trim());
     }
 
     #[test]

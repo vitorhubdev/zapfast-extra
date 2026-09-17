@@ -37,6 +37,9 @@
     <control>keyboard</control>
   </supports>
   <releases>
+    <release version="1.0.5" date="2026-09-17">
+      <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.5</url>
+    </release>
     <release version="1.0.4" date="2026-09-16">
       <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.4</url>
     </release>

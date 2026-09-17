@@ -148,9 +148,13 @@ templates:
   arch/zapfast-git/PKGBUILD: packaging/arch/zapfast-git/PKGBUILD.in
   arch/zapfast-git/zapfast-git.install: packaging/arch/zapfast.install
 repositories:
+  # Fork note: upstream Homebrew/AUR destinations belong to crmne/zapfast and
+  # are not published by this fork. Homebrew points at a fork-owned tap
+  # placeholder; AUR entries are kept for template reference only. Releases
+  # publish GitHub assets; downstream publishing requires fork-owned secrets.
   homebrew:
-    url: https://github.com/crmne/homebrew-tap.git
-    push_url: https://github.com/crmne/homebrew-tap.git
+    url: https://github.com/vitorhubdev/homebrew-tap.git
+    push_url: https://github.com/vitorhubdev/homebrew-tap.git
     branch: main
     package_path: Casks
     files:

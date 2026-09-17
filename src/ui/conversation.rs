@@ -48,17 +48,11 @@ fn empty(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let rect = ui.max_rect();
     let center = rect.center() - vec2(0.0, 30.0);
-    theme::logo(
-        ui,
-        center - vec2(0.0, 60.0),
-        72.0,
-        palette.surface,
-        palette.dim,
-    );
+    theme::logo(ui, center - vec2(0.0, 60.0), 72.0);
     ui.painter().text(
         center,
         Align2::CENTER_CENTER,
-        "ZapFast",
+        "ZapExt",
         theme::bold(24.0),
         palette.text,
     );
@@ -2846,6 +2840,50 @@ fn frame_size(media: &Media, thumbnail_hint: Option<(u32, u32)>, limit: f32) -> 
     fit_picture(w, h, limit, PICTURE_HEIGHT.min(limit * 1.3))
 }
 
+/// How a picture that failed to load should be handled.
+enum PictureRetry {
+    /// Keep the loading state and try again shortly.
+    Wait,
+    /// The attempts are used up: show the error.
+    Stop,
+}
+
+/// Counts quiet retries of a picture that failed to load.
+///
+/// Attempts live in egui's own memory, keyed by message, because a view must
+/// not change application state while painting. Every attempt waits a moment,
+/// so a decoder that needs another pass or a file still being written gets one
+/// without the reader ever seeing an error.
+fn quiet_retry(ui: &egui::Ui, message: &Message) -> PictureRetry {
+    const ATTEMPTS: u32 = 5;
+    const WAIT: std::time::Duration = std::time::Duration::from_millis(600);
+    let now = std::time::Instant::now();
+    ui.ctx().data_mut(|data| {
+        let state = data.get_temp_mut_or_insert_with(retry_id(message), || (0u32, now));
+        if state.0 >= ATTEMPTS {
+            return PictureRetry::Stop;
+        }
+        if now.duration_since(state.1) >= WAIT {
+            state.0 += 1;
+            state.1 = now;
+        }
+        PictureRetry::Wait
+    })
+}
+
+/// Forgets the retries counted for a message, once its picture shows.
+fn forget_retries(ui: &egui::Ui, message: &Message) {
+    ui.ctx().data_mut(|data| {
+        let state = data
+            .get_temp_mut_or_insert_with(retry_id(message), || (0u32, std::time::Instant::now()));
+        state.0 = 0;
+    });
+}
+
+fn retry_id(message: &Message) -> egui::Id {
+    egui::Id::new(("picture-retry", &message.chat, &message.id))
+}
+
 /// Draws an image or sticker, using its preview until downloaded. Returns its width.
 fn picture(
     ui: &mut egui::Ui,
@@ -2871,6 +2909,7 @@ fn picture(
             if ui.is_rect_visible(rect) {
                 match animation::frame(ui, path, rect) {
                     animation::Frame::Ready(texture) => {
+                        forget_retries(ui, message);
                         ui.painter().image(
                             texture.id(),
                             rect,
@@ -2878,7 +2917,37 @@ fn picture(
                             Color32::WHITE,
                         );
                     }
-                    _ => egui::Image::new(file_uri(path)).paint_at(ui, rect),
+                    _ => {
+                        // A still frame, or a decoder that needs another pass.
+                        let uri = file_uri(path);
+                        match egui::Image::new(&uri).load_for_size(ui.ctx(), rect.size()) {
+                            Ok(egui::load::TexturePoll::Ready { texture }) => {
+                                forget_retries(ui, message);
+                                ui.painter().image(
+                                    texture.id,
+                                    rect,
+                                    Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            }
+                            Err(_) if matches!(quiet_retry(ui, message), PictureRetry::Stop) => {
+                                ui.painter().rect_filled(rect, 6.0, palette.surface);
+                                theme::paint_icon(
+                                    ui,
+                                    Icon::CircleAlert,
+                                    rect,
+                                    24.0,
+                                    palette.danger,
+                                );
+                            }
+                            _ => {
+                                // Retry quietly, like a picture still loading.
+                                ui.ctx().forget_image(&uri);
+                                ui.painter().rect_filled(rect, 6.0, palette.surface);
+                                theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                            }
+                        }
+                    }
                 }
             }
             if response
@@ -2892,6 +2961,7 @@ fn picture(
         let image = egui::Image::new(file_uri(path));
         return match image.load_for_size(ui.ctx(), vec2(max_width, max_height)) {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
+                forget_retries(ui, message);
                 let size = if sticker.is_some() {
                     fit_sticker(texture.size.x, texture.size.y)
                 } else {
@@ -2925,6 +2995,7 @@ fn picture(
                 size.x
             }
             Err(_) => {
+                let uri = file_uri(path);
                 let size = if sticker.is_some() {
                     Vec2::splat(STICKER_SIDE)
                 } else {
@@ -2932,15 +3003,23 @@ fn picture(
                 };
                 let (rect, response) = ui.allocate_exact_size(size, Sense::click());
                 if ui.is_rect_visible(rect) {
-                    ui.painter().rect_filled(rect, 6.0, palette.surface);
-                    theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, palette.danger);
-                    ui.painter().text(
-                        rect.center() + vec2(0.0, 24.0),
-                        Align2::CENTER_CENTER,
-                        "Could not display this picture. Click to open it.",
-                        theme::regular(11.5),
-                        palette.secondary,
-                    );
+                    if matches!(quiet_retry(ui, message), PictureRetry::Stop) {
+                        ui.painter().rect_filled(rect, 6.0, palette.surface);
+                        theme::paint_icon(ui, Icon::CircleAlert, rect, 24.0, palette.danger);
+                        ui.painter().text(
+                            rect.center() + vec2(0.0, 24.0),
+                            Align2::CENTER_CENTER,
+                            "Could not display this picture. Click to open it.",
+                            theme::regular(11.5),
+                            palette.secondary,
+                        );
+                    } else {
+                        // A cache file still being written, or a decode that
+                        // needs another pass: keep loading quietly.
+                        ui.ctx().forget_image(&uri);
+                        ui.painter().rect_filled(rect, 6.0, palette.surface);
+                        theme::paint_spinner(ui, rect, 22.0, palette.accent);
+                    }
                 }
                 if response.clicked() {
                     actions.push(Action::OpenFile(path.clone()));

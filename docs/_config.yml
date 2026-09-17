@@ -1,11 +1,11 @@
-title: ZapFast
-zapfast_version: "0.14.0"
+title: ZapExt
+zapfast_version: "1.0.5"
 release_asset_prefix: zapfast
-release_app_name: ZapFast
-description: A fast, lightweight WhatsApp app for Linux, macOS, and Windows.
+release_app_name: ZapExt
+description: ZapExt, a community mod of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
 lang: en-US
 timezone: Europe/Berlin
-url: https://zapfast.rocks
+url: https://vitorhubdev.github.io/zapfast-extra
 baseurl: ""
 logo: /assets/images/logo.svg
 image: /screenshot.png
@@ -51,28 +51,30 @@ jekyll_vitepress:
     page_type: TechArticle
     image:
       path: /screenshot.png
-      alt: ZapFast showing a chat with a photo, a voice message, a quoted reply, and a link preview
+      alt: ZapExt showing a chat with a photo, a voice message, a quoted reply, and a link preview
     publisher:
       type: Person
-      name: Carmine Paolino
-      url: https://paolino.me
+      name: vitorhubdev
+      url: https://github.com/vitorhubdev/zapfast-extra
       same_as:
+        - https://github.com/vitorhubdev/zapfast-extra
         - https://github.com/crmne/zapfast
   llms:
-    title: ZapFast
+    title: ZapExt
     description: >-
-      Documentation for ZapFast, a native WhatsApp client for chats, voice
-      messages, attachments, and notifications on Linux, macOS, and Windows.
+      Documentation for ZapExt, a community mod of ZapFast: a native WhatsApp
+      client for chats, voice messages, attachments, and notifications on
+      Linux, macOS, and Windows.
     full: true
     details: >-
       Covers installation, phone linking, everyday use, settings, and the
       WhatsApp connection. Source is on
-      [GitHub](https://github.com/crmne/zapfast).
+      [GitHub](https://github.com/vitorhubdev/zapfast-extra).
   branding:
-    site_title: ZapFast
+    site_title: ZapExt
     logo:
       default: /assets/images/logo.svg
-      alt: ZapFast
+      alt: ZapExt
   syntax:
     light_theme: github
     dark_theme: github.dark
@@ -80,9 +82,9 @@ jekyll_vitepress:
     enabled: true
     show_on_docs: false
     message: >-
-      Brought to you by <a href="https://paolino.me" target="_blank" rel="noreferrer">Carmine Paolino</a>, maker of
+      Maintained by <a href="https://github.com/vitorhubdev" target="_blank" rel="noreferrer">vitorhubdev</a> as a community mod of <a href="https://github.com/crmne/zapfast" target="_blank" rel="noreferrer">ZapFast</a> by Carmine Paolino. Upstream features by
     copyright: >-
-      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a><a href="https://paolino.me/projects" target="_blank" rel="noreferrer" aria-label="More projects by Carmine Paolino">and more</a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. ZapFast is an independent project, not affiliated with or endorsed by WhatsApp LLC or Meta. WhatsApp is a trademark of WhatsApp LLC.</span>
+      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a><a href="https://paolino.me/projects" target="_blank" rel="noreferrer" aria-label="More projects by Carmine Paolino">and more</a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. ZapExt is a community mod of ZapFast, MIT-licensed. Not affiliated with or endorsed by WhatsApp LLC or Meta. WhatsApp is a trademark of WhatsApp LLC.</span>
   doc_footer:
     enabled: true
     previous_label: Previous page
@@ -93,17 +95,15 @@ jekyll_vitepress:
     format: "%Y-%m-%d %H:%M"
   edit_link:
     enabled: true
-    pattern: "https://github.com/crmne/zapfast/edit/main/docs/:path"
+    pattern: "https://github.com/vitorhubdev/zapfast-extra/edit/main/docs/:path"
     text: Edit this page on GitHub
   github_star:
     enabled: true
-    repository: crmne/zapfast
+    repository: vitorhubdev/zapfast-extra
     text: Star
     show_count: true
   github_sponsor:
-    enabled: true
-    user: crmne
-    text: Sponsor
+    enabled: false
 
 plugins:
   - jekyll-redirect-from

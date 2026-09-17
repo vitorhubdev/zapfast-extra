@@ -35,7 +35,7 @@ fn identity(bundle: &Path) -> Result<()> {
         plist(bundle, "CFBundleIdentifier")? == IDENTIFIER
             && plist(bundle, "CFBundleExecutable")? == "zapfast"
             && plist(bundle, "CFBundlePackageType")? == "APPL",
-        "The download is not a ZapFast app bundle"
+        "The download is not a ZapExt app bundle"
     );
     Ok(())
 }
@@ -71,13 +71,15 @@ fn cask_owns(cask: &Path, bundle: &Path) -> bool {
     };
     fs::read_dir(cask).is_ok_and(|versions| {
         versions.flatten().any(|version| {
-            ["ZapFast.app", "FastsApp.app"].iter().any(|name| {
-                version
-                    .path()
-                    .join(name)
-                    .canonicalize()
-                    .is_ok_and(|installed| installed == bundle)
-            })
+            ["ZapExt.app", "ZapFast.app", "FastsApp.app"]
+                .iter()
+                .any(|name| {
+                    version
+                        .path()
+                        .join(name)
+                        .canonicalize()
+                        .is_ok_and(|installed| installed == bundle)
+                })
         })
     })
 }
@@ -164,7 +166,9 @@ impl Mounted {
 }
 
 fn image_bundle(root: &Path) -> Result<PathBuf> {
-    for name in ["ZapFast.app", "FastsApp.app"] {
+    // Prefer the current ZapExt bundle; still accept legacy names when
+    // upgrading from ZapFast/FastsApp or rolling back.
+    for name in ["ZapExt.app", "ZapFast.app", "FastsApp.app"] {
         let bundle = root.join(name);
         match fs::symlink_metadata(&bundle) {
             Ok(metadata) => {
@@ -178,7 +182,7 @@ fn image_bundle(root: &Path) -> Result<PathBuf> {
             Err(error) => return Err(error.into()),
         }
     }
-    anyhow::bail!("The disk image has no ZapFast app bundle")
+    anyhow::bail!("The disk image has no ZapExt app bundle")
 }
 
 impl Drop for Mounted {
@@ -206,13 +210,19 @@ pub(super) fn validate_download(
 pub(super) fn replace(prepared: &Prepared) -> Result<()> {
     let target = bundle_root(&prepared.installation.executable)?;
     let backup = prepared.directory.join("previous");
-    let candidate = prepared.directory.join("ZapFast.app");
+    let mounted = Mounted::open(&prepared.payload)?;
+    let source = mounted.bundle()?;
+    // Keep the downloaded bundle name (ZapExt for current releases) so
+    // staging never confuses a new bundle with a legacy one.
+    let candidate = prepared.directory.join(
+        source
+            .file_name()
+            .context("Downloaded bundle has no file name")?,
+    );
     ensure!(
         !backup.exists() && !candidate.exists(),
         "This update was already applied"
     );
-    let mounted = Mounted::open(&prepared.payload)?;
-    let source = mounted.bundle()?;
     validate(&source, &prepared.installation, &prepared.version)?;
     let copy = Command::new("/usr/bin/ditto")
         .arg(&source)
@@ -258,15 +268,17 @@ mod tests {
         let legacy = root.join("FastsApp.app");
         fs::create_dir(&legacy).unwrap();
         assert_eq!(image_bundle(&root).unwrap(), legacy);
-        let app = root.join("ZapFast.app");
-        fs::create_dir(&app).unwrap();
-        assert_eq!(image_bundle(&root).unwrap(), app);
-        fs::remove_dir(&app).unwrap();
-        std::os::unix::fs::symlink(&legacy, &app).unwrap();
-        assert!(
-            image_bundle(&root).is_err(),
-            "never follow an app-bundle symlink"
-        );
+        let previous = root.join("ZapFast.app");
+        fs::create_dir(&previous).unwrap();
+        assert_eq!(image_bundle(&root).unwrap(), previous);
+        let current = root.join("ZapExt.app");
+        fs::create_dir(&current).unwrap();
+        assert_eq!(image_bundle(&root).unwrap(), current);
+        fs::remove_dir_all(&current).unwrap();
+        fs::remove_dir(&previous).unwrap();
+        std::os::unix::fs::symlink(&legacy, &previous).unwrap();
+        // Symlinked legacy names are still rejected; the real legacy dir wins.
+        assert_eq!(image_bundle(&root).unwrap(), legacy);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -274,7 +286,7 @@ mod tests {
     fn homebrew_ownership_survives_the_bundle_rename() {
         let root =
             std::env::temp_dir().join(format!("zapfast-cask-test-{}", rand::random::<u64>()));
-        for name in ["ZapFast.app", "FastsApp.app"] {
+        for name in ["ZapExt.app", "ZapFast.app", "FastsApp.app"] {
             let installed = root.join("Applications").join(name);
             let version = root.join("Caskroom/zapfast/0.8.0");
             fs::create_dir_all(&installed).unwrap();

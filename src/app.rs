@@ -547,9 +547,11 @@ impl App {
             title,
             body,
             picture,
-            chat_id.to_owned(),
-            message.id.clone(),
-            std::sync::Arc::clone(&self.notification_opens),
+            crate::notify::NotificationTarget::new(
+                chat_id.to_owned(),
+                message.id.clone(),
+                std::sync::Arc::clone(&self.notification_opens),
+            ),
             move || waker.wake(),
         );
     }
@@ -1180,7 +1182,7 @@ impl App {
                 Event::UpdateAvailable { version, url } => {
                     let notice = crate::updates::Release { version, url };
                     if self.update.as_ref() != Some(&notice) {
-                        self.toast(format!("ZapFast {} is available", notice.version));
+                        self.toast(format!("ZapExt {} is available", notice.version));
                     }
                     self.update = Some(notice);
                 }

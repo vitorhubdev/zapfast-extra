@@ -805,12 +805,18 @@ impl Archive {
         rows.collect()
     }
 
-    /// Returns downloaded chat stickers for the picker, newest first.
+    /// Returns downloaded stickers the user sent, newest first.
+    ///
+    /// The picker offers what the user chose: saved stickers, imported packs
+    /// and the phone's recent list. Stickers that merely passed through a
+    /// chat are never listed, even after their file is cached.
     pub fn recent_stickers(&self, limit: usize) -> Result<Vec<ArchivedSticker>> {
         let mut statement = self.connection.prepare(
             "SELECT json_extract(content, '$.media.path') AS path, MAX(timestamp), raw
              FROM messages
-             WHERE json_extract(content, '$.kind') = 'sticker' AND path IS NOT NULL
+             WHERE json_extract(content, '$.kind') = 'sticker'
+               AND from_me = 1
+               AND path IS NOT NULL
              GROUP BY path
              ORDER BY 2 DESC
              LIMIT ?1",
@@ -828,14 +834,15 @@ impl Archive {
             .collect())
     }
 
-    /// Returns undownloaded sticker messages, outgoing first and newest first.
+    /// Returns undownloaded sticker messages the user sent, newest first.
     pub fn stickers_without_file(&self, limit: usize) -> Result<Vec<(String, String)>> {
         let mut statement = self.connection.prepare(
             "SELECT chat, id FROM messages
              WHERE json_extract(content, '$.kind') = 'sticker'
+               AND from_me = 1
                AND json_extract(content, '$.media.path') IS NULL
                AND raw IS NOT NULL
-             ORDER BY from_me DESC, timestamp DESC
+             ORDER BY timestamp DESC
              LIMIT ?1",
         )?;
         let rows = statement.query_map(params![limit as i64], |row| {
@@ -1805,13 +1812,13 @@ mod sticker_tests {
     use super::*;
     use crate::model::{Content, Delivery, Media, MediaState};
 
-    fn sticker(chat: &str, id: &str, timestamp: i64, path: Option<&str>) -> Message {
+    fn sticker(chat: &str, id: &str, timestamp: i64, path: Option<&str>, from_me: bool) -> Message {
         Message {
             id: id.into(),
             chat: chat.into(),
             sender: chat.into(),
             sender_name: None,
-            from_me: false,
+            from_me,
             timestamp,
             content: Content::Sticker {
                 media: Media {
@@ -1864,15 +1871,18 @@ mod sticker_tests {
     }
 
     #[test]
-    fn unfetched_stickers_are_listed_for_the_picker_and_fetched_ones_are_not() {
+    fn the_picker_lists_the_stickers_the_user_sent() {
         let archive = Archive::in_memory().expect("opens");
         archive.ensure_chat("a@s.whatsapp.net", "A").expect("chat");
         archive
-            .insert_message(&sticker("a@s.whatsapp.net", "s1", 10, None), Some(b"raw"))
+            .insert_message(
+                &sticker("a@s.whatsapp.net", "s1", 10, None, true),
+                Some(b"raw"),
+            )
             .expect("inserted");
         archive
             .insert_message(
-                &sticker("a@s.whatsapp.net", "s2", 20, Some("/nowhere/s2.webp")),
+                &sticker("a@s.whatsapp.net", "s2", 20, None, false),
                 Some(b"raw"),
             )
             .expect("inserted");
@@ -1881,8 +1891,44 @@ mod sticker_tests {
             missing,
             vec![("a@s.whatsapp.net".to_owned(), "s1".to_owned())]
         );
-        // Exclude missing local files.
-        assert!(archive.recent_stickers(10).expect("lists").is_empty());
+
+        // Files on disk decide what the picker can show; a received sticker
+        // never enters it, and a missing file keeps a sent one out too.
+        let dir = std::env::temp_dir().join(format!("zapfast-stickers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let sent = dir.join("sent.webp");
+        let received = dir.join("received.webp");
+        std::fs::write(&sent, b"sticker").expect("writes");
+        std::fs::write(&received, b"sticker").expect("writes");
+        archive
+            .insert_message(
+                &sticker(
+                    "a@s.whatsapp.net",
+                    "s3",
+                    30,
+                    Some(&sent.to_string_lossy()),
+                    true,
+                ),
+                Some(b"raw"),
+            )
+            .expect("inserted");
+        archive
+            .insert_message(
+                &sticker(
+                    "a@s.whatsapp.net",
+                    "s4",
+                    40,
+                    Some(&received.to_string_lossy()),
+                    false,
+                ),
+                Some(b"raw"),
+            )
+            .expect("inserted");
+        let recent = archive.recent_stickers(10).expect("lists");
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].path, sent);
+        assert_eq!(recent[0].last_used, 30);
+        std::fs::remove_dir_all(dir).expect("cleans up");
     }
 }
 

@@ -35,6 +35,25 @@ pub struct Notifications {
     pending: std::collections::HashMap<String, Vec<tokio::sync::oneshot::Sender<()>>>,
 }
 
+/// Identifies which chat/message a notification opens when clicked.
+/// Grouping these keeps `show`/`deliver` under Clippy's argument limit.
+#[derive(Clone, Debug)]
+pub struct NotificationTarget {
+    pub chat: String,
+    pub message: String,
+    pub opened: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl NotificationTarget {
+    pub fn new(chat: String, message: String, opened: Arc<Mutex<Vec<(String, String)>>>) -> Self {
+        Self {
+            chat,
+            message,
+            opened,
+        }
+    }
+}
+
 impl Notifications {
     fn register(&mut self, chat: &str) -> tokio::sync::oneshot::Receiver<()> {
         self.pending.retain(|_, entries| {
@@ -67,26 +86,13 @@ impl Notifications {
         title: String,
         body: String,
         picture: Option<PathBuf>,
-        chat: String,
-        message: String,
-        opened: Arc<Mutex<Vec<(String, String)>>>,
+        target: NotificationTarget,
         wake: impl Fn() + Send + 'static,
     ) {
-        let cancelled = self.register(&chat);
+        let cancelled = self.register(&target.chat);
         let spawned = std::thread::Builder::new()
             .name("notification".into())
-            .spawn(move || {
-                deliver(
-                    &title,
-                    &body,
-                    picture.as_deref(),
-                    chat,
-                    message,
-                    opened,
-                    wake,
-                    cancelled,
-                )
-            });
+            .spawn(move || deliver(&title, &body, picture.as_deref(), target, wake, cancelled));
         if let Err(error) = spawned {
             log::debug!("no thread for a notification: {error}");
         }
@@ -108,12 +114,15 @@ fn deliver(
     title: &str,
     body: &str,
     picture: Option<&std::path::Path>,
-    chat: String,
-    message: String,
-    opened: Arc<Mutex<Vec<(String, String)>>>,
+    target: NotificationTarget,
     wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let NotificationTarget {
+        chat,
+        message,
+        opened,
+    } = target;
     if !matches!(
         cancelled.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -122,7 +131,7 @@ fn deliver(
     }
     let mut notification = notify_rust::Notification::new();
     notification
-        .appname("ZapFast")
+        .appname("ZapExt")
         .summary(title)
         .body(body)
         .icon("zapfast")
@@ -168,12 +177,15 @@ fn deliver(
     title: &str,
     body: &str,
     picture: Option<&std::path::Path>,
-    chat: String,
-    message: String,
-    opened: Arc<Mutex<Vec<(String, String)>>>,
+    target: NotificationTarget,
     wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
+    let NotificationTarget {
+        chat,
+        message,
+        opened,
+    } = target;
     if !matches!(
         cancelled.try_recv(),
         Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -197,9 +209,7 @@ fn deliver(
     title: &str,
     body: &str,
     picture: Option<&std::path::Path>,
-    _chat: String,
-    _message: String,
-    _opened: Arc<Mutex<Vec<(String, String)>>>,
+    _target: NotificationTarget,
     _wake: impl Fn() + Send + 'static,
     mut cancelled: tokio::sync::oneshot::Receiver<()>,
 ) {
@@ -215,7 +225,7 @@ fn deliver(
         return;
     }
     let mut notification = notify_rust::Notification::new();
-    notification.appname("ZapFast").summary(title).body(body);
+    notification.appname("ZapExt").summary(title).body(body);
     // Windows uses the image; macOS always uses the app icon.
     if let Some(picture) = picture {
         notification.image_path(&picture.to_string_lossy());
@@ -282,14 +292,50 @@ mod tests {
         let mut notifications = Notifications::default();
         notifications.show(
             "Ada Lovelace".into(),
-            "A test from ZapFast, with a picture".into(),
+            "A test from ZapExt, with a picture".into(),
             picture,
-            "test".into(),
-            "test-message".into(),
-            Default::default(),
+            NotificationTarget::new("test".into(), "test-message".into(), Default::default()),
             || {},
         );
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn notification_target_keeps_chat_and_message_together() {
+        let opened: Arc<Mutex<Vec<(String, String)>>> = Default::default();
+        let target = NotificationTarget::new("chat-1".into(), "msg-1".into(), Arc::clone(&opened));
+        assert_eq!(target.chat, "chat-1");
+        assert_eq!(target.message, "msg-1");
+        target
+            .opened
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push((target.chat.clone(), target.message.clone()));
+        assert_eq!(
+            *opened.lock().unwrap_or_else(|p| p.into_inner()),
+            vec![("chat-1".to_owned(), "msg-1".to_owned())]
+        );
+    }
+
+    #[test]
+    fn notification_lines_cover_groups_directs_and_empty_summaries() {
+        assert_eq!(
+            lines("Rust Berlin", true, "Mira", "Save me a seat"),
+            ("Rust Berlin".to_owned(), "Mira: Save me a seat".to_owned())
+        );
+        assert_eq!(
+            lines("Ada Lovelace", false, "Ada Lovelace", "Photo"),
+            ("Ada Lovelace".to_owned(), "Photo".to_owned())
+        );
+        // Empty summary still yields a usable title/body pair.
+        assert_eq!(
+            lines("Chat", false, "Someone", ""),
+            ("Chat".to_owned(), String::new())
+        );
+        assert_eq!(
+            lines("Group", true, "", "hi"),
+            ("Group".to_owned(), ": hi".to_owned())
+        );
     }
 
     #[test]

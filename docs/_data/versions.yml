@@ -1,8 +1,8 @@
-current: v0.14.0
+current: v1.0.5
 items:
-  - id: v0.14.0
-    title: v0.14.0
+  - id: v1.0.5
+    title: v1.0.5
     url: /download/
   - title: Changelog
-    url: https://github.com/crmne/zapfast/releases
+    url: https://github.com/vitorhubdev/zapfast-extra/blob/main/CHANGELOG.md
     external: true

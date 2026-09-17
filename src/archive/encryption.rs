@@ -43,10 +43,10 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     let store = apple_native_keyring_store::keychain::Store::new();
     #[cfg(windows)]
     let store = windows_native_keyring_store::Store::new();
-    let store = store.context("Unlock your OS keyring and restart ZapFast")?;
+    let store = store.context("Unlock your OS keyring and restart ZapExt")?;
     let entry = store
         .build("rocks.zapfast.ZapFast", &identity, None)
-        .context("The OS keyring could not open ZapFast's archive key")?;
+        .context("The OS keyring could not open ZapExt's archive key")?;
     key_from_entry(path, &entry)
 }
 
@@ -84,7 +84,7 @@ fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<
             );
             Ok(key)
         }
-        Err(error) => Err(error).context("Unlock your OS keyring and restart ZapFast"),
+        Err(error) => Err(error).context("Unlock your OS keyring and restart ZapExt"),
     }
 }
 

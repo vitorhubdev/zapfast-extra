@@ -13,8 +13,10 @@ upstream workflow conventions when they conflict.
 - The visible fork name is `ZapExt`. Keep the upstream/internal `zapfast` crate,
   storage paths, app ids, protocol identities, and compatibility names unchanged
   unless a task explicitly migrates them safely.
-- The fork version starts at `1.0.1`. `ZAPEXT_VERSION` in `src/updates.rs` is the
-  source of truth for the ZapExt product version; `src/main.rs` must use that value.
+- The fork version starts at `1.0.1`. `VERSION` in the repository root is the
+  single source of truth for the ZapExt product version; `src/updates.rs`
+  exposes it as `ZAPEXT_VERSION`/`zapext_version()` and `src/main.rs` must use
+  that value (trimmed, never hardcoded).
 - Every completed modification batch must receive a new ZapExt version before the
   work is considered done. By default increment the patch number by one
   (`1.0.1` -> `1.0.2` -> `1.0.3`). Use a minor or major bump only when the scope

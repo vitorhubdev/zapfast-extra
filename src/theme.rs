@@ -571,18 +571,38 @@ pub fn circle_button(
     }
 }
 
-/// Draws the app logo.
-pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32, disc: Color32, glyph: Color32) {
-    ui.painter().circle_filled(center, diameter / 2.0, disc);
-    // Match `packaging/icons/zapfast.svg`.
-    let icon_size = diameter * 0.56;
-    let icon_rect = egui::Rect::from_center_size(
-        center - Vec2::new(0.0, diameter * 0.02),
-        Vec2::splat(icon_size),
+/// Draws the app logo artwork, decoded once and shared by every surface.
+pub fn logo(ui: &egui::Ui, center: egui::Pos2, diameter: f32) {
+    use std::sync::{Arc, OnceLock};
+    /// Logo texture side: enough detail for the largest in-app use.
+    const SIDE: u32 = 320;
+    static LOGO: OnceLock<Option<Arc<egui::ColorImage>>> = OnceLock::new();
+    let image = LOGO.get_or_init(|| {
+        let decoded = image::load_from_memory(crate::util::APP_ICON_PNG)
+            .ok()?
+            .to_rgba8();
+        let resized =
+            image::imageops::resize(&decoded, SIDE, SIDE, image::imageops::FilterType::Lanczos3);
+        Some(Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+            [SIDE as usize; 2],
+            resized.as_raw(),
+        )))
+    });
+    let Some(image) = image else {
+        return;
+    };
+    let texture = ui.ctx().load_texture(
+        "zapext-logo",
+        egui::ImageData::Color(Arc::clone(image)),
+        egui::TextureOptions::LINEAR,
     );
-    Icon::MessageCircle
-        .image(glyph, icon_size)
-        .paint_at(ui, icon_rect);
+    let rect = egui::Rect::from_center_size(center, Vec2::splat(diameter));
+    ui.painter().image(
+        texture.id(),
+        rect,
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
 }
 
 /// A pill-shaped text button: filled for the primary action, outlined otherwise.

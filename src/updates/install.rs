@@ -601,12 +601,12 @@ pub fn acknowledge(job: &Path) -> Result<()> {
         "The receipt belongs to a different installation"
     );
     ensure!(
-        env!("CARGO_PKG_VERSION") == handoff.prepared.version,
+        crate::updates::zapext_version() == handoff.prepared.version,
         "The updated app reports the wrong version"
     );
     fs::write(
         handoff.prepared.directory.join("started"),
-        env!("CARGO_PKG_VERSION"),
+        crate::updates::zapext_version(),
     )?;
     Ok(())
 }
@@ -751,6 +751,14 @@ mod tests {
             "zapext-v1.0.4-windows-arm64-portable.EXE"
         )));
         assert!(!official_portable_filename(Path::new("zapfast.exe")));
+        // Case-insensitive suffix, but the stem must be a file name.
+        assert!(official_portable_filename(Path::new(
+            r"C:\Users\Ada\ZapExt-v1.0.5-windows-x64-Portable.Exe"
+        )));
+        assert!(!official_portable_filename(Path::new(
+            "zapfast-portable.exe.bak"
+        )));
+        assert!(!official_portable_filename(Path::new("portable.exe")));
     }
 
     #[test]

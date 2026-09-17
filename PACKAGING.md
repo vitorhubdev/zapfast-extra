@@ -5,25 +5,35 @@ it pins the shared CLI and nFPM versions and declares Linux amd64/arm64 inputs,
 DEB/RPM contents, dependencies, recipe templates and downstream repositories.
 Application assets and native recipes stay in `packaging/`.
 
+ZapExt is a fork of ZapFast. The fork product version lives in `VERSION`
+(`1.0.x`) and GitHub tags are `v1.0.x` in
+`vitorhubdev/zapfast-extra`; source archives extract into
+`zapfast-extra-VERSION`. The Cargo package stays `zapfast 0.14.0` for
+compatibility (executable, storage, AppUserModelID, bundle ID). Use the
+configuration from the matching tag to rebuild a release. Existing release
+files keep their original `zapfast-v*` names; the Windows direct portable
+`ZapExt-v*-windows-*-portable.exe` is additive.
+
 Version 0.13.0 introduces the ZapFast name and `zapfast` binary. Its AUR recipes
-provide and replace the corresponding FastsApp packages. The GitHub repository is
-`crmne/zapfast`, so source archives extract into `zapfast-VERSION`. Use the
-configuration from the matching tag to rebuild an older FastsApp release.
-Existing release files keep their original names.
+provide and replace the corresponding FastsApp packages. Those upstream
+Homebrew/AUR destinations belong to `crmne/zapfast` and are not published by
+this fork; `native-packages.yaml` still declares their templates for
+reference, but fork releases do not push to them without fork-owned
+destinations and secrets.
 
 ```sh
 gem install native-packages --version 0.6.0
 native-packages validate
 native-packages doctor --target linux-amd64 --target linux-arm64
-native-packages build --release v1.2.3 --target linux-amd64 --target linux-arm64
+native-packages build --release v1.0.5 --target linux-amd64 --target linux-arm64
 ```
 
-Replace `v1.2.3` with an existing stable application release. Local use also
+Replace `v1.0.5` with an existing ZapExt tag (`VERSION` without leading spaces). Local use also
 requires nFPM 2.47.0, `bsdtar` and `readelf`; AUR generation needs `makepkg`
 or Docker. CI installs its tooling. To package local release archives, put
 every configured input and recipe asset under `dist/`, then run
-`native-packages build --version 1.2.3 --target linux-amd64 --target linux-arm64`. Outputs go to
-`dist/packages/1.2.3`; use `--output` for a fresh destination when rebuilding.
+`native-packages build --version 1.0.5 --target linux-amd64 --target linux-arm64`. Outputs go to
+`dist/packages/1.0.5`; use `--output` for a fresh destination when rebuilding.
 
 Stable tags run the existing native build jobs first. After binaries and
 `checksums.txt` are published, the shared workflow verifies their hashes,
@@ -34,13 +44,13 @@ from the original binary checksums. PR validation never publishes.
 Review or publish an existing build with the same installed CLI:
 
 ```sh
-native-packages publish --from dist/packages/1.2.3 --to github
+native-packages publish --from dist/packages/1.0.5 --to github
 native-packages repositories
 native-packages status --offline
 ```
 
 For applications with configured AUR or Homebrew destinations, stage the
-recipes with `native-packages stage TARGET dist/packages/1.2.3/recipes`,
+recipes with `native-packages stage TARGET dist/packages/1.0.5/recipes`,
 inspect `native-packages diff TARGET`, run native package validation, and
 publish with `native-packages publish TARGET`. These destinations use ignored
 managed Git clones, recorded in this application's YAML configuration.
@@ -57,13 +67,15 @@ for commands and supported formats.
 To upgrade the tool, change `tool.version` in `native-packages.yaml`, the matching immutable workflow reference, and any release-job gem installation
 pin together. Applications need no packaging Gemfile, lockfile or Ruby wrapper.
 
-## Automatic macOS notarization
+## Automatic macOS notarization (or verified ad-hoc)
 
 `packaging/macos/entitlements.plist` grants microphone access under the hardened
 runtime, and `Info.plist` supplies the permission prompt. `bundle.sh` embeds the
 entitlement in its initial signature so native-packages preserves it when signing
-with Developer ID. After notarization, `verify.sh` mounts the final DMG and checks
-its ticket, Gatekeeper acceptance, both architectures, and microphone metadata.
+with Developer ID. `verify.sh` mounts the final DMG and always checks signature,
+both architectures, and microphone metadata; with Apple credentials it also
+validates the stapled notarization ticket and Gatekeeper (`notarized` mode),
+without them it skips only those Apple checks (`adhoc` mode).
 
 The macOS release job builds the app first, then uses
 `native-packages.yaml` and `packaging/macos/dmg.rb` to package it.
@@ -76,8 +88,9 @@ secrets, which the job exposes as environment variables:
 - `APPLE_SIGNING_IDENTITY`: exact `Developer ID Application: Name (TEAMID)` identity.
 - `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_PASSWORD`: Apple email, Team ID and app-specific password.
 
-A complete set enables notarization automatically. An incomplete set fails;
-no values retain local builds without Developer ID signing. Application inputs
+A complete set enables notarization automatically. An incomplete set produces a
+verified ad-hoc signed DMG (skipping only `stapler validate` and `spctl assess`);
+local builds without Developer ID work the same way. Application inputs
 and the user's normal keychains remain unchanged. See the shared
 [Apple setup and phase contract](https://github.com/crmne/native-packages/blob/v0.6.0/docs/apple-notarization.md).
 
@@ -85,7 +98,7 @@ After preparing `dist/macos-input` on a Mac, test packaging without publishing:
 
 ```sh
 native-packages build \
-  --version 1.2.3 --target macos-universal --defer-recipes --output dist/macos-packages-test
+  --version 1.0.5 --target macos-universal --defer-recipes --output dist/macos-packages-test
 ```
 
 Secret configuration applies to future builds. Existing published DMGs retain
@@ -93,8 +106,8 @@ their original signatures; this setup does not replace release assets.
 
 Linux releases build on Ubuntu 24.04 (glibc 2.39). DEB/RPM recipes declare
 runtime-loaded Wayland, X11 and EGL libraries as well as ALSA and its PulseAudio
-plugin. Packaging CI builds both architectures from the published v0.13.1 fixture
-on PRs; release runs use their own tag. Clean Ubuntu, Debian and Fedora containers
+plugin. PR validation validates the packaging configuration without publishing;
+release runs use their own tag. Clean Ubuntu, Debian and Fedora containers
 install and remove each package, check GUI libraries loaded with `dlopen`, and
 verify desktop and theme assets. Run the same check locally with
 `bash packaging/test-install.sh ubuntu:24.04 /path/to/native-packages-output`. The macOS job selects `macos-universal`
@@ -118,10 +131,10 @@ flatpak-builder --user --install --force-clean build-dir /path/to/flathub-checko
 ```
 
 Flathub submission/review is a separate publication step; the manifest alone does
-not make ZapFast available in Flathub. A maintainer must submit it manually:
+not make ZapExt available in Flathub. A maintainer must submit it manually:
 [Flathub's requirements](https://docs.flathub.org/docs/for-app-authors/requirements#generative-ai-policy)
 prohibit AI agents from submitting or writing submission interactions and require
 disclosure of generated material. Review the manifests and these changes before
-submitting. The manifests use the current Freedesktop 26.08 runtime; the CI builder
-container is 25.08 and installs the runtime and SDK named by the manifest. The GitHub release job includes the bundle
+submitting. The manifests use the Freedesktop runtime named by the manifest; the CI builder
+container installs the runtime and SDK named by the manifest. The GitHub release job includes the bundle
 in `checksums.txt`. No existing release files are replaced by this change.

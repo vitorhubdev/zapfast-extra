@@ -218,18 +218,12 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     title(ui, app, "About");
     ui.horizontal(|ui| {
         let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), egui::Sense::hover());
-        theme::logo(
-            ui,
-            logo.center(),
-            44.0,
-            palette.accent,
-            egui::Color32::WHITE,
-        );
+        theme::logo(ui, logo.center(), 44.0);
         ui.vertical(|ui| {
-            theme::text(ui, "ZapFast", theme::bold(17.0), palette.text);
+            theme::text(ui, "ZapExt", theme::bold(17.0), palette.text);
             theme::text(
                 ui,
-                format!("Version {}", env!("CARGO_PKG_VERSION")),
+                format!("Version {}", crate::updates::zapext_version()),
                 theme::regular(13.0),
                 palette.secondary,
             );

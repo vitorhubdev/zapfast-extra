@@ -29,6 +29,12 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 pub const ZAPEXT_VERSION: &str = include_str!("../VERSION");
+/// Canonical fork version without surrounding whitespace.
+/// `VERSION` is the single source of truth; trimming keeps a trailing newline
+/// from breaking User-Agent headers, title strings, and version comparisons.
+pub fn zapext_version() -> &'static str {
+    ZAPEXT_VERSION.trim()
+}
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";
 
@@ -51,9 +57,10 @@ struct LatestRelease {
 
 /// The newest release, when it is newer than this build.
 pub fn newer_release() -> Result<Option<Release>> {
+    let current = zapext_version();
     let mut response = ureq::get(LATEST_RELEASE_URL)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", format!("ZapExt/{ZAPEXT_VERSION}"))
+        .header("User-Agent", format!("ZapExt/{current}"))
         .call()?;
     let body = response
         .body_mut()
@@ -62,7 +69,7 @@ pub fn newer_release() -> Result<Option<Release>> {
     let latest: LatestRelease =
         serde_json::from_str(&body).context("unexpected release listing")?;
     let version = latest.tag_name.trim_start_matches('v').to_string();
-    Ok(is_newer(&version, ZAPEXT_VERSION).then_some(Release {
+    Ok(is_newer(&version, current).then_some(Release {
         version,
         url: latest.html_url,
     }))
@@ -117,5 +124,34 @@ mod tests {
         assert!(!is_newer("0.11.0-rc1", "0.11.0"));
         assert!(!is_newer("0.11.0-rc2", "0.11.0-rc1"));
         assert!(!is_newer("0.10.0", "0.11.0-rc1"));
+    }
+
+    #[test]
+    fn zapext_version_is_clean_and_comparable() {
+        let raw = ZAPEXT_VERSION;
+        let clean = zapext_version();
+        assert_eq!(clean, raw.trim(), "VERSION must not carry whitespace");
+        assert!(!clean.is_empty(), "VERSION must not be empty");
+        assert!(
+            parse(clean).is_some(),
+            "VERSION must be major.minor.patch, got {clean:?}"
+        );
+        // Whitespace and `v` prefixes must not break update checks.
+        assert!(is_newer("9.9.9", clean));
+        assert!(!is_newer(clean, clean));
+        assert!(!is_newer(clean, "9.9.9"));
+        assert!(is_newer("1.0.5", "1.0.4"));
+        assert!(!is_newer("1.0.4", "1.0.5"));
+        assert!(parse(" 1.0.4 \n").is_some());
+    }
+
+    #[test]
+    fn version_parsing_rejects_bad_input() {
+        assert!(parse("").is_none());
+        assert!(parse("1.0").is_none());
+        assert!(parse("1.0.0.0").is_none());
+        assert!(parse("v1.0.0").is_none());
+        assert!(parse("1.0.x").is_none());
+        assert!(parse("1.0.0-").is_some());
     }
 }

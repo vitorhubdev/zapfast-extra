@@ -1,12 +1,12 @@
 ---
 layout: home
-title: ZapFast
-description: A fast, lightweight WhatsApp app for Linux, macOS, and Windows.
+title: ZapExt
+description: ZapExt, a community mod of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
 permalink: /
 hero:
-  name: ZapFast
+  name: ZapExt
   text: WhatsApp, native and fast
-  tagline: A lightweight WhatsApp app for Linux, macOS, and Windows. Chat, send voice messages, and share files.
+  tagline: A community mod of ZapFast for Linux, macOS, and Windows. Chat, send voice messages, and share files.
   actions:
     - theme: brand
       text: Download
@@ -16,10 +16,10 @@ hero:
       link: /what-is-zapfast/
     - theme: alt
       text: GitHub
-      link: https://github.com/crmne/zapfast
+      link: https://github.com/vitorhubdev/zapfast-extra
   image:
     src: /screenshot.png
-    alt: "ZapFast showing a chat with a photo, a document, a voice message, a quoted reply, and a link preview"
+    alt: "ZapExt showing a chat with a photo, a document, a voice message, a quoted reply, and a link preview"
     width: 1387
     height: 1040
 
@@ -35,14 +35,14 @@ features:
     details: Photos, GIFs, stickers, documents, polls, locations, and link previews appear in the chat. Add captions before sending files.
   - icon: 🔔
     title: Background mode
-    details: Closing the window keeps ZapFast linked in the tray. Notifications show the chat picture, and muted chats stay quiet.
+    details: Closing the window keeps ZapExt linked in the tray. Notifications show the chat picture, and muted chats stay quiet.
   - icon: ⌨️
     title: Keyboard shortcuts
     details: Search, switch chats, reply, and record with shortcuts. Select and copy text, including across messages.
   - icon: 🔓
     title: Open source
     details: MIT-licensed Rust built with egui and whatsapp-rust. The linking process is documented.
-    link: https://github.com/crmne/zapfast
+    link: https://github.com/vitorhubdev/zapfast-extra
     link_text: Read the source
 ---
 

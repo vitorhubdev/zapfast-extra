@@ -47,15 +47,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.set_width(card_width - 64.0);
                     ui.spacing_mut().item_spacing.y = 8.0;
                     let (logo, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
-                    theme::logo(
-                        ui,
-                        logo.center(),
-                        64.0,
-                        palette.accent,
-                        egui::Color32::WHITE,
-                    );
+                    theme::logo(ui, logo.center(), 64.0);
                     ui.add_space(4.0);
-                    theme::text(ui, "ZapFast", theme::bold(28.0), palette.text);
+                    theme::text(ui, "ZapExt", theme::bold(28.0), palette.text);
                     theme::text(
                         ui,
                         "A native WhatsApp client.",
