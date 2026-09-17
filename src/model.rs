@@ -496,6 +496,62 @@ pub struct StickerPack {
     pub stickers: Vec<PathBuf>,
 }
 
+/// Full-window viewer over the pictures and stickers of one chat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Viewer {
+    pub chat: ChatId,
+    /// Every viewable file in the chat, oldest first.
+    pub items: Vec<ViewerItem>,
+    /// Index of the item on screen.
+    pub index: usize,
+    /// Zoom factor; 1.0 fits the window.
+    pub zoom: f32,
+    /// Pan in points from the fitted position.
+    pub offset: (f32, f32),
+}
+
+impl Viewer {
+    /// Smallest and largest zoom the viewer allows.
+    pub const MIN_ZOOM: f32 = 0.2;
+    pub const MAX_ZOOM: f32 = 8.0;
+
+    /// The item on screen.
+    pub fn current(&self) -> Option<&ViewerItem> {
+        self.items.get(self.index)
+    }
+
+    /// Moves by the given number of items, stopping at either end, and
+    /// returns the view to fit.
+    pub fn step(&mut self, step: i32) {
+        let last = self.items.len().saturating_sub(1) as i64;
+        let next = (self.index as i64 + i64::from(step)).clamp(0, last);
+        self.index = next as usize;
+        self.zoom = 1.0;
+        self.offset = (0.0, 0.0);
+    }
+
+    /// Multiplies the zoom around an anchor in points from the centre.
+    pub fn zoom_by(&mut self, factor: f32, anchor: (f32, f32)) {
+        let zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+        let ratio = zoom / self.zoom;
+        let (x, y) = (anchor.0, anchor.1);
+        self.offset = (
+            x - (x - self.offset.0) * ratio,
+            y - (y - self.offset.1) * ratio,
+        );
+        self.zoom = zoom;
+    }
+}
+
+/// One file the viewer can show.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewerItem {
+    pub message: String,
+    pub path: PathBuf,
+    /// Stickers have no frame and no caption.
+    pub sticker: bool,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Dialog {
     Shortcuts,
@@ -601,6 +657,26 @@ pub enum Action {
     CancelRecording,
     SendRecording,
     OpenFile(PathBuf),
+    /// Opens the media viewer on a picture or sticker in a chat.
+    OpenViewer {
+        chat: ChatId,
+        message: String,
+    },
+    /// Moves the media viewer one item forwards or backwards.
+    ViewerStep(i32),
+    /// Zooms the media viewer around an anchor in points from its centre.
+    ViewerZoom {
+        factor: f32,
+        anchor: (f32, f32),
+    },
+    /// Drags the zoomed picture in the media viewer.
+    ViewerPan((f32, f32)),
+    /// Returns the media viewer to fit the window.
+    ViewerFit,
+    /// Closes the media viewer.
+    CloseViewer,
+    /// Asks for a path and saves a copy of a file the app shows.
+    SaveCopy(PathBuf),
     OpenUrl(String),
     CopyText(String),
     /// Starts a reply to a message in the open chat.

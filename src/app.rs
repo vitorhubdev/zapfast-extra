@@ -11,7 +11,7 @@ use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Waker};
 use crate::model::{
     Action, Chat, ChatId, Contact, Content, Delivery, Dialog, Media, MediaState, Message, Page,
-    PickerTab, StickerPack, Toast, ToastKind,
+    PickerTab, StickerPack, Toast, ToastKind, Viewer, ViewerItem,
 };
 use crate::paths::AppDirs;
 use crate::settings::{Settings, ThemeChoice};
@@ -170,6 +170,8 @@ pub struct App {
     pub dropping: bool,
     /// Open emoji, GIF, or sticker picker tab.
     pub picker: Option<PickerTab>,
+    /// Full-window viewer over the open chat's pictures and stickers.
+    pub viewer: Option<Viewer>,
     /// Picker anchor at the composer button.
     pub picker_anchor: Option<egui::Rect>,
     pub picker_search: String,
@@ -385,6 +387,7 @@ impl App {
             avatar_full_requests: HashSet::new(),
             dropping: false,
             picker: None,
+            viewer: None,
             picker_anchor: None,
             picker_search: String::new(),
             picker_focus: false,
@@ -1044,6 +1047,13 @@ impl App {
                         self.stage_files(paths);
                     }
                 }
+                Event::CopySaved { saved, error } => {
+                    if let Some(path) = saved {
+                        self.toast(format!("Saved to {}", path.display()));
+                    } else if let Some(error) = error {
+                        self.toast_error(format!("Could not save the copy: {error}"));
+                    }
+                }
                 Event::PollCreated { chat, error } => {
                     self.poll_creating = false;
                     if let Some(error) = error {
@@ -1463,12 +1473,59 @@ impl App {
         }
     }
 
+    /// The chat's pictures and stickers that are on disk, oldest first.
+    ///
+    /// The viewer walks this list, so it only holds files it can actually
+    /// show and keeps the message each one came from.
+    pub(crate) fn viewer_items(&self, chat: &str) -> Vec<ViewerItem> {
+        let Some(conversation) = self.conversations.get(chat) else {
+            return Vec::new();
+        };
+        conversation
+            .messages
+            .iter()
+            .filter_map(|message| {
+                let (media, sticker) = match &message.content {
+                    Content::Image { media, .. } => (media, false),
+                    Content::Sticker { media, .. } => (media, true),
+                    _ => return None,
+                };
+                let path = media.path.as_ref().filter(|path| path.is_file())?;
+                Some(ViewerItem {
+                    message: message.id.clone(),
+                    path: path.clone(),
+                    sticker,
+                })
+            })
+            .collect()
+    }
+
+    /// Opens the media viewer on one picture or sticker of a chat.
+    pub fn open_viewer(&mut self, chat: &str, message: &str) {
+        let items = self.viewer_items(chat);
+        if items.is_empty() {
+            return;
+        }
+        let index = items
+            .iter()
+            .position(|item| item.message == message)
+            .unwrap_or(items.len() - 1);
+        self.viewer = Some(Viewer {
+            chat: chat.to_owned(),
+            items,
+            index,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+        });
+    }
+
     /// Returns keyboard focus to the open conversation when no search or
     /// overlay is active.
     fn refocus_composer(&mut self, ctx: &egui::Context) {
         let search_focused = ctx.memory(|memory| memory.has_focus(egui::Id::new("chat-search")));
         if self.page == Page::Chats
             && self.dialog.is_none()
+            && self.viewer.is_none()
             && self.picker.is_none()
             && self.recording.is_none()
             && self.open_chat.is_some()
@@ -1873,6 +1930,7 @@ impl App {
                 }
             }
             Action::CloseChat => {
+                self.viewer = None;
                 if let Some(chat) = self.open_chat.take() {
                     self.stop_composing(&chat);
                     let draft = std::mem::take(&mut self.composer);
@@ -1958,6 +2016,32 @@ impl App {
                     self.toast_error(format!("Could not open {}: {error}", path.display()));
                 }
             }
+            Action::OpenViewer { chat, message } => {
+                self.open_viewer(&chat, &message);
+            }
+            Action::ViewerStep(step) => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.step(step);
+                }
+            }
+            Action::ViewerZoom { factor, anchor } => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.zoom_by(factor, anchor);
+                }
+            }
+            Action::ViewerPan((x, y)) => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.offset = (viewer.offset.0 + x, viewer.offset.1 + y);
+                }
+            }
+            Action::ViewerFit => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.zoom = 1.0;
+                    viewer.offset = (0.0, 0.0);
+                }
+            }
+            Action::CloseViewer => self.viewer = None,
+            Action::SaveCopy(path) => self.backend.send(Command::SaveCopy { from: path }),
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::CopyText(text) => {
                 ctx.copy_text(text);
@@ -2897,6 +2981,110 @@ mod tests {
     fn app() -> App {
         let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
+    }
+
+    #[test]
+    fn the_viewer_walks_the_pictures_that_are_on_disk() {
+        let dir = std::env::temp_dir().join(format!("zapfast-viewer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let chat = "1@s.whatsapp.net";
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        let first = dir.join("first.png");
+        let second = dir.join("second.png");
+        std::fs::write(&first, b"png").expect("writes");
+        std::fs::write(&second, b"png").expect("writes");
+        let missing = dir.join("gone.png");
+        let media = |path: PathBuf| Media {
+            mime: "image/png".to_owned(),
+            size: 3,
+            width: Some(10),
+            height: Some(10),
+            path: Some(path),
+            state: MediaState::Idle,
+        };
+        let mut photo = message(chat, "first", 10);
+        photo.content = Content::Image {
+            caption: None,
+            media: media(first.clone()),
+        };
+        let mut sticker = message(chat, "second", 20);
+        sticker.content = Content::Sticker {
+            media: media(second.clone()),
+            animated: false,
+        };
+        let mut broken = message(chat, "third", 30);
+        broken.content = Content::Image {
+            caption: None,
+            media: media(missing),
+        };
+        app.conversations.insert(
+            chat.into(),
+            Conversation {
+                requested: true,
+                complete: true,
+                messages: vec![photo, sticker, broken],
+                ..Default::default()
+            },
+        );
+
+        app.apply(
+            Action::OpenViewer {
+                chat: chat.into(),
+                message: "first".into(),
+            },
+            &ctx,
+        );
+        let viewer = app.viewer.as_ref().expect("the viewer opens");
+        assert_eq!(viewer.items.len(), 2, "a file that is gone is not offered");
+        assert_eq!(viewer.index, 0);
+        assert!(!viewer.items[0].sticker);
+        assert!(viewer.items[1].sticker);
+
+        // Walking stops at either end and a new picture starts fitted.
+        app.apply(Action::ViewerStep(-1), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().index, 0);
+        app.apply(
+            Action::ViewerZoom {
+                factor: 4.0,
+                anchor: (50.0, 0.0),
+            },
+            &ctx,
+        );
+        assert!(app.viewer.as_ref().unwrap().zoom > 1.0);
+        app.apply(Action::ViewerStep(1), &ctx);
+        let viewer = app.viewer.as_ref().unwrap();
+        assert_eq!(viewer.index, 1);
+        assert_eq!(viewer.zoom, 1.0);
+        assert_eq!(viewer.offset, (0.0, 0.0));
+        app.apply(Action::ViewerStep(1), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().index, 1);
+
+        // The zoom stays between its limits.
+        app.apply(
+            Action::ViewerZoom {
+                factor: 1_000.0,
+                anchor: (0.0, 0.0),
+            },
+            &ctx,
+        );
+        assert_eq!(app.viewer.as_ref().unwrap().zoom, Viewer::MAX_ZOOM);
+        app.apply(
+            Action::ViewerZoom {
+                factor: 0.000_1,
+                anchor: (0.0, 0.0),
+            },
+            &ctx,
+        );
+        assert_eq!(app.viewer.as_ref().unwrap().zoom, Viewer::MIN_ZOOM);
+        app.apply(Action::ViewerFit, &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().zoom, 1.0);
+
+        // Closing a chat takes the viewer with it.
+        app.apply(Action::CloseChat, &ctx);
+        assert!(app.viewer.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

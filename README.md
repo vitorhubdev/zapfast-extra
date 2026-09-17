@@ -86,6 +86,9 @@ without embedding a browser engine.
   polls, and link previews appear in the chat. Videos and documents open in
   their default desktop apps. Profile pictures and downloaded images support
   Windows drive paths and filenames with spaces or non-ASCII characters.
+  Clicking a picture or sticker opens a full-window viewer: scroll to zoom,
+  drag to move, the arrow keys walk the chat's pictures, 0 or F fits it again,
+  and Esc closes. It can save a copy or hand the file to the desktop.
   If an attachment has expired, ZapExt asks your
   phone to upload it again.
 - **Polls.** Use the checklist button beside the paperclip to create a poll with

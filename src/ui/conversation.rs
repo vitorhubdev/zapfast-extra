@@ -3179,7 +3179,10 @@ fn picture(
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                actions.push(Action::OpenFile(path.clone()));
+                actions.push(Action::OpenViewer {
+                    chat: message.chat.clone(),
+                    message: message.id.clone(),
+                });
             }
             return size.x;
         }
@@ -3202,7 +3205,10 @@ fn picture(
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    actions.push(Action::OpenFile(path.clone()));
+                    actions.push(Action::OpenViewer {
+                        chat: message.chat.clone(),
+                        message: message.id.clone(),
+                    });
                 }
                 size.x
             }

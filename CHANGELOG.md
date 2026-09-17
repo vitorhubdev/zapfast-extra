@@ -2,6 +2,23 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.12] - 2026-09-17
+
+### Changed
+
+- Clicking a picture or sticker opens it in a full-window viewer instead of
+  handing the file to the desktop. Scroll to zoom, drag to move, the arrow keys
+  walk the chat's pictures, 0 or F fits it again, and Esc closes. The bar offers
+  Save a copy, Open in the default app, and a counter of where you are.
+  Animated stickers and GIFs keep playing in it.
+
+### Tests
+
+- Added the_viewer_walks_the_pictures_that_are_on_disk,
+  a_picture_fits_the_window_without_blowing_up_thin_air and
+  only_moving_formats_are_decoded_frame_by_frame; the demo has a viewer page
+  for screenshots.
+
 ## [1.0.11] - 2026-09-17
 
 ### Changed

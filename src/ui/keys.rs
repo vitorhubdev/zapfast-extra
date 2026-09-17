@@ -5,7 +5,57 @@ use egui::{Key, Modifiers};
 use crate::app::App;
 use crate::model::{Action, Dialog, Page};
 
+/// Keys the media viewer owns: browsing, zooming, and closing.
+fn viewer_keys(app: &mut App, ctx: &egui::Context) {
+    const STEP: f32 = 1.3;
+    let mut actions = Vec::new();
+    ctx.input_mut(|input| {
+        let mut key = |modifiers: Modifiers, key: Key, action: Action| {
+            if input.consume_key(modifiers, key) {
+                actions.push(action);
+            }
+        };
+        key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
+        key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
+        key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
+        key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+        key(
+            Modifiers::NONE,
+            Key::Plus,
+            Action::ViewerZoom {
+                factor: STEP,
+                anchor: (0.0, 0.0),
+            },
+        );
+        key(
+            Modifiers::NONE,
+            Key::Equals,
+            Action::ViewerZoom {
+                factor: STEP,
+                anchor: (0.0, 0.0),
+            },
+        );
+        key(
+            Modifiers::NONE,
+            Key::Minus,
+            Action::ViewerZoom {
+                factor: 1.0 / STEP,
+                anchor: (0.0, 0.0),
+            },
+        );
+        key(Modifiers::NONE, Key::Num0, Action::ViewerFit);
+        key(Modifiers::NONE, Key::F, Action::ViewerFit);
+        key(Modifiers::NONE, Key::Escape, Action::CloseViewer);
+    });
+    app.actions.extend(actions);
+}
+
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    // The media viewer owns the keyboard while it is on screen.
+    if app.viewer.is_some() {
+        viewer_keys(app, ctx);
+        return;
+    }
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {

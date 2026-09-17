@@ -9,6 +9,7 @@ pub mod picker;
 pub mod polls;
 pub mod settings;
 pub mod update;
+pub mod viewer;
 pub mod widgets;
 
 use egui::{Align2, CornerRadius, Frame, Margin, Stroke, vec2};
@@ -46,6 +47,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     update::show(app, ctx);
     picker::show(app, ctx);
+    viewer::show(app, ctx);
     dialogs::show(app, ctx);
     drop_target(app, ctx);
     toasts(app, ctx);

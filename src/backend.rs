@@ -336,6 +336,15 @@ pub enum Command {
         chat: ChatId,
         paths: Vec<PathBuf>,
     },
+    /// Asks for a destination and saves a copy of a file the app shows.
+    SaveCopy {
+        from: PathBuf,
+    },
+    /// Internal result of a save-copy request.
+    CopySaved {
+        saved: Option<PathBuf>,
+        error: Option<String>,
+    },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
         chat: ChatId,
@@ -415,6 +424,12 @@ pub enum Event {
     Picked {
         chat: ChatId,
         paths: Vec<PathBuf>,
+    },
+    /// Result of SaveCopy: where the copy went, or why it failed. A cancelled
+    /// dialog reports neither.
+    CopySaved {
+        saved: Option<PathBuf>,
+        error: Option<String>,
     },
     /// Live incoming message for desktop notification.
     Incoming {

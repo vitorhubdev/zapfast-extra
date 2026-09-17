@@ -843,6 +843,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.typing.clear();
                 app.scroll_to_bottom = true;
             }
+            "viewer" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                app.open_viewer(chat, "ada-tall");
+            }
             "rtl" => {
                 let id = SAMPLES[1].id;
                 let now = crate::util::now();
@@ -1325,6 +1330,7 @@ mod tests {
             "compose-emoji",
             "voice",
             "recording",
+            "viewer",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));

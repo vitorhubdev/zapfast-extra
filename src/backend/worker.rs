@@ -2466,6 +2466,32 @@ impl Worker {
                 });
             }
             Command::Picked { chat, paths } => self.emit(Event::Picked { chat, paths }),
+            Command::SaveCopy { from } => {
+                let name = from
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "zapext-file".to_owned());
+                let commands = self.commands.clone();
+                tokio::task::spawn_blocking(move || {
+                    // A cancelled dialog reports nothing.
+                    let result = rfd::FileDialog::new()
+                        .set_title("Save a copy")
+                        .set_file_name(&name)
+                        .save_file()
+                        .map(|to| {
+                            std::fs::copy(&from, &to)
+                                .map(|_| to)
+                                .map_err(|error| error.to_string())
+                        });
+                    let (saved, error) = match result {
+                        Some(Ok(path)) => (Some(path), None),
+                        Some(Err(error)) => (None, Some(error)),
+                        None => (None, None),
+                    };
+                    let _ = commands.send(Command::CopySaved { saved, error });
+                });
+            }
+            Command::CopySaved { saved, error } => self.emit(Event::CopySaved { saved, error }),
             Command::SendFiles {
                 chat,
                 paths,
