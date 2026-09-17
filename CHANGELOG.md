@@ -2,6 +2,23 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.14] - 2026-09-17
+
+### Changed
+
+- Every chat header has a magnifier that searches inside that chat. Results
+  appear under the field with the sender, the time and the message text, and
+  clicking one jumps to the message in the conversation. The search runs a
+  quarter of a second after you stop typing, only the open chat answers, and
+  Esc or the X closes it.
+
+### Tests
+
+- Added the_in_chat_search_opens_fills_and_closes, which covers opening,
+  scheduling the run, the answer, a stale answer being dropped, a chat switch
+  closing the search and the close path; search_finds_text_captions_and_file_names
+  now checks that one chat's hits never include another chat's.
+
 ## [1.0.13] - 2026-09-17
 
 ### Changed

@@ -36,6 +36,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     header(app, ui, &chat);
+    if app.chat_search_open {
+        chat_find(app, ui, &chat);
+    }
     if theme::macos_chrome(ui.ctx()) {
         super::banner(app, ui);
     }
@@ -253,9 +256,145 @@ fn header(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 app.actions.push(Action::CloseChat);
                             }
                         });
+                    // Drawn after the menu button, so it sits to its left.
+                    if theme::icon_button(
+                        ui,
+                        Icon::Search,
+                        18.0,
+                        palette.secondary,
+                        palette.text,
+                        "Search this chat",
+                    )
+                    .clicked()
+                    {
+                        app.actions.push(Action::ToggleChatSearch);
+                    }
                 });
             });
         });
+}
+
+/// The search bar inside a chat and the results under it.
+fn chat_find(app: &mut App, ui: &mut egui::Ui, _chat: &Chat) {
+    let palette = app.palette;
+    ui.add_space(4.0);
+    let mut query = app.chat_search.clone();
+    ui.horizontal(|ui| {
+        let width = (ui.available_width() - 40.0).max(140.0);
+        let response = widgets::search_field(
+            ui,
+            &palette,
+            egui::Id::new("chat-find"),
+            &mut query,
+            "Search this chat",
+            width,
+        );
+        if app.chat_search_focus {
+            app.chat_search_focus = false;
+            response.request_focus();
+        }
+        if query != app.chat_search {
+            app.actions.push(Action::ChatSearch(query.clone()));
+        }
+        if theme::icon_button(
+            ui,
+            Icon::X,
+            16.0,
+            palette.secondary,
+            palette.text,
+            "Close search (Esc)",
+        )
+        .clicked()
+        {
+            app.actions.push(Action::CloseChatSearch);
+        }
+    });
+    // Nothing to report until the first answer arrives.
+    if app.chat_search_query.trim().is_empty() {
+        ui.add_space(4.0);
+        return;
+    }
+    let hits = app.chat_search_hits.clone();
+    ui.add_space(2.0);
+    if hits.is_empty() {
+        theme::text(
+            ui,
+            "No messages match.",
+            theme::regular(13.0),
+            palette.secondary,
+        );
+        ui.add_space(4.0);
+        return;
+    }
+    theme::text(
+        ui,
+        match hits.len() {
+            1 => "1 message".to_owned(),
+            count => format!("{count} messages"),
+        },
+        theme::regular(12.0),
+        palette.secondary,
+    );
+    ui.add_space(2.0);
+    egui::ScrollArea::vertical()
+        .id_salt("chat-find-results")
+        .max_height(220.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for hit in &hits {
+                if chat_find_row(app, ui, hit) {
+                    app.actions.push(Action::OpenMessage {
+                        chat: hit.chat.clone(),
+                        message: hit.id.clone(),
+                    });
+                }
+            }
+        });
+    ui.add_space(4.0);
+}
+
+/// One search result. Returns true when it was clicked.
+fn chat_find_row(app: &App, ui: &mut egui::Ui, hit: &Message) -> bool {
+    let palette = app.palette;
+    let who = if hit.from_me {
+        "You".to_owned()
+    } else {
+        app.display_name_or(&hit.sender, hit.sender_name.as_deref())
+    };
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter().rect_filled(rect, 6.0, palette.surface_hover);
+        }
+        let left = rect.left() + 10.0;
+        let right = rect.right() - 10.0;
+        let stamp = ui.painter().layout_no_wrap(
+            crate::util::chat_stamp(hit.timestamp),
+            theme::regular(11.5),
+            palette.dim,
+        );
+        let head = rect.top() + 8.0;
+        ui.painter().galley(
+            pos2(right - stamp.size().x, head),
+            stamp.clone(),
+            palette.dim,
+        );
+        let name_width = (right - stamp.size().x - 8.0 - left).max(0.0);
+        let name = widgets::line(ui, &who, theme::medium(13.0), palette.text, name_width, 1);
+        name.paint(ui, pos2(left, head), palette.text);
+        let body = widgets::line(
+            ui,
+            &hit.content.summary(),
+            theme::regular(13.0),
+            palette.secondary,
+            right - left,
+            1,
+        );
+        body.paint(ui, pos2(left, head + 19.0), palette.secondary);
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 /// Chat-header subtitle.

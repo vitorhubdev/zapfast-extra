@@ -704,6 +704,16 @@ impl Archive {
     /// Searches visible message text, filenames, polls, contacts, and places.
     /// ASCII matching is case-insensitive; other text follows SQLite behavior.
     pub fn search_messages(&self, needle: &str, limit: usize) -> Result<Vec<Message>> {
+        self.search_messages_in(None, needle, limit)
+    }
+
+    /// Searches one chat's visible text, or every chat when chat is absent.
+    pub fn search_messages_in(
+        &self,
+        chat: Option<&str>,
+        needle: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
         let pattern = format!(
             "%{}%",
             needle
@@ -715,7 +725,7 @@ impl Archive {
         let mut statement = self.connection.prepare(
             "SELECT chat, id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
              FROM messages
-             WHERE json_valid(content) AND lower(
+             WHERE json_valid(content) AND (?3 IS NULL OR chat = ?3) AND lower(
                      coalesce(json_extract(content, '$.text'), '') || char(10) ||
                      coalesce(json_extract(content, '$.caption'), '') || char(10) ||
                      coalesce(json_extract(content, '$.file_name'), '') || char(10) ||
@@ -726,7 +736,7 @@ impl Archive {
              ORDER BY timestamp DESC, rowid DESC
              LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![pattern, limit as i64], |row| {
+        let rows = statement.query_map(params![pattern, limit as i64, chat], |row| {
             let chat: String = row.get(0)?;
             let content: String = row.get(6)?;
             let quoted: Option<String> = row.get(8)?;
@@ -1283,6 +1293,10 @@ pub(crate) mod tests {
         for row in [&plain, &caption, &other] {
             archive.insert_message(row, None).expect("insert");
         }
+        // A message in another chat must not answer for this one.
+        let mut elsewhere = message("2@s.whatsapp.net", "m4", 5, false);
+        elsewhere.content = Content::text("Late reply");
+        archive.insert_message(&elsewhere, None).expect("insert");
         // Match body and filename case-insensitively, newest first.
         let hits = archive.search_messages("ENGINE", 10).expect("search");
         let ids: Vec<&str> = hits.iter().map(|hit| hit.id.as_str()).collect();
@@ -1308,6 +1322,25 @@ pub(crate) mod tests {
         let hits = archive.search_messages("e", 1).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "m3", "newest first");
+        // One chat's hits can be asked for on their own.
+        let here: Vec<String> = archive
+            .search_messages_in(Some("1@s.whatsapp.net"), "e", 10)
+            .expect("search")
+            .into_iter()
+            .map(|hit| hit.id)
+            .collect();
+        assert!(here.contains(&"m3".to_owned()));
+        assert!(
+            !here.contains(&"m4".to_owned()),
+            "another chat's message is not a hit: {here:?}"
+        );
+        let there: Vec<String> = archive
+            .search_messages_in(Some("2@s.whatsapp.net"), "e", 10)
+            .expect("search")
+            .into_iter()
+            .map(|hit| hit.id)
+            .collect();
+        assert_eq!(there, vec!["m4".to_owned()]);
     }
 
     #[test]

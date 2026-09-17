@@ -42,6 +42,8 @@ without embedding a browser engine.
 - **Conversations.** See replies, reactions, edits, deleted messages, read
   receipts, sender names, and group pictures. Older messages load as you
   scroll up, first from the local archive and then from your phone.
+  The magnifier in the chat header searches inside that chat and jumps to any
+  hit, and its results show the sender, the time, and the message text.
   Group messages show two gray checks after every recipient has received
   them, and blue checks after every recipient has read them. The recipient
   list and individual receipts are saved locally; later membership changes

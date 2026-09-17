@@ -46,6 +46,8 @@ enum ScrollAxis {
 const COMPOSING_TIMEOUT: Duration = Duration::from_secs(4);
 /// Typing-state timeout when no stop event arrives.
 const TYPING_TIMEOUT: Duration = Duration::from_secs(12);
+/// Pause after the last keystroke before the in-chat search runs.
+const CHAT_SEARCH_PAUSE: Duration = Duration::from_millis(250);
 
 /// Loaded chat history and paging state.
 #[derive(Default)]
@@ -172,6 +174,18 @@ pub struct App {
     pub picker: Option<PickerTab>,
     /// Full-window viewer over the open chat's pictures and stickers.
     pub viewer: Option<Viewer>,
+    /// Whether the search bar inside the open chat is showing.
+    pub chat_search_open: bool,
+    /// Text typed into the in-chat search bar.
+    pub chat_search: String,
+    /// Hits of the last answered in-chat search, newest first.
+    pub chat_search_hits: Vec<Message>,
+    /// Query the last batch of hits answers.
+    pub chat_search_query: String,
+    /// When the in-chat search text last changed, for the debounce.
+    pub chat_search_at: Option<Instant>,
+    /// Whether the in-chat search field should take focus.
+    pub chat_search_focus: bool,
     /// Picker anchor at the composer button.
     pub picker_anchor: Option<egui::Rect>,
     pub picker_search: String,
@@ -388,6 +402,12 @@ impl App {
             dropping: false,
             picker: None,
             viewer: None,
+            chat_search_open: false,
+            chat_search: String::new(),
+            chat_search_hits: Vec::new(),
+            chat_search_query: String::new(),
+            chat_search_at: None,
+            chat_search_focus: false,
             picker_anchor: None,
             picker_search: String::new(),
             picker_focus: false,
@@ -1058,6 +1078,21 @@ impl App {
                         self.toast_error(format!("Could not save the copy: {error}"));
                     }
                 }
+                Event::ChatSearch { chat, query, hits } => {
+                    // Only the current chat and query may fill the panel.
+                    if self.chat_search_open
+                        && self.open_chat.as_deref() == Some(chat.as_str())
+                        && query == self.chat_search_query
+                    {
+                        match hits {
+                            Ok(hits) => self.chat_search_hits = hits,
+                            Err(error) => {
+                                self.chat_search_hits.clear();
+                                self.toast_error(format!("Could not search the chat: {error}"));
+                            }
+                        }
+                    }
+                }
                 Event::PollCreated { chat, error } => {
                     self.poll_creating = false;
                     if let Some(error) = error {
@@ -1431,6 +1466,14 @@ impl App {
 
     fn open_chat(&mut self, id: ChatId) {
         if self.open_chat.as_deref() != Some(id.as_str()) {
+            // A search belongs to the chat it was typed in.
+            self.chat_search_open = false;
+            self.chat_search.clear();
+            self.chat_search_hits.clear();
+            self.chat_search_query.clear();
+            self.chat_search_at = None;
+        }
+        if self.open_chat.as_deref() != Some(id.as_str()) {
             if let Some(previous) = self.open_chat.take() {
                 let draft = std::mem::take(&mut self.composer);
                 // Discard an unfinished edit instead of keeping it as a draft.
@@ -1530,6 +1573,7 @@ impl App {
         if self.page == Page::Chats
             && self.dialog.is_none()
             && self.viewer.is_none()
+            && !self.chat_search_open
             && self.picker.is_none()
             && self.recording.is_none()
             && self.open_chat.is_some()
@@ -1751,6 +1795,34 @@ impl App {
         if !self.typing.is_empty() || self.composing {
             ctx.request_repaint_after(Duration::from_secs(1));
         }
+        self.poll_chat_search();
+    }
+
+    /// Runs the in-chat search once the typing in its field pauses.
+    fn poll_chat_search(&mut self) {
+        let Some(chat) = self.open_chat.clone() else {
+            return;
+        };
+        if !self.chat_search_open {
+            return;
+        }
+        let Some(at) = self.chat_search_at else {
+            return;
+        };
+        if at.elapsed() < CHAT_SEARCH_PAUSE {
+            // Come back when the pause is over instead of every frame.
+            self.waker
+                .wake_after(CHAT_SEARCH_PAUSE.saturating_sub(at.elapsed()));
+            return;
+        }
+        self.chat_search_at = None;
+        let query = self.chat_search.trim().to_owned();
+        self.chat_search_query = query.clone();
+        if query.is_empty() {
+            self.chat_search_hits.clear();
+            return;
+        }
+        self.backend.send(Command::SearchChat { chat, query });
     }
 
     fn inspect_update(&mut self) {
@@ -2045,6 +2117,32 @@ impl App {
                 }
             }
             Action::CloseViewer => self.viewer = None,
+            Action::ToggleChatSearch => {
+                self.chat_search_open = !self.chat_search_open;
+                if self.chat_search_open {
+                    self.chat_search_focus = true;
+                    self.chat_search_at = Some(Instant::now());
+                } else {
+                    self.chat_search.clear();
+                    self.chat_search_hits.clear();
+                    self.chat_search_query.clear();
+                    self.refocus_composer(ctx);
+                }
+            }
+            Action::ChatSearch(query) => {
+                if query != self.chat_search {
+                    self.chat_search = query;
+                    self.chat_search_at = Some(Instant::now());
+                }
+            }
+            Action::CloseChatSearch => {
+                self.chat_search_open = false;
+                self.chat_search.clear();
+                self.chat_search_hits.clear();
+                self.chat_search_query.clear();
+                self.chat_search_at = None;
+                self.refocus_composer(ctx);
+            }
             Action::SaveCopy(path) => self.backend.send(Command::SaveCopy { from: path }),
             Action::CycleAudioSpeed => {
                 let speed = crate::settings::next_audio_speed(self.settings.audio_speed);
@@ -3537,6 +3635,62 @@ mod tests {
             .map(|m| m.id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn the_in_chat_search_opens_fills_and_closes() {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut app, events) =
+            App::headless(AppDirs::under(directory.path()), Settings::default());
+        let ctx = egui::Context::default();
+        let chat = "1@s.whatsapp.net";
+        app.chats.push(Chat::new(chat.into(), "Ada".into()));
+        app.open_chat = Some(chat.into());
+
+        app.apply(Action::ToggleChatSearch, &ctx);
+        assert!(app.chat_search_open);
+        assert!(app.chat_search_focus, "the field takes focus");
+        app.apply(Action::ChatSearch("engine".into()), &ctx);
+        assert!(app.chat_search_at.is_some(), "the run is scheduled");
+
+        // The worker answers the query that is on screen.
+        app.chat_search_query = "engine".to_owned();
+        events
+            .send(Event::ChatSearch {
+                chat: chat.into(),
+                query: "engine".into(),
+                hits: Ok(vec![message(chat, "hit", 5)]),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.chat_search_hits.len(), 1);
+
+        // An answer for a query the reader moved past is dropped.
+        events
+            .send(Event::ChatSearch {
+                chat: chat.into(),
+                query: "older".into(),
+                hits: Ok(Vec::new()),
+            })
+            .unwrap();
+        app.handle_events();
+        assert_eq!(app.chat_search_hits.len(), 1);
+
+        // Another chat starts without this search.
+        app.chats
+            .push(Chat::new("2@s.whatsapp.net".into(), "Grace".into()));
+        app.apply(
+            Action::OpenMessage {
+                chat: "2@s.whatsapp.net".into(),
+                message: "m".into(),
+            },
+            &ctx,
+        );
+        assert!(!app.chat_search_open, "a new chat closes the search");
+
+        app.apply(Action::CloseChatSearch, &ctx);
+        assert!(!app.chat_search_open);
+        assert!(app.chat_search_hits.is_empty() && app.chat_search.is_empty());
     }
 
     #[test]

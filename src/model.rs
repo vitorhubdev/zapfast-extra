@@ -675,6 +675,12 @@ pub enum Action {
     ViewerFit,
     /// Closes the media viewer.
     CloseViewer,
+    /// Opens or closes the search bar inside the open chat.
+    ToggleChatSearch,
+    /// The in-chat search text changed.
+    ChatSearch(String),
+    /// Closes the search bar inside the open chat.
+    CloseChatSearch,
     /// Asks for a path and saves a copy of a file the app shows.
     SaveCopy(PathBuf),
     /// Steps the audio playback speed through its fixed cycle.

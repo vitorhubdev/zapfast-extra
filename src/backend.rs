@@ -278,6 +278,11 @@ pub enum Command {
     },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
+    /// Searches the open chat's messages.
+    SearchChat {
+        chat: ChatId,
+        query: String,
+    },
     /// Manual update check from the About dialog. Unlike the daily check it
     /// always reports back, so the button never spins forever.
     CheckUpdatesNow,
@@ -466,6 +471,12 @@ pub enum Event {
         saved: Vec<PathBuf>,
         packs: Vec<StickerPack>,
         recent: Vec<PathBuf>,
+    },
+    /// In-chat search hits, or why the search failed.
+    ChatSearch {
+        chat: ChatId,
+        query: String,
+        hits: Result<Vec<Message>, String>,
     },
     Media {
         chat: ChatId,

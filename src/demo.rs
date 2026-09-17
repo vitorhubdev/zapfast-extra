@@ -848,6 +848,31 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.open_chat = Some(chat.to_owned());
                 app.open_viewer(chat, "ada-tall");
             }
+            "find" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                app.chat_search_open = true;
+                app.chat_search = "the".to_owned();
+                app.chat_search_query = app.chat_search.clone();
+                app.chat_search_hits = app
+                    .conversations
+                    .get(chat)
+                    .map(|conversation| {
+                        conversation
+                            .messages
+                            .iter()
+                            .filter(|message| {
+                                message
+                                    .content
+                                    .summary()
+                                    .to_lowercase()
+                                    .contains(&app.chat_search.to_lowercase())
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
             "rtl" => {
                 let id = SAMPLES[1].id;
                 let now = crate::util::now();
@@ -1331,6 +1356,7 @@ mod tests {
             "voice",
             "recording",
             "viewer",
+            "find",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));

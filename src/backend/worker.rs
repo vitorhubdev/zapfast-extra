@@ -68,6 +68,8 @@ const DOWNLOAD_SLOTS: usize = 4;
 const STICKER_ROUND: usize = 10;
 /// Quiet attempts for one sticker before the picker leaves it alone.
 const STICKER_TRIES: u32 = 3;
+/// Hits an in-chat search reports at most.
+const CHAT_SEARCH_LIMIT: usize = 60;
 
 /// Pause between bulk-forwarded messages. One paced stream through the same
 /// single-forward path never looks like a burst to the server.
@@ -2763,6 +2765,13 @@ impl Worker {
                 self.sticker_give_up.clear();
                 self.fetch_missing_stickers();
                 self.emit_stickers();
+            }
+            Command::SearchChat { chat, query } => {
+                let hits = self
+                    .archive
+                    .search_messages_in(Some(&chat), &query, CHAT_SEARCH_LIMIT)
+                    .map_err(|error| error.to_string());
+                self.emit(Event::ChatSearch { chat, query, hits });
             }
             Command::StickerFetched { hash, result } => {
                 self.sticker_fetches.remove(&hash);
