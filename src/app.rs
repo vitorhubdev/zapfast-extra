@@ -226,8 +226,6 @@ pub struct App {
     pub stickers_pending: bool,
     /// Whether a sticker pack import is active.
     pub sticker_import_pending: bool,
-    /// signal.art link in the sticker tab.
-    pub sticker_link: String,
     scroll_lock: Option<(ScrollAxis, Instant)>,
     scroll_from_trackpad: bool,
     scroll_history: egui::util::History<egui::Vec2>,
@@ -447,7 +445,6 @@ impl App {
             sticker_packs: Vec::new(),
             stickers_pending: false,
             sticker_import_pending: false,
-            sticker_link: String::new(),
             scroll_lock: None,
             scroll_from_trackpad: false,
             scroll_history: egui::util::History::new(2..16, 0.1),
@@ -2494,7 +2491,7 @@ impl App {
                     self.actions.push(Action::SettingsChanged);
                     self.picker_focus = tab == PickerTab::Emoji;
                     self.emoji_selected = 0;
-                    if tab == PickerTab::Stickers {
+                    if matches!(tab, PickerTab::Stickers | PickerTab::Favorites) {
                         self.stickers_pending = self.stickers.is_empty()
                             && self.stickers_saved.is_empty()
                             && self.sticker_packs.is_empty();
@@ -2571,11 +2568,6 @@ impl App {
             }
             Action::ForgetSticker(path) => {
                 self.backend.send(Command::ForgetSticker { path });
-            }
-            Action::ImportStickerUrl(url) => {
-                self.sticker_import_pending = true;
-                self.sticker_link.clear();
-                self.backend.send(Command::ImportStickerUrl { url });
             }
             Action::PickStickerArchive => {
                 self.sticker_import_pending = true;

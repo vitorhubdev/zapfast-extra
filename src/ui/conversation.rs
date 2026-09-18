@@ -1396,6 +1396,8 @@ struct View<'a> {
     /// Multi-select mode: row taps toggle instead of opening.
     selecting: bool,
     selected: Vec<String>,
+    /// Stickers marked as favourites, by their file on this machine.
+    favorites: &'a [PathBuf],
 }
 
 fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
@@ -1441,6 +1443,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         copy_rows: app.copy_rows.as_ref(),
         selecting: !app.selected.is_empty(),
         selected: app.selected.clone(),
+        favorites: &app.stickers_favorites,
     };
     let mut actions = Vec::new();
     let mut anchored = false;
@@ -2587,9 +2590,22 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
     }
     if let Content::Sticker { media, .. } = &message.content
         && let Some(path) = &media.path
-        && widgets::menu_item(ui, &palette, Some(Icon::Sticker), "Save sticker")
     {
-        actions.push(Action::SaveSticker(path.clone()));
+        if widgets::menu_item(ui, &palette, Some(Icon::Sticker), "Save sticker") {
+            actions.push(Action::SaveSticker(path.clone()));
+        }
+        // The same menu the picker offers, so a sticker seen in a chat can be
+        // kept in the favourites tab with one click.
+        let favorite = view.favorites.contains(path);
+        let label = if favorite {
+            "Remove from favourites"
+        } else {
+            "Add to favourites"
+        };
+        let icon = if favorite { Icon::PinOff } else { Icon::Pin };
+        if widgets::menu_item(ui, &palette, Some(icon), label) {
+            actions.push(Action::FavoriteSticker(path.clone()));
+        }
     }
     if let Some(media) = message.content.media() {
         let name = match &message.content {

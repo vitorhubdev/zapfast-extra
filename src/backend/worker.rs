@@ -2572,14 +2572,6 @@ impl Worker {
                     self.emit_stickers();
                 }
             }
-            Command::ImportStickerUrl { url } => {
-                let commands = self.commands.clone();
-                let packs = self.packs_dir();
-                tokio::task::spawn_blocking(move || {
-                    let result = super::sticker_import::import_signal_pack(&url, &packs);
-                    let _ = commands.send(Command::StickerPackImported { result });
-                });
-            }
             Command::PickStickerArchive => {
                 let commands = self.commands.clone();
                 let packs = self.packs_dir();
@@ -3869,6 +3861,9 @@ impl Worker {
         if filed == file {
             return filed;
         }
+        // A favourite that named the old file follows it, so it does not
+        // drop out of the picker after the rename.
+        let _ = self.archive.rename_sticker_favorite(file, &filed);
         // The archive still points at the old name: it follows the file.
         let Ok(rows) = self.archive.media_paths() else {
             return filed;
@@ -3884,7 +3879,7 @@ impl Worker {
     /// Returns distinct downloaded stickers by most recent use.
     fn emit_stickers(&mut self) {
         let saved = self.saved_stickers();
-        let favorites = self.archive.sticker_favorites().unwrap_or_default();
+        let mut favorites = self.archive.sticker_favorites().unwrap_or_default();
         // One picture, one place: a sticker already listed under favourites or
         // saved stickers is not offered again in a pack or under recents.
         let mut shown: HashSet<String> = saved
@@ -3936,7 +3931,16 @@ impl Worker {
                     // another, so its path stands in for it.
                     let key = hash.unwrap_or_else(|| sticker.path.display().to_string());
                     if shown.insert(key) {
-                        let path = self.adopt_sticker_file(&sticker.path);
+                        let before = sticker.path.clone();
+                        let path = self.adopt_sticker_file(&before);
+                        if path != before {
+                            // The list in hand still names the old file.
+                            for favorite in &mut favorites {
+                                if *favorite == before {
+                                    *favorite = path.clone();
+                                }
+                            }
+                        }
                         list.push((sticker.last_used, path));
                     }
                 }

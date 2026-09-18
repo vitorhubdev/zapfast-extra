@@ -124,14 +124,16 @@ without embedding a browser engine.
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
   the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
-- **Emoji and sticker picker.** Search emoji and save stickers
-  with a right-click, which also marks a sticker as a favourite or clears the
-  mark; favourites are listed first. The sticker tab lists saved stickers next, then imported
-  packs, then the phone's recent list and the stickers you sent; a sticker that
-  only passed through a chat is never offered. Packs are filed under the hash
-  of each sticker, so the same picture is never listed twice, and the grid
-  draws a small preview built in the background instead of decoding the full
-  file for every tile. Clicking a sticker previews it
+- **Emoji and sticker picker.** Three tabs: emoji, stickers, and favourites.
+  Search emoji, and save stickers with a right-click, which also marks a
+  sticker as a favourite or clears the mark. The favourites tab holds every
+  sticker you marked, wherever it came from, and a sticker in a chat can be
+  marked from its own right-click menu. The sticker tab lists saved stickers
+  first, then imported packs, then the phone recent list and the stickers you
+  sent; a sticker that only passed through a chat is never offered. Packs are
+  filed under the hash of each sticker, so the same picture is never listed
+  twice, and the grid draws a small preview built in the background instead of
+  decoding the full file for every tile. Clicking a sticker previews it
   for confirmation before sending, and the picker reopens on the last used
   tab. A sticker you send is on screen as soon as you confirm it: the copy is
   filed locally first and the upload fills in behind it, and a sticker sent
@@ -141,11 +143,15 @@ without embedding a browser engine.
   asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
   A sticker that is saved or marked as a favourite is not offered again under
-  the phone's recents, and clicking one in a chat shows it bigger with a Save
+  the phone recents, and clicking one in a chat shows it bigger with a Save
   button instead of the full viewer.
-- **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`
-  file. Animated packs remain animated. Packs are stored as WebP files on your
-  computer.
+- **Sticker packs.** Open a .wastickers or zip file as a new pack, from the
+  button at the top of the sticker tab. Animated packs remain animated. Packs
+  are stored as WebP files on your computer, one folder per pack.
+- **Where the ideas came from.** [STICKERS.md](STICKERS.md) lists the clients
+  this one compared itself against (Signal Desktop, WhatsApp Web, Baileys,
+  whatsmeow, ZapZap, SumatraPDF), what was taken from each, and which
+  decisions are local to this fork.
 - **Consistent names.** Prefer names from your address book, then the profile
   name people chose (shown as `~Name`), across chats, replies, mentions, and
   notifications. Chats without either show a readable number, including the

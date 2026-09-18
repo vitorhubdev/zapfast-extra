@@ -12,7 +12,6 @@ use tokio::sync::mpsc;
 use crate::model::{Chat, ChatId, Contact, Message, PollDraft, StickerPack};
 use crate::paths::AppDirs;
 
-// Re-exported so the picker can detect pasted Signal pack links.
 mod read_sync;
 pub(crate) mod sticker_import;
 mod worker;
@@ -233,10 +232,6 @@ pub enum Command {
     /// Removes a saved sticker.
     ForgetSticker {
         path: PathBuf,
-    },
-    /// Imports a pack from a signal.art link.
-    ImportStickerUrl {
-        url: String,
     },
     /// Selects and imports a .wastickers or zip archive.
     PickStickerArchive,

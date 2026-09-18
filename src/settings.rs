@@ -169,6 +169,7 @@ where
     let name = String::deserialize(deserializer)?;
     Ok(match name.as_str() {
         "stickers" => crate::model::PickerTab::Stickers,
+        "favorites" => crate::model::PickerTab::Favorites,
         _ => crate::model::PickerTab::Emoji,
     })
 }
@@ -205,6 +206,8 @@ mod tests {
         assert!(!settings.enter_sends);
         let stickers: Settings = serde_json::from_str(r#"{"picker_tab":"stickers"}"#).unwrap();
         assert_eq!(stickers.picker_tab, crate::model::PickerTab::Stickers);
+        let favorites: Settings = serde_json::from_str(r#"{"picker_tab":"favorites"}"#).unwrap();
+        assert_eq!(favorites.picker_tab, crate::model::PickerTab::Favorites);
     }
 
     #[test]

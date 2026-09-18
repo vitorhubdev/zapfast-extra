@@ -1269,6 +1269,12 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 )));
             }
             "picker" => app.picker = Some(crate::model::PickerTab::Emoji),
+            "favorites" => {
+                app.picker = Some(crate::model::PickerTab::Favorites);
+                let (_, sticker) = sample_files(app);
+                app.stickers_saved = vec![sticker.clone(); 2];
+                app.stickers_favorites = app.stickers_saved.clone();
+            }
             "stickers" => {
                 app.picker = Some(crate::model::PickerTab::Stickers);
                 let (_, sticker) = sample_files(app);
@@ -1431,6 +1437,7 @@ mod tests {
             "offline",
             "syncing",
             "picker",
+            "favorites",
             "stickers",
             "typing",
             "mention",

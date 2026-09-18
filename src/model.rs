@@ -570,6 +570,7 @@ pub enum PickerTab {
     #[default]
     Emoji,
     Stickers,
+    Favorites,
 }
 
 /// Imported sticker pack stored as a named WebP directory.
@@ -892,8 +893,6 @@ pub enum Action {
     },
     /// Copies a picture to the system clipboard.
     CopyImage(PathBuf),
-    /// Imports a sticker pack from a signal.art link.
-    ImportStickerUrl(String),
     /// Selects and imports a .wastickers or zip file.
     PickStickerArchive,
     /// Deletes an imported pack directory.

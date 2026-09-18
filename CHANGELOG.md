@@ -2,6 +2,34 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.25] - 2026-09-18
+
+### New
+
+- The picker has a Favourites tab. Every sticker you marked is listed there,
+  wherever it came from, and a sticker seen in a chat can be marked from its
+  own right-click menu, which now offers Add to favourites and Remove from
+  favourites the way the official client does.
+
+### Changed
+
+- Importing a pack from a signal.art link is gone. The picker no longer shows
+  a link field or the Find packs button, and the code that fetched and
+  decrypted those packs went with them. Open pack file, for a .wastickers or
+  zip archive, stays.
+- A favourite follows its file. When a sticker copy is filed under the hash of
+  its bytes, a favourite that named the old file is renamed with it, so a
+  favourite made before 1.0.22 no longer disappears from the picker.
+- A tile's menu follows the folder it is in. Only a sticker in the saved folder
+  offers Remove from saved (a pack sticker or one of the phone's copies used to
+  show a menu item that did nothing), and only a copy in the app's own cache is
+  ever thrown away to be fetched again.
+
+### Docs
+
+- STICKERS.md records what this fork compared itself against, what was taken
+  from each reference, and which decisions are local.
+
 ## [1.0.24] - 2026-09-18
 
 ### Fixed

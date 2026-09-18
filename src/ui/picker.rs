@@ -65,6 +65,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         |ui| match tab {
                             PickerTab::Emoji => emoji_tab(app, ui, &palette),
                             PickerTab::Stickers => sticker_tab(app, ui, &palette),
+                            PickerTab::Favorites => favorites_tab(app, ui, &palette),
                         },
                     );
                     // Keep the tabs at the bottom when content is short.
@@ -93,6 +94,7 @@ fn tabs(app: &mut App, ui: &mut egui::Ui, palette: &Palette, current: PickerTab)
         let entries = [
             (PickerTab::Emoji, Icon::Smile, "Emoji"),
             (PickerTab::Stickers, Icon::Sticker, "Stickers"),
+            (PickerTab::Favorites, Icon::Pin, "Favourites"),
         ];
         let spacing = ui.spacing().item_spacing.x;
         let total = entries
@@ -402,32 +404,45 @@ mod emoji_tests {
     }
 
     #[test]
-    fn favourites_come_first_and_unknown_ones_are_dropped() {
-        let saved = vec![
-            std::path::PathBuf::from("a.webp"),
-            std::path::PathBuf::from("b.webp"),
-        ];
-        // The files have to exist: a favourite whose copy is gone is dropped.
+    fn a_favourite_shows_every_source_and_drops_a_missing_copy() {
         let dir = std::env::temp_dir().join(format!("zapfast-favourites-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("creates");
-        let mut saved: Vec<std::path::PathBuf> =
-            saved.into_iter().map(|path| dir.join(path)).collect();
-        let gone = dir.join("gone.webp");
-        let phone = dir.join("phone.webp");
-        for path in saved.iter().chain([&gone, &phone]) {
+        let _ = std::fs::remove_dir_all(&dir);
+        let saved_dir = dir.join("state").join("stickers");
+        let pack_dir = saved_dir.join("packs").join("frogs");
+        let cache_dir = dir.join("cache").join("stickers");
+        for folder in [&saved_dir, &pack_dir, &cache_dir] {
+            std::fs::create_dir_all(folder).expect("creates");
+        }
+        let saved = saved_dir.join("a.webp");
+        let packed = pack_dir.join("b.webp");
+        let phone = cache_dir.join("c.webp");
+        let gone = cache_dir.join("gone.webp");
+        for path in [&saved, &packed, &phone, &gone] {
             std::fs::write(path, b"webp").expect("writes");
         }
         std::fs::remove_file(&gone).expect("removes");
-        // A favourite may come from the phone's list rather than the saved ones.
-        let favorites = vec![phone.clone(), gone, saved[1].clone()];
-        let (first, rest) = favourite_sections(&saved, &favorites);
-        assert_eq!(first, vec![phone, saved[1].clone()]);
+        // A favourite may come from a saved sticker, a pack, or the phone's
+        // cache; one whose copy is gone is left out.
+        let favorites = vec![phone.clone(), packed.clone(), saved.clone(), gone];
         assert_eq!(
-            rest,
-            vec![saved[0].clone()],
-            "a favourite leaves My stickers"
+            favourites_on_disk(&favorites),
+            vec![phone.clone(), packed.clone(), saved.clone()]
         );
-        saved.clear();
+        // The tile menu follows the folder: only a saved sticker can leave My
+        // stickers, and only a copy in the app's cache may be thrown away to
+        // be fetched again.
+        let sources = GridSources {
+            saved: saved_dir.clone(),
+            cache: dir.join("cache"),
+        };
+        assert!(sources.is_saved(&saved));
+        assert!(
+            !sources.is_saved(&packed),
+            "a sticker inside a pack is not one of the saved ones"
+        );
+        assert!(!sources.is_saved(&phone));
+        assert!(sources.is_cached(&phone));
+        assert!(!sources.is_cached(&saved));
         let _ = std::fs::remove_dir_all(dir);
     }
 }
@@ -444,35 +459,53 @@ struct StickerChoices {
     favorite: Option<std::path::PathBuf>,
 }
 
-/// Splits the sticker tab into favourites and the saved stickers left over.
+/// The favourites whose copy is still on disk.
 ///
-/// A favourite may come from anywhere (saved, an imported pack, the phone's
-/// recent list), so the section holds every marked file that is still on disk.
-fn favourite_sections(
-    saved: &[std::path::PathBuf],
-    favorites: &[std::path::PathBuf],
-) -> (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) {
-    let favorites: Vec<std::path::PathBuf> = favorites
+/// A favourite may come from anywhere: a saved sticker, an imported pack, or
+/// the phone's recent list. One whose file is gone is left out.
+fn favourites_on_disk(favorites: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    favorites
         .iter()
         .filter(|path| path.is_file())
         .cloned()
-        .collect();
-    let rest = saved
-        .iter()
-        .filter(|path| !favorites.contains(path))
-        .cloned()
-        .collect();
-    (favorites, rest)
+        .collect()
+}
+
+/// Where the tiles on screen come from, for their menu and their self-heal.
+#[derive(Clone)]
+struct GridSources {
+    /// Saved stickers live here, so a tile under it can be removed from saved.
+    saved: std::path::PathBuf,
+    /// The app's own cache, whose copies can be fetched again when broken.
+    cache: std::path::PathBuf,
+}
+
+impl GridSources {
+    fn of(app: &App) -> Self {
+        Self {
+            saved: app.dirs.saved_sticker_dir(),
+            cache: app.dirs.cache.clone(),
+        }
+    }
+
+    /// Whether this tile is one of the user's own saved stickers.
+    ///
+    /// Imported packs live in a folder beside them, so a file inside a pack is
+    /// not a saved sticker and cannot be removed as one.
+    fn is_saved(&self, path: &Path) -> bool {
+        path.parent() == Some(self.saved.as_path())
+    }
+
+    /// Whether the app can throw this copy away and fetch it again.
+    fn is_cached(&self, path: &Path) -> bool {
+        path.starts_with(&self.cache)
+    }
 }
 
 fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     import_row(app, ui, palette);
     ui.add_space(4.0);
-    if app.stickers.is_empty()
-        && app.stickers_saved.is_empty()
-        && app.sticker_packs.is_empty()
-        && app.stickers_favorites.is_empty()
-    {
+    if app.stickers.is_empty() && app.stickers_saved.is_empty() && app.sticker_packs.is_empty() {
         ui.add_space(20.0);
         ui.vertical_centered(|ui| {
             theme::paragraph(
@@ -480,7 +513,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 if app.stickers_pending {
                     "Loading your stickers…"
                 } else {
-                    "Your saved stickers appear first. Phone recents stay in a separate section. To import a pack, paste a signal.art link or open a .wastickers file."
+                    "Your saved stickers appear first, then imported packs, then the phone's recents. Mark a sticker as a favourite to keep it in its own tab."
                 },
                 theme::regular(13.0),
                 palette.secondary,
@@ -489,9 +522,10 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         return;
     }
     let saved = app.stickers_saved.clone();
-    let (favorites, rest) = favourite_sections(&saved, &app.stickers_favorites);
     let packs = app.sticker_packs.clone();
     let recent = app.stickers.clone();
+    let favorites = favourites_on_disk(&app.stickers_favorites);
+    let sources = GridSources::of(app);
     let thumbs = app.dirs.sticker_thumb_dir();
     let mut choices = StickerChoices::default();
     let mut delete_pack = None;
@@ -499,28 +533,13 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
         .id_salt("sticker-grid")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if !favorites.is_empty() {
-                theme::text(ui, "Favourites", theme::semibold(12.5), palette.secondary);
-                sticker_grid(
-                    ui,
-                    palette,
-                    &favorites,
-                    true,
-                    false,
-                    &thumbs,
-                    &favorites,
-                    &mut choices,
-                );
-                ui.add_space(8.0);
-            }
-            if !rest.is_empty() {
+            if !saved.is_empty() {
                 theme::text(ui, "My stickers", theme::semibold(12.5), palette.secondary);
                 sticker_grid(
                     ui,
                     palette,
-                    &rest,
-                    true,
-                    false,
+                    &saved,
+                    &sources,
                     &thumbs,
                     &favorites,
                     &mut choices,
@@ -549,8 +568,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     ui,
                     palette,
                     &pack.stickers,
-                    false,
-                    false,
+                    &sources,
                     &thumbs,
                     &favorites,
                     &mut choices,
@@ -570,14 +588,21 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     ui,
                     palette,
                     &recent,
-                    false,
-                    true,
+                    &sources,
                     &thumbs,
                     &favorites,
                     &mut choices,
                 );
             }
         });
+    apply_choices(app, choices);
+    if let Some(dir) = delete_pack {
+        app.actions.push(Action::DeleteStickerPack(dir));
+    }
+}
+
+/// Turns what the tiles asked for into actions.
+fn apply_choices(app: &mut App, choices: StickerChoices) {
     if let Some(path) = choices.save {
         app.actions.push(Action::SaveSticker(path));
     }
@@ -596,56 +621,54 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     if let Some(path) = choices.favorite {
         app.actions.push(Action::FavoriteSticker(path));
     }
-    if let Some(dir) = delete_pack {
-        app.actions.push(Action::DeleteStickerPack(dir));
-    }
 }
 
-/// Imports packs from pasted signal.art links or .wastickers files.
+/// The stickers the user marked, wherever they came from.
+fn favorites_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
+    let favorites = favourites_on_disk(&app.stickers_favorites);
+    if favorites.is_empty() {
+        ui.add_space(20.0);
+        ui.vertical_centered(|ui| {
+            theme::paragraph(
+                ui,
+                if app.stickers_pending {
+                    "Loading your stickers…"
+                } else {
+                    "Right-click a sticker, here or in a chat, and choose Add to favourites to keep it in this tab."
+                },
+                theme::regular(13.0),
+                palette.secondary,
+            );
+        });
+        return;
+    }
+    let sources = GridSources::of(app);
+    let thumbs = app.dirs.sticker_thumb_dir();
+    let mut choices = StickerChoices::default();
+    egui::ScrollArea::vertical()
+        .id_salt("favorite-grid")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            sticker_grid(
+                ui,
+                palette,
+                &favorites,
+                &sources,
+                &thumbs,
+                &favorites,
+                &mut choices,
+            );
+        });
+    apply_choices(app, choices);
+}
+
+/// Opens a .wastickers or zip archive as a new pack.
 fn import_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     ui.horizontal(|ui| {
-        let spacing = ui.spacing().item_spacing.x;
-        let buttons = theme::soft_button_width(ui, "Find packs", true)
-            + theme::soft_button_width(ui, "Open file", true)
-            + spacing * 2.0;
-        let field = Frame::new()
-            .fill(palette.surface)
-            .corner_radius(CornerRadius::same(theme::RADIUS))
-            .inner_margin(Margin::symmetric(10, 6))
-            .show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut app.sticker_link)
-                        .id(egui::Id::new("sticker-link"))
-                        .hint_text(
-                            egui::RichText::new("Paste a signal.art link")
-                                .color(palette.dim)
-                                .font(theme::regular(13.0)),
-                        )
-                        .font(theme::regular(13.0))
-                        .text_color(palette.text)
-                        .frame(Frame::NONE)
-                        .desired_width(ui.available_width() - buttons - 26.0),
-                )
-            })
-            .inner;
-        let pasted = field.changed()
-            && crate::backend::sticker_import::looks_like_signal_url(app.sticker_link.trim());
-        let submitted = field.lost_focus()
-            && ui.input(|input| input.key_pressed(Key::Enter))
-            && !app.sticker_link.trim().is_empty();
-        if pasted || submitted {
-            app.actions
-                .push(Action::ImportStickerUrl(app.sticker_link.trim().to_owned()));
-        }
-        // Open the gallery where users can copy signal.art pack links.
-        if theme::soft_button(ui, palette, Some(Icon::ExternalLink), "Find packs", false)
-            .on_hover_text("Browse signalstickers.org")
+        if theme::soft_button(ui, palette, Some(Icon::FileText), "Open pack file", false)
+            .on_hover_text("Import a .wastickers, .zip, or folder of stickers")
             .clicked()
         {
-            app.actions
-                .push(Action::OpenUrl("https://signalstickers.org/".to_owned()));
-        }
-        if theme::soft_button(ui, palette, Some(Icon::FileText), "Open file", false).clicked() {
             app.actions.push(Action::PickStickerArchive);
         }
     });
@@ -669,8 +692,7 @@ fn sticker_grid(
     ui: &mut egui::Ui,
     palette: &Palette,
     stickers: &[std::path::PathBuf],
-    saved: bool,
-    cache: bool,
+    sources: &GridSources,
     thumbs: &Path,
     favorites: &[std::path::PathBuf],
     choices: &mut StickerChoices,
@@ -683,6 +705,8 @@ fn sticker_grid(
     for row in stickers.chunks(columns) {
         ui.horizontal(|ui| {
             for path in row {
+                let saved = sources.is_saved(path);
+                let cache = sources.is_cached(path);
                 let (rect, response) = ui.allocate_exact_size(Vec2::splat(cell), Sense::click());
                 if ui.is_rect_visible(rect) {
                     if response.hovered() {

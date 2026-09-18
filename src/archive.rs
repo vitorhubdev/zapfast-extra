@@ -1222,6 +1222,26 @@ impl Archive {
         Ok(added)
     }
 
+    /// Points a favourite at its file's new name.
+    ///
+    /// A sticker copy in the app's cache is filed under the hash of its bytes,
+    /// which renames it once. A favourite that named the old file follows it
+    /// instead of quietly disappearing from the picker.
+    pub fn rename_sticker_favorite(&self, from: &Path, to: &Path) -> Result<()> {
+        let mut favorites = self.sticker_favorites()?;
+        let mut changed = false;
+        for favorite in &mut favorites {
+            if favorite == from {
+                *favorite = to.to_path_buf();
+                changed = true;
+            }
+        }
+        if changed && let Ok(raw) = serde_json::to_string(&favorites) {
+            self.set_meta("sticker_favorites", &raw)?;
+        }
+        Ok(())
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         self.connection
             .query_row(
@@ -1900,6 +1920,29 @@ mod sticker_tests {
         assert!(archive.sticker_favorites().expect("damaged").is_empty());
     }
 
+    #[test]
+    fn a_favourite_follows_its_file_to_its_new_name() {
+        let archive = Archive::in_memory().expect("opens");
+        let before = std::path::PathBuf::from("/cache/media/5541-3EB0.webp");
+        let after = std::path::PathBuf::from("/cache/media/9f2c.webp");
+        let other = std::path::PathBuf::from("/state/stickers/frog.webp");
+        archive.toggle_sticker_favorite(&before).expect("adds");
+        archive.toggle_sticker_favorite(&other).expect("adds");
+        archive
+            .rename_sticker_favorite(&before, &after)
+            .expect("renames");
+        assert_eq!(
+            archive.sticker_favorites().expect("list"),
+            vec![other, after],
+            "the favourite follows its file, and the rest is untouched"
+        );
+        // A favourite that named neither name changes nothing at all.
+        let missing = std::path::PathBuf::from("/gone.webp");
+        archive
+            .rename_sticker_favorite(&missing, &before)
+            .expect("renames nothing");
+        assert_eq!(archive.sticker_favorites().expect("list").len(), 2);
+    }
     fn sticker(chat: &str, id: &str, timestamp: i64, path: Option<&str>, from_me: bool) -> Message {
         Message {
             id: id.into(),
