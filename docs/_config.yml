@@ -1,5 +1,5 @@
 title: ZapExt
-zapfast_version: "1.0.9"
+zapfast_version: "1.0.18"
 release_asset_prefix: zapfast
 release_app_name: ZapExt
 description: ZapExt, a community mod of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
