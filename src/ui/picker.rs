@@ -468,7 +468,11 @@ fn favourite_sections(
 fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     import_row(app, ui, palette);
     ui.add_space(4.0);
-    if app.stickers.is_empty() && app.stickers_saved.is_empty() && app.sticker_packs.is_empty() {
+    if app.stickers.is_empty()
+        && app.stickers_saved.is_empty()
+        && app.sticker_packs.is_empty()
+        && app.stickers_favorites.is_empty()
+    {
         ui.add_space(20.0);
         ui.vertical_centered(|ui| {
             theme::paragraph(

@@ -2,6 +2,14 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.19] - 2026-09-18
+
+### Fixed
+
+- A sticker marked as a favourite is shown even when the saved, pack and
+  recent lists are all empty. The picker's empty check counted only those
+  three lists, so the Favourites section never appeared on its own.
+
 ## [1.0.18] - 2026-09-17
 
 ### Fixed
