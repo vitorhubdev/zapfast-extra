@@ -1647,7 +1647,22 @@ fn top_of_history(
 ) {
     ui.vertical_centered(|ui| {
         if !conversation.complete {
-            if conversation.loading_older {
+            if conversation.messages.is_empty() {
+                // An opened chat is never blank while its first page is on
+                // its way: the spinner says what the empty area means.
+                ui.add_space(24.0);
+                ui.horizontal(|ui| {
+                    let width = 200.0;
+                    ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
+                    theme::spinner(ui, 16.0, palette.accent);
+                    theme::text(
+                        ui,
+                        "Loading saved messages…",
+                        theme::regular(12.5),
+                        palette.secondary,
+                    );
+                });
+            } else if conversation.loading_older {
                 theme::spinner(ui, 18.0, palette.accent);
             } else {
                 ui.add_space(18.0);

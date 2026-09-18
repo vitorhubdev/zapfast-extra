@@ -2,6 +2,17 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.28] - 2026-09-18
+
+### Fixed
+
+- Saved chats open at once with their messages. The newest chats preload
+  when the app starts, a chat whose first page never answers is asked again
+  instead of staying blank, and the loading state says so.
+- Chats split across a privacy id and a phone number read as one. Rows
+  written before the mapping was known move under the number when it is
+  learned and at every startup, and reads check both ids until the move.
+
 ## [1.0.27] - 2026-09-18
 
 ### New

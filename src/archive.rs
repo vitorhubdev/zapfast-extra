@@ -916,6 +916,73 @@ impl Archive {
         )?;
         Ok(())
     }
+    /// Moves every row filed under one chat id to another id.
+    ///
+    /// A chat behind a privacy id is filed under its phone number once the
+    /// mapping is known, but rows written before that moment keep the old
+    /// id. Without this move the sidebar shows the chat while opening it
+    /// reads an empty id, so saved messages never appear. Returns whether
+    /// anything moved.
+    pub fn rekey_chat(&self, from: &str, to: &str) -> Result<bool> {
+        if from == to {
+            return Ok(false);
+        }
+        // A message id already living under both ids keeps the target copy.
+        let dupes = self.connection.execute(
+            "DELETE FROM messages WHERE chat = ?1 AND id IN (SELECT id FROM messages WHERE chat = ?2)",
+            params![from, to],
+        )?;
+        let moved = self.connection.execute(
+            "UPDATE messages SET chat = ?2 WHERE chat = ?1",
+            params![from, to],
+        )?;
+        let _ = self.connection.execute(
+            "DELETE FROM group_receipts WHERE chat = ?1 AND (id, recipient) IN (SELECT id, recipient FROM group_receipts WHERE chat = ?2)",
+            params![from, to],
+        )?;
+        let _ = self.connection.execute(
+            "UPDATE group_receipts SET chat = ?2 WHERE chat = ?1",
+            params![from, to],
+        )?;
+        let chats = self.merge_chat_rows(from, to)?;
+        Ok(dupes > 0 || moved > 0 || chats)
+    }
+    /// Folds the chat row `from` into `to`, keeping the liveliest values.
+    fn merge_chat_rows(&self, from: &str, to: &str) -> Result<bool> {
+        let have_from: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+            params![from],
+            |row| row.get(0),
+        )?;
+        if !have_from {
+            return Ok(false);
+        }
+        let have_to: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+            params![to],
+            |row| row.get(0),
+        )?;
+        if !have_to {
+            self.connection
+                .execute("UPDATE chats SET id = ?2 WHERE id = ?1", params![from, to])?;
+            return Ok(true);
+        }
+        self.connection.execute(
+            "UPDATE chats SET
+                last_activity = MAX(last_activity, (SELECT last_activity FROM chats WHERE id = ?1)),
+                unread = unread + (SELECT unread FROM chats WHERE id = ?1),
+                archived = archived | (SELECT archived FROM chats WHERE id = ?1),
+                pinned = pinned | (SELECT pinned FROM chats WHERE id = ?1),
+                pinned_at = MAX(COALESCE(pinned_at, 0), COALESCE((SELECT pinned_at FROM chats WHERE id = ?1), 0)),
+                muted_until = MAX(COALESCE(muted_until, 0), COALESCE((SELECT muted_until FROM chats WHERE id = ?1), 0)),
+                name = CASE WHEN name IS NULL OR name = '' THEN (SELECT name FROM chats WHERE id = ?1) ELSE name END
+             WHERE id = ?2",
+            params![from, to],
+        )?;
+        self.connection
+            .execute("DELETE FROM chats WHERE id = ?1", params![from])?;
+        Ok(true)
+    }
     /// Stores a generated video poster, keeping the phone's own thumbnail
     /// when one arrived with the message.
     pub fn set_thumbnail(&self, chat: &str, id: &str, thumbnail: &[u8]) -> Result<()> {
@@ -1312,6 +1379,47 @@ impl Archive {
 pub(crate) mod tests {
     use super::*;
     use crate::model::Content;
+    #[test]
+    fn rekeying_moves_a_chat_from_its_privacy_id_to_its_number() {
+        let archive = Archive::in_memory().expect("opens");
+        let lid = "123@lid";
+        let pn = "15550001111@s.whatsapp.net";
+        archive.ensure_chat(lid, "").expect("old row");
+        archive.ensure_chat(pn, "Mom").expect("new row");
+        // The same message id under both ids keeps the canonical copy.
+        for (chat, id, timestamp) in [
+            (lid, "m1", 10),
+            (lid, "m2", 20),
+            (pn, "m2", 20),
+            (pn, "m3", 30),
+        ] {
+            archive
+                .insert_message(&message(chat, id, timestamp, false), None)
+                .expect("insert");
+        }
+        assert!(archive.rekey_chat(lid, pn).expect("moves"));
+        assert!(
+            !archive.rekey_chat(lid, pn).expect("settled"),
+            "a second pass moves nothing"
+        );
+        let rows = archive.messages(pn, None, 10).expect("lists");
+        let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["m1", "m2", "m3"],
+            "every message lives under one id"
+        );
+        assert!(archive.messages(lid, None, 10).expect("old").is_empty());
+        let chats = archive.chats().expect("lists");
+        assert_eq!(chats.len(), 1);
+        assert_eq!(chats[0].id, pn);
+        assert_eq!(chats[0].name, "Mom", "the kept row keeps its name");
+        assert!(chats[0].last.is_some(), "the preview follows the messages");
+        assert!(
+            !archive.rekey_chat(pn, pn).expect("same"),
+            "an id maps to itself"
+        );
+    }
 
     pub(crate) fn message(chat: &str, id: &str, timestamp: i64, from_me: bool) -> Message {
         Message {

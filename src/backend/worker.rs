@@ -303,6 +303,8 @@ pub async fn run(
     worker.load_state();
     worker.backfill();
     worker.relocate_media();
+    worker.rekey_known_chats();
+    worker.preload_recent();
     worker.start_bot().await;
     let mut wa_events = wa_events;
     let mut tick = tokio::time::interval(Duration::from_secs(5));
@@ -785,10 +787,24 @@ impl Worker {
             return;
         }
         self.lid_to_pn.insert(lid.to_owned(), pn.to_owned());
+        let mut changed = false;
         match self.archive.put_lid(lid, pn) {
-            Ok(true) => self.emit_chats(),
+            Ok(true) => changed = true,
             Ok(false) => {}
             Err(error) => log::warn!("could not remember an id mapping: {error}"),
+        }
+        // Rows filed before this mapping was known keep the old id. Moving
+        // them now keeps the sidebar and the open chat reading one id.
+        if self
+            .archive
+            .rekey_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))
+            .unwrap_or(false)
+        {
+            log::info!("chat {pn} re-filed under its phone number");
+            changed = true;
+        }
+        if changed {
+            self.emit_chats();
         }
     }
 
@@ -834,6 +850,21 @@ impl Worker {
             Ok(jid) => self.canonical(&jid),
             Err(_) => id.to_owned(),
         }
+    }
+    /// The other id a chat may be filed under while a privacy mapping settles.
+    ///
+    /// Rows written before a LID-to-number mapping was known keep the old id,
+    /// so reads check both until the background rekey finishes the move.
+    fn alt_chat_id(&self, chat: &str) -> Option<String> {
+        if let Some(lid) = chat.strip_suffix("@lid") {
+            let pn = self.lid_to_pn.get(lid)?;
+            return Some(format!("{pn}@s.whatsapp.net"));
+        }
+        if let Some(pn) = chat.strip_suffix("@s.whatsapp.net") {
+            let lid = self.lid_to_pn.iter().find(|(_, known)| *known == pn)?.0;
+            return Some(format!("{lid}@lid"));
+        }
+        None
     }
 
     fn jid_of(id: &str) -> Option<Jid> {
@@ -3494,28 +3525,57 @@ impl Worker {
     }
 
     fn load_chat(&mut self, chat: ChatId, before: Option<super::PageKey>) {
-        match self.archive.messages(
-            &chat,
-            before.as_ref().map(|(time, id)| (*time, id.as_str())),
-            PAGE + 1,
-        ) {
-            Ok(mut messages) => {
-                let complete = messages.len() <= PAGE;
-                if !complete {
-                    messages.remove(0);
-                }
-                for message in &mut messages {
-                    self.polish(message);
-                }
-                self.emit(Event::Messages {
-                    chat: chat.clone(),
-                    messages,
-                    older: before.is_some(),
-                    complete,
-                });
-            }
-            Err(error) => self.emit(Event::Error(format!("Could not read the chat: {error}"))),
+        // A chat behind a privacy id may still have rows under its old id.
+        // Reading both files the view under the asked id, so saved messages
+        // appear while the background rekey finishes the move.
+        let before_ref = before.as_ref().map(|(time, id)| (*time, id.as_str()));
+        let mut merged = Vec::new();
+        let mut complete = true;
+        let mut failed: Option<String> = None;
+        // The asked id first, so ties keep its rows before the old ones.
+        let mut ids = vec![chat.clone()];
+        if let Some(alt) = self.alt_chat_id(&chat)
+            && alt != chat
+        {
+            ids.push(alt);
         }
+        for id in ids {
+            match self.archive.messages(&id, before_ref, PAGE + 1) {
+                Ok(mut messages) => {
+                    complete = complete && messages.len() <= PAGE;
+                    if messages.len() > PAGE {
+                        messages.remove(0);
+                    }
+                    merged.append(&mut messages);
+                }
+                Err(error) => {
+                    failed = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failed {
+            self.emit(Event::Error(format!("Could not read the chat: {error}")));
+            return;
+        }
+        // Oldest first like a single read, one row per message id.
+        merged.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.id.cmp(&b.id)));
+        let mut seen = std::collections::HashSet::new();
+        merged.retain(|message| seen.insert(message.id.clone()));
+        let complete = complete && merged.len() <= PAGE;
+        // The extra row only says whether an older page exists.
+        if merged.len() > PAGE {
+            merged.remove(0);
+        }
+        for message in &mut merged {
+            self.polish(message);
+        }
+        self.emit(Event::Messages {
+            chat: chat.clone(),
+            messages: merged,
+            older: before.is_some(),
+            complete,
+        });
         if before.is_none() && ChatKind::from_id(&chat) == ChatKind::Group {
             // Force group metadata when opening a group.
             self.request_group_info(&chat, false);
@@ -4024,6 +4084,72 @@ impl Worker {
         std::fs::rename(path, &filed).map_or_else(|_| path.to_path_buf(), |()| filed)
     }
 
+    /// Moves chats filed under a privacy id to their phone number, once per start.
+    ///
+    /// Mappings learned in earlier runs already sit in the archive, but rows
+    /// written before they were learned still carry the old id. Healing them
+    /// at startup means opening a chat never reads an empty id.
+    fn rekey_known_chats(&mut self) {
+        let mut moved = 0;
+        for (lid, pn) in self.lid_to_pn.clone() {
+            match self
+                .archive
+                .rekey_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))
+            {
+                Ok(true) => moved += 1,
+                Ok(false) => {}
+                Err(error) => log::warn!("could not re-file chat {pn}: {error}"),
+            }
+        }
+        if moved > 0 {
+            log::info!("re-filed {moved} chats under their phone numbers");
+            self.emit_chats();
+        }
+    }
+    /// Reads the first page of the most recent chats into the new session.
+    ///
+    /// Opening a chat then paints saved messages at once instead of waiting
+    /// for a page read. Text and attachment references come from the archive
+    /// itself; files stay lazy and load when their bubble scrolls into view.
+    fn preload_recent(&mut self) {
+        /// Recent chats preloaded at startup.
+        const PRELOAD_CHATS: usize = 15;
+        let chats = match self.archive.chats() {
+            Ok(chats) => chats,
+            Err(error) => {
+                log::warn!("could not preload chats: {error}");
+                return;
+            }
+        };
+        let mut filled = 0;
+        for chat in chats.iter().take(PRELOAD_CHATS) {
+            match self.archive.messages(&chat.id, None, PAGE + 1) {
+                Ok(mut messages) => {
+                    let complete = messages.len() <= PAGE;
+                    if !complete {
+                        messages.remove(0);
+                    }
+                    if messages.is_empty() {
+                        continue;
+                    }
+                    for message in &mut messages {
+                        self.polish(message);
+                    }
+                    filled += 1;
+                    self.emit(Event::Messages {
+                        chat: chat.id.clone(),
+                        messages,
+                        older: false,
+                        complete,
+                    });
+                }
+                Err(error) => log::warn!("could not preload {}: {error}", chat.id),
+            }
+        }
+        if filled > 0 {
+            log::info!("preloaded {filled} recent chats");
+        }
+    }
     /// Files a sticker copy in the app's own cache under its content hash.
     ///
     /// A sticker the user sent is filed with its message, under a name that
@@ -6702,6 +6828,58 @@ mod receipt_tests {
         (worker, events_rx, inbox, wa_events)
     }
 
+    fn drain_pages(events: &std::sync::mpsc::Receiver<Event>) -> Vec<(ChatId, Vec<String>)> {
+        let mut pages = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if let Event::Messages { chat, messages, .. } = event {
+                pages.push((chat, messages.iter().map(|row| row.id.clone()).collect()));
+            }
+        }
+        pages
+    }
+    #[test]
+    fn an_old_privacy_id_reads_as_its_number_then_moves_there() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        // One row filed before its privacy mapping was known.
+        worker.archive.ensure_chat(PEER_LID, "").expect("old row");
+        let mut old = own_message("old", 10);
+        old.chat = PEER_LID.into();
+        old.from_me = false;
+        old.sender = PEER_LID.into();
+        worker.archive.insert_message(&old, None).expect("insert");
+        worker.archive.ensure_chat(PEER, "Peer").expect("new row");
+        let mut new = own_message("new", 20);
+        new.chat = PEER.into();
+        worker.archive.insert_message(&new, None).expect("insert");
+        // The mapping is known but nothing moved yet: the asked id still
+        // answers with both rows.
+        worker
+            .lid_to_pn
+            .insert("167650256810092".into(), "4917663430455".into());
+        worker.load_chat(PEER.into(), None);
+        assert_eq!(
+            drain_pages(&events),
+            vec![(PEER.into(), vec!["old".to_owned(), "new".to_owned()])],
+            "both ids read as one chat"
+        );
+        // Learning the mapping moves the old row under the number, and the
+        // startup preload then fills the chat in one page.
+        worker.lid_to_pn.remove("167650256810092");
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(
+            worker
+                .archive
+                .messages(PEER_LID, None, 10)
+                .expect("old")
+                .is_empty()
+        );
+        worker.preload_recent();
+        assert_eq!(
+            drain_pages(&events),
+            vec![(PEER.into(), vec!["old".to_owned(), "new".to_owned()])],
+            "one preloaded page for one chat"
+        );
+    }
     fn own_message(id: &str, timestamp: i64) -> Message {
         Message {
             id: id.into(),

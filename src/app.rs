@@ -60,6 +60,9 @@ pub struct Conversation {
     pub loading_older: bool,
     /// Whether the initial page was requested.
     pub requested: bool,
+    /// When the initial page was last asked for. A page that never answers
+    /// is asked again instead of leaving an opened chat blank.
+    pub requested_at: Option<Instant>,
     /// Whether a phone history request is active.
     pub fetching_phone: bool,
     /// Whether phone history is exhausted or unavailable.
@@ -1094,6 +1097,11 @@ impl App {
                     } else if was_empty {
                         conversation.complete = complete;
                     }
+                    if !older {
+                        // Preloaded pages arrive without an explicit open.
+                        conversation.requested = true;
+                        conversation.requested_at = Some(Instant::now());
+                    }
                     // Request phone history when sync created a chat without messages.
                     let bare = !older && complete && conversation.messages.is_empty();
                     if self.open_chat.as_deref() == Some(chat.as_str()) {
@@ -1486,10 +1494,37 @@ impl App {
         let conversation = self.conversations.entry(chat.to_owned()).or_default();
         if !conversation.requested {
             conversation.requested = true;
+            conversation.requested_at = Some(Instant::now());
             self.backend.send(Command::LoadChat {
                 chat: chat.to_owned(),
                 before: None,
             });
+        }
+    }
+    /// Re-asks for pages that never answered, so an opened chat cannot stay
+    /// blank when its first read was lost on a busy worker.
+    fn retry_missing_pages(&mut self) {
+        /// How long a requested page may take before it is asked again.
+        const PATIENCE: Duration = Duration::from_secs(8);
+        let mut retry = Vec::new();
+        let now = Instant::now();
+        for (chat, conversation) in self.conversations.iter_mut() {
+            let waiting = conversation.requested
+                && conversation.messages.is_empty()
+                && !conversation.loading_older
+                && !conversation.fetching_phone;
+            if waiting
+                && conversation
+                    .requested_at
+                    .is_none_or(|at| now.duration_since(at) >= PATIENCE)
+            {
+                conversation.requested_at = Some(now);
+                retry.push(chat.clone());
+            }
+        }
+        for chat in retry {
+            log::warn!("no page arrived for {chat}; asking again");
+            self.backend.send(Command::LoadChat { chat, before: None });
         }
     }
 
@@ -3059,6 +3094,7 @@ impl App {
         self.handle_events();
         self.tick(ctx);
         self.tick_audio();
+        self.retry_missing_pages();
         self.apply_actions(ctx);
     }
 
