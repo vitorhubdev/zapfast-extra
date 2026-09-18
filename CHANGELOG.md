@@ -2,6 +2,14 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.24] - 2026-09-18
+
+### Fixed
+
+- The arrow keys of the PDF viewer do what the hint and the buttons say: all
+  four turn the page. Left and right used to jump to the next file in the chat
+  while the bar's Previous and Next turned pages.
+
 ## [1.0.23] - 2026-09-18
 
 ### New

@@ -23,19 +23,22 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
                 actions.push(action);
             }
         };
-        key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
-        key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
-        // A PDF walks its pages with the vertical arrows.
+        // A PDF walks its pages with all four arrows, as the buttons in its
+        // bar do; the other files are walked as pictures.
         if pdf {
             if !typing_page {
                 key(Modifiers::NONE, Key::ArrowDown, Action::ViewerPage(1));
                 key(Modifiers::NONE, Key::ArrowUp, Action::ViewerPage(-1));
+                key(Modifiers::NONE, Key::ArrowRight, Action::ViewerPage(1));
+                key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerPage(-1));
                 key(Modifiers::NONE, Key::PageDown, Action::ViewerPage(10));
                 key(Modifiers::NONE, Key::PageUp, Action::ViewerPage(-10));
                 key(Modifiers::NONE, Key::Home, Action::ViewerPageTo(1));
                 key(Modifiers::NONE, Key::End, Action::ViewerPageTo(usize::MAX));
             }
         } else {
+            key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
+            key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
             key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
             key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
         }

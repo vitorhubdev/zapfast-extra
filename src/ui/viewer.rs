@@ -532,7 +532,7 @@ fn chrome(
         pos2(rect.right() - 28.0, rect.bottom() - 12.0),
     );
     let text = if pdf {
-        "Scroll to zoom · drag to move · ↑ ↓ or ← → to turn the page · Esc to close"
+        "Scroll to zoom · drag to move · arrows turn the page · PageUp/PageDown skip ten · Esc to close"
     } else {
         "Scroll to zoom · drag to move · arrows to browse · Esc to close"
     };
