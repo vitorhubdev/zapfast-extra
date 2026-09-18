@@ -627,6 +627,13 @@ impl Viewer {
         self.pdf_page = next as usize;
     }
 
+    /// Jumps to a page of the PDF on screen, counted from one, stopping at
+    /// either end of the document.
+    pub fn page_to(&mut self, page: usize) {
+        let last = self.pdf_pages.saturating_sub(1);
+        self.pdf_page = page.saturating_sub(1).min(last);
+    }
+
     /// Multiplies the zoom around an anchor in points from the centre.
     pub fn zoom_by(&mut self, factor: f32, anchor: (f32, f32)) {
         let zoom = (self.zoom * factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
@@ -776,6 +783,8 @@ pub enum Action {
     ViewerStep(i32),
     /// Moves to another page of the PDF in the media viewer.
     ViewerPage(i32),
+    /// Jumps to a page of the PDF in the media viewer, counted from one.
+    ViewerPageTo(usize),
     /// Zooms the media viewer around an anchor in points from its centre.
     ViewerZoom {
         factor: f32,

@@ -2156,6 +2156,7 @@ impl App {
                 // Keep the search result, not the chat end, in view.
                 self.scroll_to_bottom = false;
                 self.at_bottom = false;
+                crate::ui::conversation::flash_message(ctx, &message);
                 self.scroll_anchor = Some(message.clone());
                 let conversation = self.conversations.entry(chat.clone()).or_default();
                 if conversation.message(&message).is_none()
@@ -2272,6 +2273,11 @@ impl App {
                     viewer.page_by(step);
                 }
             }
+            Action::ViewerPageTo(page) => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.page_to(page);
+                }
+            }
             Action::ViewerZoom { factor, anchor } => {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.zoom_by(factor, anchor);
@@ -2291,6 +2297,8 @@ impl App {
             Action::CloseViewer => {
                 self.viewer = None;
                 self.forget_pdf();
+                // The document does not stay in memory once it is closed.
+                self.backend.send(Command::ForgetPdf);
             }
             Action::ToggleChatSearch => {
                 self.chat_search_open = !self.chat_search_open;
@@ -2718,6 +2726,7 @@ impl App {
             Action::ScrollToBottom => self.scroll_to_bottom = true,
             Action::ScrollTo(id) => {
                 self.scroll_to_bottom = false;
+                crate::ui::conversation::flash_message(ctx, &id);
                 let Some(chat) = self.open_chat.clone() else {
                     return;
                 };
@@ -3937,6 +3946,13 @@ mod tests {
         app.apply(Action::ViewerPage(9), &ctx);
         assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 2);
         app.apply(Action::ViewerPage(-9), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 0);
+        // A typed page number is counted from one and stops at either end.
+        app.apply(Action::ViewerPageTo(2), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 1);
+        app.apply(Action::ViewerPageTo(99), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 2);
+        app.apply(Action::ViewerPageTo(0), &ctx);
         assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 0);
 
         // Closing leaves nothing behind.

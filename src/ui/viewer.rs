@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use egui::{Align, Color32, CornerRadius, CursorIcon, Layout, Rect, Sense, Vec2, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, CursorIcon, Key, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
 use crate::model::{Action, ViewerKind};
@@ -278,6 +278,60 @@ fn image_surface(ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2
     }
 }
 
+/// One editable page number in the top bar.
+#[derive(Clone, Default)]
+struct PageField {
+    text: String,
+}
+
+/// The id of the page field, so the keyboard leaves it alone while it is
+/// being typed in.
+pub fn page_field_id() -> egui::Id {
+    egui::Id::new("viewer-page-field")
+}
+
+/// The page number as a field the reader can type in.
+///
+/// Shows the page on screen while it is not being edited; typing a number
+/// and pressing Enter answers with the page to jump to.
+fn page_field(ui: &mut egui::Ui, palette: &Palette, page: usize, pages: usize) -> Option<usize> {
+    let id = page_field_id();
+    let mut state = ui.data_mut(|data| data.get_temp_mut_or_default::<PageField>(id).clone());
+    if !ui.memory(|memory| memory.has_focus(id)) {
+        // Not being edited: the field shows the page on screen.
+        state.text = (page + 1).to_string();
+    }
+    // The field is drawn like the app's other fields: a rounded surface with
+    // the text editor kept frameless inside it.
+    let (rect, _) = ui.allocate_exact_size(vec2(40.0, 22.0), Sense::hover());
+    ui.painter().rect_filled(rect, 6.0, palette.surface);
+    let field = rect.shrink2(vec2(7.0, 3.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(field)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let response = child.add(
+        egui::TextEdit::singleline(&mut state.text)
+            .id(id)
+            .font(theme::regular(13.0))
+            .text_color(palette.text)
+            .horizontal_align(Align::Center)
+            .frame(egui::Frame::NONE)
+            .desired_width(field.width()),
+    );
+    let entered = response.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter));
+    let asked = entered
+        .then(|| state.text.trim().parse::<usize>().ok())
+        .flatten()
+        .filter(|asked| (1..=pages).contains(asked));
+    if entered {
+        // Focus goes away, so the field shows the page it moved to.
+        ui.memory_mut(|memory| memory.surrender_focus(id));
+    }
+    ui.data_mut(|data| data.insert_temp(id, state));
+    asked
+}
 /// Draws the title, the counter, and the controls over the picture.
 #[allow(clippy::too_many_arguments)]
 fn chrome(
@@ -319,11 +373,28 @@ fn chrome(
                     .font(theme::medium(14.0))
                     .color(palette.text),
             );
-            ui.label(
-                egui::RichText::new(counter)
-                    .font(theme::regular(13.0))
-                    .color(palette.secondary),
-            );
+            if pdf && pages > 1 {
+                // The number itself is a field: type a page and press Enter.
+                ui.label(
+                    egui::RichText::new("page")
+                        .font(theme::regular(13.0))
+                        .color(palette.secondary),
+                );
+                if let Some(asked) = page_field(ui, palette, page, pages) {
+                    actions.push(Action::ViewerPageTo(asked));
+                }
+                ui.label(
+                    egui::RichText::new(format!("of {pages}"))
+                        .font(theme::regular(13.0))
+                        .color(palette.secondary),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(&counter)
+                        .font(theme::regular(13.0))
+                        .color(palette.secondary),
+                );
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if theme::icon_button(
                     ui,

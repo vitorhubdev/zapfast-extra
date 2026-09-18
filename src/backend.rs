@@ -296,6 +296,8 @@ pub enum Command {
         page: usize,
         width: u32,
     },
+    /// Drops the PDF kept open for the viewer.
+    ForgetPdf,
     /// Collects the details of one attachment for the info dialog.
     FileInfo {
         chat: ChatId,

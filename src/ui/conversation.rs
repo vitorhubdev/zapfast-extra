@@ -1517,6 +1517,7 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                                 response.scroll_to_me(Some(Align::Center));
                                 anchored = true;
                             }
+                            paint_flash(ui, &palette, &message.id, response.rect);
                         }
                         previous = Some(message);
                     }
@@ -3189,6 +3190,73 @@ enum PictureRetry {
     Stop,
 }
 
+/// How long the flash over a message a jump landed on stays lit, in seconds.
+const FLASH: f32 = 1.5;
+
+/// The message a jump is aiming at, and when it first came into view.
+///
+/// The target is armed when the jump starts and the clock only starts when
+/// the message is drawn, because loading older pages takes a moment.
+#[derive(Clone, Default)]
+struct Flash {
+    id: Option<String>,
+    started: Option<std::time::Instant>,
+}
+
+fn flash_id() -> egui::Id {
+    egui::Id::new("message-flash")
+}
+
+/// Arms the flash that shows which message a jump landed on.
+pub fn flash_message(ctx: &egui::Context, id: &str) {
+    ctx.data_mut(|data| {
+        let flash = data.get_temp_mut_or_default::<Flash>(flash_id());
+        flash.id = Some(id.to_owned());
+        flash.started = None;
+    });
+}
+
+/// The fading factor for the glow over a message, arming it the first time.
+///
+/// Answers nothing when another message is the target, or once the glow has
+/// run its course and the target has been let go.
+fn flash_fade(flash: &mut Flash, id: &str, now: std::time::Instant) -> Option<f32> {
+    if flash.id.as_deref() != Some(id) {
+        return None;
+    }
+    let started = *flash.started.get_or_insert(now);
+    let elapsed = now.saturating_duration_since(started).as_secs_f32();
+    let fading = (elapsed < FLASH).then(|| 1.0 - elapsed / FLASH);
+    if fading.is_none() {
+        flash.id = None;
+        flash.started = None;
+    }
+    fading
+}
+
+/// Paints the glow that fades over the message a jump landed on.
+fn paint_flash(ui: &egui::Ui, palette: &Palette, id: &str, rect: Rect) {
+    let now = std::time::Instant::now();
+    let fading = ui.ctx().data_mut(|data| {
+        let flash = data.get_temp_mut_or_default::<Flash>(flash_id());
+        flash_fade(flash, id, now)
+    });
+    let Some(fading) = fading else {
+        return;
+    };
+    // Keep painting while the glow fades out.
+    ui.ctx().request_repaint();
+    let area = rect.expand(4.0);
+    ui.painter()
+        .rect_filled(area, 10.0, palette.accent.gamma_multiply(0.20 * fading));
+    ui.painter().rect_stroke(
+        area,
+        10.0,
+        Stroke::new(2.0, palette.accent.gamma_multiply(0.75 * fading)),
+        egui::StrokeKind::Outside,
+    );
+}
+
 /// Counts quiet retries of a picture that failed to load.
 ///
 /// Attempts live in egui's own memory, keyed by message, because a view must
@@ -4135,6 +4203,27 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_flash_starts_when_its_message_is_drawn_and_fades_out() {
+        let now = std::time::Instant::now();
+        let mut flash = Flash {
+            id: Some("quoted".to_owned()),
+            started: None,
+        };
+        // Another message drawn first leaves the clock alone.
+        assert!(flash_fade(&mut flash, "other", now).is_none());
+        assert!(flash.started.is_none());
+        let full = flash_fade(&mut flash, "quoted", now).expect("starts");
+        assert_eq!(full, 1.0);
+        let later = now + std::time::Duration::from_millis(750);
+        let half = flash_fade(&mut flash, "quoted", later).expect("still fading");
+        assert!(half > 0.0 && half < 0.6, "fades out: {half}");
+        let done = now + std::time::Duration::from_millis(1600);
+        assert!(flash_fade(&mut flash, "quoted", done).is_none());
+        assert!(flash.id.is_none(), "the target is let go");
+        assert!(flash.started.is_none());
+    }
 
     #[test]
     fn broken_pictures_heal_exactly_once() {

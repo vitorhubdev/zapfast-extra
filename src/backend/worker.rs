@@ -293,6 +293,8 @@ pub async fn run(
         sticker_tries: HashMap::new(),
         thumb_tries: HashMap::new(),
         cache_swept: false,
+        pdf: Arc::new(std::sync::Mutex::new(crate::pdf::Reader::default())),
+        pdf_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         read_sync: ReadSync::default(),
         poll_decrypting: 0,
         poll_history: Default::default(),
@@ -395,6 +397,10 @@ struct Worker {
     thumb_tries: HashMap<PathBuf, u32>,
     /// Whether the app's own cache folders were swept this run.
     cache_swept: bool,
+    /// The PDF the viewer has open, kept parsed between pages.
+    pdf: Arc<std::sync::Mutex<crate::pdf::Reader>>,
+    /// Counts viewer render requests, so a stale prefetch stands down.
+    pdf_generation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Decoded history chunk waiting to be canonicalized and archived.
@@ -2824,15 +2830,34 @@ impl Worker {
             }
             Command::RenderPdfPage { path, page, width } => {
                 let commands = self.commands.clone();
+                let reader = self.pdf.clone();
+                let generation = self.pdf_generation.clone();
+                // Only the newest request may pre-render the page after it.
+                let pass = generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                 tokio::task::spawn_blocking(move || {
-                    let result = crate::pdf::render_page(&path, page, width);
+                    let result = render_pdf_page(&reader, &path, page, width);
                     let _ = commands.send(Command::PdfPage {
-                        path,
+                        path: path.clone(),
                         page,
                         width,
                         result,
                     });
+                    // The next page is usually the one asked for next, so it
+                    // is ready before the reader turns to it.
+                    if generation.load(std::sync::atomic::Ordering::SeqCst) == pass {
+                        let _ = render_pdf_page(&reader, &path, page + 1, width);
+                    }
                 });
+            }
+            Command::ForgetPdf => {
+                // Nothing of the document stays in memory once the viewer is
+                // closed, and a render still on its way will not refill it.
+                self.pdf_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.pdf
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
             }
             Command::PdfPage {
                 path,
@@ -5537,6 +5562,27 @@ async fn prepare_media(
     })
 }
 
+/// Renders one page, turning a panic inside the PDF parser into a message.
+///
+/// A damaged file must leave the viewer saying so, not waiting for an answer
+/// that died with its task. Rendering the page after this one uses the same
+/// call and simply ignores what comes back.
+fn render_pdf_page(
+    reader: &std::sync::Mutex<crate::pdf::Reader>,
+    path: &Path,
+    page: usize,
+    width: u32,
+) -> Result<crate::pdf::Page, String> {
+    let reader = std::panic::AssertUnwindSafe(reader);
+    std::panic::catch_unwind(move || {
+        reader
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .render(path, page, width)
+    })
+    .map_err(|_| "This page could not be rendered: the file is damaged.".to_owned())?
+}
+
 /// Whether a sticker animates and how big it is, read from its own header.
 fn sticker_shape(bytes: &[u8]) -> Option<(bool, u32, u32)> {
     let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
@@ -6439,6 +6485,8 @@ mod receipt_tests {
             sticker_tries: HashMap::new(),
             thumb_tries: HashMap::new(),
             cache_swept: false,
+            pdf: Arc::new(std::sync::Mutex::new(crate::pdf::Reader::default())),
+            pdf_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             read_sync: ReadSync::default(),
             poll_decrypting: 0,
             poll_history: Default::default(),

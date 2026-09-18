@@ -75,8 +75,10 @@ without embedding a browser engine.
   are dismissed first. Type `:name` to autocomplete
   an emoji without leaving the composer, or `@` in a group to mention a member.
   Reply, react, edit, forward, delete, and check when a message was sent,
-  delivered, or read.
-  delivered, or read. Right-click a message and choose Select,
+  delivered, or read. Clicking the quoted block of a message takes the chat to
+  the message it answers and lights it up for a moment, so it is clear which
+  one it refers to; the same happens when a search result opens a message.
+  Right-click a message and choose Select,
   then forward several messages to up to five chats at once,
   or delete them together. Frequently forwarded messages go to
   one chat at a time, exactly like WhatsApp.
@@ -90,7 +92,12 @@ without embedding a browser engine.
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos and other documents open
   in their default desktop apps, and a PDF opens in the viewer built into this
-  app, page by page. Files say what they are: an image sent as a file opens in
+  app, page by page: turn pages with the arrows or the buttons, type a page
+  number in the top bar to jump to it, PageUp and PageDown walk ten pages at a
+  time, and Home and End go to the first and last page. The page after the one
+  on screen is rendered ahead, a page that was already drawn comes back from
+  memory, and a protected or damaged file says so instead of waiting. Files say
+  what they are: an image sent as a file opens in
   the viewer, a document shows its kind beside the size, and a program carries
   a warning with Save a copy in place of opening it. Every attachment menu has
   **Show info**, with the MIME type, size, pixels or length, the path on disk

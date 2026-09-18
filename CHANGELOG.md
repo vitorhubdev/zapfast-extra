@@ -2,6 +2,37 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.23] - 2026-09-18
+
+### New
+
+- Clicking the quoted block of a message takes the chat to the message it
+  answers and lights it up: the view scrolls it to the middle of the screen and
+  a soft glow fades over that bubble for a moment, so it is clear which message
+  the reply belongs to. A search result or a notification that opens a message
+  gets the same glow.
+- A page number in the PDF viewer's top bar is a field: type a page and press
+  Enter to jump straight to it. PageUp and PageDown walk ten pages at a time,
+  and Home and End go to the first and last page.
+
+### Changed
+
+- PDF pages turn faster and use less memory. The document stays parsed in
+  memory while it is on screen, so turning a page or zooming no longer reads
+  and interprets the file again; the page after the one on screen is rendered
+  ahead, and a page already drawn comes back from memory instead of being
+  rasterised twice. The open document is dropped when the viewer closes.
+- A very tall PDF page is scaled back, so one raster cannot eat the memory of
+  the viewer, and a page wider than the last render is the one that replaces
+  it, so a closer look stays sharp without rasterising the same page twice.
+
+### Fixed
+
+- A PDF that is password protected or damaged now says so, and offers Open in
+  the default app, instead of leaving the viewer waiting for a page.
+- A crash inside the PDF parser is reported as a damaged file rather than
+  leaving the spinner on screen forever.
+
 ## [1.0.22] - 2026-09-18
 
 ### Fixed

@@ -14,6 +14,9 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
         .and_then(|viewer| viewer.current())
         .is_some_and(|item| item.kind == crate::model::ViewerKind::Pdf);
     let mut actions = Vec::new();
+    // While a page number is being typed, the arrows and the page keys belong
+    // to that field and not to the document.
+    let typing_page = ctx.memory(|memory| memory.has_focus(crate::ui::viewer::page_field_id()));
     ctx.input_mut(|input| {
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
             if input.consume_key(modifiers, key) {
@@ -24,8 +27,14 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
         key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
         // A PDF walks its pages with the vertical arrows.
         if pdf {
-            key(Modifiers::NONE, Key::ArrowDown, Action::ViewerPage(1));
-            key(Modifiers::NONE, Key::ArrowUp, Action::ViewerPage(-1));
+            if !typing_page {
+                key(Modifiers::NONE, Key::ArrowDown, Action::ViewerPage(1));
+                key(Modifiers::NONE, Key::ArrowUp, Action::ViewerPage(-1));
+                key(Modifiers::NONE, Key::PageDown, Action::ViewerPage(10));
+                key(Modifiers::NONE, Key::PageUp, Action::ViewerPage(-10));
+                key(Modifiers::NONE, Key::Home, Action::ViewerPageTo(1));
+                key(Modifiers::NONE, Key::End, Action::ViewerPageTo(usize::MAX));
+            }
         } else {
             key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
             key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
