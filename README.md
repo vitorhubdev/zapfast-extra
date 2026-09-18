@@ -100,7 +100,9 @@ without embedding a browser engine.
   filenames with spaces or non-ASCII characters.
   Clicking a picture opens a full-window viewer: scroll to zoom, drag to move,
   the arrow keys walk the pictures of the chat, 0 or F fits it again, and Esc
-  closes. It can save a copy or hand the file to the desktop. A sticker opens
+  closes. The Copy button, or the right-click menu over the picture, puts it on
+  the clipboard, and the bar can also save a copy or hand the file to the
+  desktop. A sticker opens
   bigger in a small dialog instead, with a Save button, and stays out of the
   order walked by the viewer.
   If an attachment has expired, ZapExt asks your phone to upload it again.
@@ -119,15 +121,18 @@ without embedding a browser engine.
   with a right-click, which also marks a sticker as a favourite or clears the
   mark; favourites are listed first. The sticker tab lists saved stickers next, then imported
   packs, then the phone's recent list and the stickers you sent; a sticker that
-  only passed through a chat is never offered. Clicking a sticker previews it
+  only passed through a chat is never offered. Packs are filed under the hash
+  of each sticker, so the same picture is never listed twice, and the grid
+  draws a small preview built in the background instead of decoding the full
+  file for every tile. Clicking a sticker previews it
   for confirmation before sending, and the picker reopens on the last used
   tab. Tiles that fail to load retry with a fresh download instead of
   sticking on an error, and a page fills in a few tiles at a time instead of
   asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
   A sticker that is saved or marked as a favourite is not offered again under
-  the phone's recents, and clicking one shows it bigger with a Save button
-  instead of the full viewer.
+  the phone's recents, and clicking one in a chat shows it bigger with a Save
+  button instead of the full viewer.
 - **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`
   file. Animated packs remain animated. Packs are stored as WebP files on your
   computer.

@@ -881,6 +881,8 @@ pub enum Action {
         chat: ChatId,
         message: String,
     },
+    /// Copies a picture to the system clipboard.
+    CopyImage(PathBuf),
     /// Imports a sticker pack from a signal.art link.
     ImportStickerUrl(String),
     /// Selects and imports a .wastickers or zip file.

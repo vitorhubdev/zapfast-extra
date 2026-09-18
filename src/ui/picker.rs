@@ -492,6 +492,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     let (favorites, rest) = favourite_sections(&saved, &app.stickers_favorites);
     let packs = app.sticker_packs.clone();
     let recent = app.stickers.clone();
+    let thumbs = app.dirs.sticker_thumb_dir();
     let mut choices = StickerChoices::default();
     let mut delete_pack = None;
     egui::ScrollArea::vertical()
@@ -506,6 +507,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     &favorites,
                     true,
                     false,
+                    &thumbs,
                     &favorites,
                     &mut choices,
                 );
@@ -513,7 +515,16 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
             }
             if !rest.is_empty() {
                 theme::text(ui, "My stickers", theme::semibold(12.5), palette.secondary);
-                sticker_grid(ui, palette, &rest, true, false, &favorites, &mut choices);
+                sticker_grid(
+                    ui,
+                    palette,
+                    &rest,
+                    true,
+                    false,
+                    &thumbs,
+                    &favorites,
+                    &mut choices,
+                );
                 ui.add_space(8.0);
             }
             for pack in &packs {
@@ -540,6 +551,7 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                     &pack.stickers,
                     false,
                     false,
+                    &thumbs,
                     &favorites,
                     &mut choices,
                 );
@@ -554,7 +566,16 @@ fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
                 );
                 // Recent copies live in caches the app owns, so broken tiles
                 // heal instead of warning forever.
-                sticker_grid(ui, palette, &recent, false, true, &favorites, &mut choices);
+                sticker_grid(
+                    ui,
+                    palette,
+                    &recent,
+                    false,
+                    true,
+                    &thumbs,
+                    &favorites,
+                    &mut choices,
+                );
             }
         });
     if let Some(path) = choices.save {
@@ -643,12 +664,14 @@ fn import_row(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
 }
 
 /// Sticker tiles. Click sends; right-click saves or removes.
+#[allow(clippy::too_many_arguments)]
 fn sticker_grid(
     ui: &mut egui::Ui,
     palette: &Palette,
     stickers: &[std::path::PathBuf],
     saved: bool,
     cache: bool,
+    thumbs: &Path,
     favorites: &[std::path::PathBuf],
     choices: &mut StickerChoices,
 ) {
@@ -685,7 +708,8 @@ fn sticker_grid(
                             _ => false,
                         };
                     if !played {
-                        sticker_picture(ui, palette, path, shown, cache, choices);
+                        let thumb = crate::stickers::thumb_path(thumbs, path);
+                        sticker_picture(ui, palette, path, thumb.as_deref(), shown, cache, choices);
                     }
                 }
                 egui::Popup::context_menu(&response)
@@ -773,13 +797,25 @@ fn sticker_picture(
     ui: &egui::Ui,
     palette: &Palette,
     path: &Path,
+    thumb: Option<&Path>,
     rect: Rect,
     cache: bool,
     choices: &mut StickerChoices,
 ) {
-    let image = egui::Image::new(crate::util::image_uri(path)).fit_to_exact_size(rect.size());
+    // The grid draws the small preview. A sticker is a 512 px WebP, often
+    // animated, and decoding one per tile is what used to stall the picker.
+    let preview = thumb.filter(|thumb| thumb.is_file());
+    let source = preview.unwrap_or(path);
+    let image = egui::Image::new(crate::util::image_uri(source)).fit_to_exact_size(rect.size());
     match image.load_for_size(ui.ctx(), rect.size()) {
-        Ok(_) => image.paint_at(ui, rect),
+        Ok(egui::load::TexturePoll::Ready { .. }) => image.paint_at(ui, rect),
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            // A tile that is still being read shows its tile, not a hole.
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 8.0, palette.surface);
+            }
+        }
+        _ if preview.is_some() => image.paint_at(ui, rect),
         _ if cache && claim_heal_path(ui, path) => {
             choices.heal.push(path.to_path_buf());
             if ui.is_rect_visible(rect) {

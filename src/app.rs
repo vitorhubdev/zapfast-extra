@@ -288,6 +288,11 @@ pub struct App {
     pub hide_intent: bool,
     /// Whether a headless app should create a window.
     pub wants_show: bool,
+    /// Deadline and next attempt for bringing the window to the front.
+    #[cfg(target_os = "windows")]
+    raise_deadline: Option<Instant>,
+    #[cfg(target_os = "windows")]
+    raise_next: Instant,
     /// Requests received from later launches.
     control_commands: Option<std::sync::Arc<std::sync::Mutex<Vec<ControlCommand>>>>,
     /// Chat and message ids from clicked notifications.
@@ -487,9 +492,45 @@ impl App {
             window_hidden: false,
             hide_intent: false,
             wants_show: false,
+            #[cfg(target_os = "windows")]
+            raise_deadline: None,
+            #[cfg(target_os = "windows")]
+            raise_next: Instant::now(),
             control_commands: None,
             notification_opens: Default::default(),
             notifications: Default::default(),
+        }
+    }
+
+    /// Asks for the window to reach the front, and keeps asking while it
+    /// comes up: Windows refuses the first request while another program
+    /// holds the foreground, and a fresh window does not exist yet.
+    fn request_raise(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            let now = Instant::now();
+            self.raise_deadline = Some(now + crate::winfocus::PATIENCE);
+            self.raise_next = now;
+        }
+    }
+
+    /// Repeats the request while the window is coming up.
+    fn pump_raise(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            let Some(deadline) = self.raise_deadline else {
+                return;
+            };
+            let now = Instant::now();
+            if now >= deadline {
+                self.raise_deadline = None;
+                return;
+            }
+            if now >= self.raise_next {
+                self.raise_next = now + crate::winfocus::RETRY;
+                crate::winfocus::raise();
+            }
+            self.waker.wake_after(crate::winfocus::RETRY);
         }
     }
 
@@ -1109,6 +1150,14 @@ impl App {
                         }
                     }
                 }
+                Event::CopyImage { name, error } => match error {
+                    Some(error) => self.toast_error(format!("Could not copy the picture: {error}")),
+                    None => {
+                        let _ = name;
+                        self.toast("Picture copied to the clipboard");
+                    }
+                },
+
                 Event::FileInfo {
                     chat,
                     message,
@@ -1863,6 +1912,7 @@ impl App {
         }
         self.sync_pdf_view();
         self.poll_chat_search();
+        self.pump_raise();
     }
 
     /// Runs the in-chat search once the typing in its field pauses.
@@ -2535,6 +2585,9 @@ impl App {
             Action::ShowFileInfo { chat, message } => {
                 self.backend.send(Command::FileInfo { chat, message });
             }
+            Action::CopyImage(path) => {
+                self.backend.send(Command::CopyImage { path });
+            }
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
                     self.backend.send(Command::SendSticker { chat, path });
@@ -2781,12 +2834,15 @@ impl App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Action::ShowWindow => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
                 if self.window_hidden {
                     // The headless loop in `main` will create the window.
                     self.wants_show = true;
                 } else {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                 }
+                self.request_raise();
             }
             Action::HideWindow => {
                 if self.tray.is_some() {

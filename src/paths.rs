@@ -118,6 +118,14 @@ impl AppDirs {
         self.cache.join("stickers")
     }
 
+    /// Small static previews of stickers, keyed by content hash.
+    ///
+    /// The picker draws these instead of the full file: a sticker is a 512 px
+    /// animated WebP, and decoding one per tile is what made the grid crawl.
+    pub fn sticker_thumb_dir(&self) -> PathBuf {
+        self.sticker_cache_dir().join("thumbs")
+    }
+
     /// Saved stickers keyed by content hash. These are user data, not cache.
     pub fn saved_sticker_dir(&self) -> PathBuf {
         self.state.join("stickers")

@@ -297,10 +297,30 @@ fn write_pack(packs: &Path, title: &str, files: Vec<Vec<u8>>) -> Result<String, 
         return Err("No stickers could be read from this pack".to_owned());
     }
     let dir = unique_pack_dir(packs, title)?;
-    for (index, bytes) in files.iter().enumerate() {
-        std::fs::write(dir.join(format!("{index:03}.webp")), bytes)
-            .map_err(|error| format!("Could not write the sticker pack: {error}"))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("Could not write the sticker pack: {error}"))?;
+    // Files are filed under the hash of their bytes, so the same picture keeps
+    // one identity wherever it shows up, and a manifest holds the pack title
+    // and the order its author gave.
+    let mut order = Vec::new();
+    for bytes in &files {
+        let hash = crate::stickers::hash_of(bytes);
+        let file = dir.join(format!("{hash}.webp"));
+        if !file.is_file() {
+            std::fs::write(&file, bytes)
+                .map_err(|error| format!("Could not write the sticker pack: {error}"))?;
+        }
+        // A pack that carries the same picture twice lists it once.
+        if !order.contains(&hash) {
+            order.push(hash);
+        }
     }
+    let manifest = serde_json::json!({ "title": title, "order": order });
+    std::fs::write(
+        dir.join(crate::stickers::PACK_MANIFEST),
+        manifest.to_string(),
+    )
+    .map_err(|error| format!("Could not write the pack manifest: {error}"))?;
     Ok(dir
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -520,11 +540,23 @@ mod tests {
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         files.sort();
-        assert_eq!(
-            files,
-            vec!["000.webp", "001.webp"],
-            "tray and title stay out"
-        );
+        // Both entries are the same picture, so they collapse into one sticker
+        // filed under the hash of its content, beside the pack manifest.
+        assert_eq!(files.len(), 2, "tray and title stay out");
+        assert_eq!(files[1], crate::stickers::PACK_MANIFEST);
+        let hash = crate::stickers::hash_of(&webp);
+        assert_eq!(files[0], format!("{hash}.webp"));
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                packs
+                    .join("Happy Frogs")
+                    .join(crate::stickers::PACK_MANIFEST),
+            )
+            .expect("reads"),
+        )
+        .expect("parses");
+        assert_eq!(manifest["title"], "Happy Frogs");
+        assert_eq!(manifest["order"], serde_json::json!([hash]));
         // Reimporting creates a separate numbered directory.
         let again = import_archive(&archive_path, &packs).expect("imports");
         assert_eq!(again, "Happy Frogs 2");

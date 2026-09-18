@@ -2,6 +2,35 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.21] - 2026-09-18
+
+### Fixed
+
+- Stickers load properly. The picker used to hand egui the full 512 px file
+  for every tile, and the WebP loader decodes every frame of an animated one
+  and keeps it, so a grid of them buried the interface in decoded pixels and
+  most tiles never appeared. Every sticker now gets a 128 px static preview
+  built in the background, filed beside the stickers, and the grid draws only
+  that; the full file is decoded on hover, in the peek dialog and when sending.
+  A tile that is still being read shows its own surface instead of a hole.
+- The same picture can no longer be listed twice. Imported packs are filed
+  under the hash of their content with a manifest that keeps the title and the
+  order, older packs are brought up to date the first time they are read, and
+  the picker drops anything already listed higher up: favourites, then saved
+  stickers, then packs, then the phone's recents.
+- Clicking a Windows notification brings the app to the front. Windows only
+  lets the foreground process take focus, so the window could stay behind
+  another one, or stay minimized, with the chat already open. Showing the
+  window now restores it, borrows the foreground thread's input queue while
+  asking for the front, and repeats the request for a moment while the window
+  comes up.
+
+### Changed
+
+- A picture in the viewer can be copied to the clipboard, from a Copy button
+  in the bar or from the right-click menu over the picture, which also offers
+  Save a copy.
+
 ## [1.0.20] - 2026-09-18
 
 ### Changed

@@ -214,16 +214,6 @@ fn stickers_to_fetch(
         .collect()
 }
 
-/// The content hash a saved or cached sticker is filed under.
-///
-/// Saved copies are named after their content, so the file name identifies
-/// the picture and lets the picker hide a cache copy it already lists.
-fn sticker_id(path: &Path) -> Option<String> {
-    let stem = path.file_stem()?.to_str()?;
-    (stem.len() == 64 && stem.chars().all(|c| c.is_ascii_hexdigit()))
-        .then(|| stem.to_ascii_lowercase())
-}
-
 /// Stable sticker hash across messages and the phone's recent list.
 fn sticker_hash(sha256: Option<&[u8]>, enc_sha256: Option<&[u8]>) -> Option<String> {
     let bytes = sha256
@@ -301,6 +291,7 @@ pub async fn run(
         download_retries: HashMap::new(),
         download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
         sticker_tries: HashMap::new(),
+        thumb_tries: HashMap::new(),
         read_sync: ReadSync::default(),
         poll_decrypting: 0,
         poll_history: Default::default(),
@@ -398,6 +389,8 @@ struct Worker {
     download_slots: Arc<tokio::sync::Semaphore>,
     /// Failed sticker fetches by hash, so a hopeless one is left alone.
     sticker_tries: HashMap<String, u32>,
+    /// Sticker previews that failed to build, so they are not retried forever.
+    thumb_tries: HashMap<PathBuf, u32>,
 }
 
 /// Decoded history chunk waiting to be canonicalized and archived.
@@ -2477,6 +2470,19 @@ impl Worker {
                     self.emit_chat(&chat);
                 }
             }
+            Command::CopyImage { path } => {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let commands = self.commands.clone();
+                tokio::task::spawn_blocking(move || {
+                    let error = copy_image_to_clipboard(&path).err();
+                    let _ = commands.send(Command::ImageCopied { name, error });
+                });
+            }
+            Command::ImageCopied { name, error } => self.emit(Event::CopyImage { name, error }),
+
             Command::FileInfo { chat, message } => {
                 let result = self.file_info(&chat, &message);
                 self.emit(Event::FileInfo {
@@ -2794,6 +2800,7 @@ impl Worker {
                 self.fetch_missing_stickers();
                 self.emit_stickers();
             }
+            Command::StickerThumbsReady => self.emit_stickers(),
             Command::FavoriteSticker { path } => {
                 if let Err(error) = self.archive.toggle_sticker_favorite(&path) {
                     log::warn!("could not store the sticker favourite: {error}");
@@ -3760,6 +3767,119 @@ impl Worker {
     }
 
     /// Returns distinct downloaded stickers by most recent use.
+    fn emit_stickers(&mut self) {
+        let saved = self.saved_stickers();
+        let favorites = self.archive.sticker_favorites().unwrap_or_default();
+        // One picture, one place: a sticker already listed under favourites or
+        // saved stickers is not offered again in a pack or under recents.
+        let mut shown: HashSet<String> = saved
+            .iter()
+            .chain(favorites.iter())
+            .filter_map(|path| crate::stickers::id_of(path))
+            .collect();
+        let mut packs = Vec::new();
+        for pack in self.sticker_packs() {
+            let stickers: Vec<PathBuf> = pack
+                .stickers
+                .into_iter()
+                .filter(|path| match crate::stickers::id_of(path) {
+                    Some(id) => shown.insert(id),
+                    None => true,
+                })
+                .collect();
+            if !stickers.is_empty() {
+                packs.push(crate::model::StickerPack { stickers, ..pack });
+            }
+        }
+        let mut list: Vec<(i64, PathBuf)> = Vec::new();
+        if let Ok(phone) = self.archive.phone_stickers() {
+            for sticker in phone {
+                if let Some(path) = sticker.path
+                    && path.exists()
+                    && shown.insert(sticker.hash)
+                {
+                    list.push((sticker.last_used, path));
+                }
+            }
+        }
+        match self.archive.recent_stickers(80) {
+            Ok(rows) => {
+                for sticker in rows {
+                    let hash = sticker
+                        .raw
+                        .as_deref()
+                        .and_then(|raw| wa::Message::decode_from_slice(raw).ok())
+                        .and_then(|message| {
+                            let base = message.get_base_message();
+                            let sticker = base.sticker_message.as_option()?;
+                            sticker_hash(
+                                sticker.file_sha256.as_deref(),
+                                sticker.file_enc_sha256.as_deref(),
+                            )
+                        });
+                    // A row with no hash to read cannot be told apart from
+                    // another, so its path stands in for it.
+                    let key = hash.unwrap_or_else(|| sticker.path.display().to_string());
+                    if shown.insert(key) {
+                        list.push((sticker.last_used, sticker.path));
+                    }
+                }
+            }
+            Err(error) => log::warn!("could not list stickers: {error}"),
+        }
+        list.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
+        let recent: Vec<PathBuf> = list.into_iter().map(|(_, path)| path).collect();
+        self.build_missing_thumbs(&saved, &packs, &recent);
+        self.emit(Event::Stickers {
+            saved,
+            packs,
+            recent,
+            favorites,
+        });
+    }
+
+    /// Builds the small previews the picker draws, off the interface thread.
+    ///
+    /// A sticker is a 512 px WebP, often animated, and decoding one per tile
+    /// is what made the grid crawl. The preview is a 128 px static PNG, so
+    /// the grid only ever decodes a handful of bytes per tile.
+    fn build_missing_thumbs(
+        &mut self,
+        saved: &[PathBuf],
+        packs: &[crate::model::StickerPack],
+        recent: &[PathBuf],
+    ) {
+        let thumbs = self.dirs.sticker_thumb_dir();
+        let files: Vec<PathBuf> = saved
+            .iter()
+            .cloned()
+            .chain(packs.iter().flat_map(|pack| pack.stickers.iter().cloned()))
+            .chain(recent.iter().cloned())
+            .filter(|path| {
+                crate::stickers::thumb_path(&thumbs, path).is_some_and(|thumb| !thumb.is_file())
+                    && self.thumb_tries.get(path).copied().unwrap_or(0) < 2
+            })
+            .collect();
+        if files.is_empty() {
+            return;
+        }
+        for file in &files {
+            *self.thumb_tries.entry(file.clone()).or_insert(0) += 1;
+        }
+        let commands = self.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut built = 0;
+            for file in files {
+                if crate::stickers::build_thumb(&thumbs, &file).is_ok() {
+                    built += 1;
+                }
+            }
+            if built > 0 {
+                let _ = commands.send(Command::StickerThumbsReady);
+            }
+        });
+    }
+
     /// Collects everything the info dialog shows about one attachment.
     fn file_info(&self, chat: &str, id: &str) -> Result<crate::model::FileInfo, String> {
         let row = self
@@ -3830,65 +3950,15 @@ impl Worker {
         })
     }
 
-    fn emit_stickers(&mut self) {
-        let saved = self.saved_stickers();
-        let favorites = self.archive.sticker_favorites().unwrap_or_default();
-        // The same picture under two headings reads like a bug: a sticker that
-        // is saved or marked as a favourite is not offered again as a recent.
-        let mut seen: HashSet<String> = saved
-            .iter()
-            .chain(favorites.iter())
-            .filter_map(|path| sticker_id(path))
-            .collect();
-        let mut list: Vec<(i64, PathBuf)> = Vec::new();
-        if let Ok(phone) = self.archive.phone_stickers() {
-            for sticker in phone {
-                if let Some(path) = sticker.path
-                    && path.exists()
-                    && seen.insert(sticker.hash)
-                {
-                    list.push((sticker.last_used, path));
-                }
-            }
-        }
-        match self.archive.recent_stickers(80) {
-            Ok(rows) => {
-                for sticker in rows {
-                    let hash = sticker
-                        .raw
-                        .as_deref()
-                        .and_then(|raw| wa::Message::decode_from_slice(raw).ok())
-                        .and_then(|message| {
-                            let base = message.get_base_message();
-                            let sticker = base.sticker_message.as_option()?;
-                            sticker_hash(
-                                sticker.file_sha256.as_deref(),
-                                sticker.file_enc_sha256.as_deref(),
-                            )
-                        })
-                        .unwrap_or_else(|| sticker.path.display().to_string());
-                    if seen.insert(hash) {
-                        list.push((sticker.last_used, sticker.path));
-                    }
-                }
-            }
-            Err(error) => log::warn!("could not list stickers: {error}"),
-        }
-        list.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
-        self.emit(Event::Stickers {
-            saved,
-            packs: self.sticker_packs(),
-            recent: list.into_iter().map(|(_, path)| path).collect(),
-            favorites,
-        });
-    }
-
     /// Root directory for imported sticker packs.
     fn packs_dir(&self) -> PathBuf {
         self.dirs.saved_sticker_dir().join("packs")
     }
 
-    /// Returns imported packs, newest first, with files in name order.
+    /// Returns imported packs, newest first, with files in pack order.
+    ///
+    /// An older folder is brought up to date on the way through: files are
+    /// filed under their content hash and a manifest records the order.
     fn sticker_packs(&self) -> Vec<crate::model::StickerPack> {
         let Ok(entries) = std::fs::read_dir(self.packs_dir()) else {
             return Vec::new();
@@ -3900,19 +3970,12 @@ impl Worker {
                 if !dir.is_dir() {
                     return None;
                 }
-                let mut stickers: Vec<PathBuf> = std::fs::read_dir(&dir)
-                    .ok()?
-                    .flatten()
-                    .map(|file| file.path())
-                    .filter(|path| {
-                        path.extension()
-                            .is_some_and(|extension| extension == "webp")
-                    })
-                    .collect();
+                let fallback = entry.file_name().to_string_lossy().into_owned();
+                let (name, stickers) =
+                    crate::stickers::adopt_pack(&dir, &fallback).unwrap_or((fallback, Vec::new()));
                 if stickers.is_empty() {
                     return None;
                 }
-                stickers.sort();
                 let when = entry
                     .metadata()
                     .and_then(|metadata| metadata.modified())
@@ -3920,7 +3983,7 @@ impl Worker {
                 Some((
                     when,
                     crate::model::StickerPack {
-                        name: entry.file_name().to_string_lossy().into_owned(),
+                        name,
                         dir,
                         stickers,
                     },
@@ -4841,6 +4904,22 @@ fn thumbnail_of(base: &wa::Message) -> Option<Vec<u8>> {
 
 /// Converts a protocol message to visible content, or `None` for internal traffic.
 /// Turns a view-once payload into the note shown in its place.
+/// Puts a picture on the system clipboard, as straight RGBA.
+fn copy_image_to_clipboard(path: &Path) -> Result<(), String> {
+    let bytes =
+        std::fs::read(path).map_err(|error| format!("Could not read the picture: {error}"))?;
+    let (width, height, rgba) = crate::stickers::clipboard_pixels(&bytes)
+        .ok_or_else(|| "This picture could not be decoded".to_owned())?;
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: width as usize,
+            height: height as usize,
+            bytes: std::borrow::Cow::Owned(rgba),
+        })
+        .map_err(|error| error.to_string())
+}
+
 /// Streams a file through SHA-256 without holding all of it in memory.
 fn sha256_of(path: &Path) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
@@ -6192,6 +6271,7 @@ mod receipt_tests {
             download_retries: HashMap::new(),
             download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
             sticker_tries: HashMap::new(),
+            thumb_tries: HashMap::new(),
             read_sync: ReadSync::default(),
             poll_decrypting: 0,
             poll_history: Default::default(),

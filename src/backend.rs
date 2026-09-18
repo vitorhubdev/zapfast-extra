@@ -278,6 +278,8 @@ pub enum Command {
     },
     /// Loads recent and saved stickers for the picker.
     RecentStickers,
+    /// Internal notice that new sticker previews were written.
+    StickerThumbsReady,
     /// Marks a sticker as a favourite, or clears the mark.
     FavoriteSticker {
         path: PathBuf,
@@ -297,6 +299,15 @@ pub enum Command {
     FileInfo {
         chat: ChatId,
         message: String,
+    },
+    /// Puts a picture on the system clipboard.
+    CopyImage {
+        path: PathBuf,
+    },
+    /// Internal result of a clipboard copy.
+    ImageCopied {
+        name: String,
+        error: Option<String>,
     },
     /// Manual update check from the About dialog. Unlike the daily check it
     /// always reports back, so the button never spins forever.
@@ -514,6 +525,11 @@ pub enum Event {
         chat: ChatId,
         message: String,
         result: Result<crate::model::FileInfo, String>,
+    },
+    /// Result of copying a picture, with the name it was copied from.
+    CopyImage {
+        name: String,
+        error: Option<String>,
     },
     Media {
         chat: ChatId,

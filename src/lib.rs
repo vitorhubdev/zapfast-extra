@@ -19,6 +19,7 @@ pub mod pdf;
 pub mod qr;
 pub mod settings;
 pub mod single_instance;
+pub mod stickers;
 pub mod system_fonts;
 pub mod theme;
 pub mod transcript;
@@ -31,3 +32,5 @@ pub mod ui;
 pub mod updates;
 pub mod util;
 pub mod voice;
+#[cfg(target_os = "windows")]
+pub mod winfocus;

@@ -8,6 +8,8 @@ use crate::app::App;
 use crate::model::{Action, ViewerKind};
 use crate::theme::{self, Icon, Palette};
 
+use super::widgets;
+
 /// Space the fitted picture leaves around itself.
 const INSET: f32 = 64.0;
 /// How much one wheel notch changes the zoom.
@@ -130,6 +132,33 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             });
                         }
                     }
+                    // The right button offers the file actions where the
+                    // picture is, as it does everywhere else in the app.
+                    egui::Popup::context_menu(&response)
+                        .width(widgets::menu_width(
+                            ui,
+                            &["Copy to clipboard", "Save a copy…"],
+                            true,
+                        ))
+                        .frame(widgets::menu_frame(&palette))
+                        .show(|ui| {
+                            if widgets::menu_item(
+                                ui,
+                                &palette,
+                                Some(Icon::Copy),
+                                "Copy to clipboard",
+                            ) {
+                                actions.push(Action::CopyImage(path.clone()));
+                            }
+                            if widgets::menu_item(
+                                ui,
+                                &palette,
+                                Some(Icon::Download),
+                                "Save a copy…",
+                            ) {
+                                actions.push(Action::SaveCopy(path.clone()));
+                            }
+                        });
                 }
                 Surface::Pending => {
                     theme::paint_spinner(
@@ -319,13 +348,21 @@ fn chrome(
         ui.horizontal(|ui| {
             let earlier = if pdf { "Previous page" } else { "Previous" };
             let later = if pdf { "Next page" } else { "Next" };
-            let entries = [earlier, later, "Zoom out", "Zoom in", "Fit", "Save a copy"];
+            let entries = [
+                earlier,
+                later,
+                "Zoom out",
+                "Zoom in",
+                "Fit",
+                "Copy",
+                "Save a copy",
+            ];
             let spacing = ui.spacing().item_spacing.x;
             let total = entries
                 .iter()
                 .map(|label| theme::soft_button_width(ui, label, true))
                 .sum::<f32>()
-                + 160.0
+                + 170.0
                 + spacing * (entries.len() as f32 + 1.0);
             ui.add_space(((bar.width() - total) / 2.0).max(0.0));
             if theme::soft_button(ui, palette, Some(Icon::ChevronLeft), earlier, false)
@@ -395,6 +432,12 @@ fn chrome(
             if theme::soft_button(ui, palette, Some(Icon::Maximize), "Fit", zoom <= 1.01).clicked()
             {
                 actions.push(Action::ViewerFit);
+            }
+            if theme::soft_button(ui, palette, Some(Icon::Copy), "Copy", false)
+                .on_hover_text("Copy the picture to the clipboard")
+                .clicked()
+            {
+                actions.push(Action::CopyImage(path.to_path_buf()));
             }
             if theme::soft_button(ui, palette, Some(Icon::Download), "Save a copy", false).clicked()
             {
