@@ -122,6 +122,30 @@ pub fn avatar(
     response
 }
 
+/// The largest rect inside `area` that keeps the shape of a picture.
+pub fn picture_rect(area: Rect, texture: Vec2) -> Rect {
+    let texture = Vec2::new(texture.x.max(1.0), texture.y.max(1.0));
+    let scale = (area.width() / texture.x).min(area.height() / texture.y);
+    Rect::from_center_size(area.center(), texture * scale)
+}
+
+/// Paints one picture inside `area`, keeping the shape of the file.
+///
+/// egui paints a picture into whatever rect it is handed, so a sticker that
+/// is not square was stretched by the tile or the dialog it was drawn in.
+/// The texture is measured first and the painting rect is fitted to it.
+/// Returns whether the picture was ready to be drawn at all.
+pub fn picture(ui: &Ui, path: &Path, area: Rect) -> bool {
+    let image = egui::Image::new(crate::util::image_uri(path));
+    match image.load_for_size(ui.ctx(), area.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            image.paint_at(ui, picture_rect(area, texture.size));
+            true
+        }
+        _ => false,
+    }
+}
+
 pub fn paint_avatar(
     ui: &Ui,
     palette: &Palette,

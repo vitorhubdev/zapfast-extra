@@ -2590,7 +2590,12 @@ impl App {
             }
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
-                    self.backend.send(Command::SendSticker { chat, path });
+                    let quoting = self.reply_to.take();
+                    self.backend.send(Command::SendSticker {
+                        chat,
+                        path,
+                        quoting,
+                    });
                     self.dialog = None;
                     self.picker = None;
                     self.scroll_to_bottom = true;

@@ -126,7 +126,10 @@ without embedding a browser engine.
   draws a small preview built in the background instead of decoding the full
   file for every tile. Clicking a sticker previews it
   for confirmation before sending, and the picker reopens on the last used
-  tab. Tiles that fail to load retry with a fresh download instead of
+  tab. A sticker you send is on screen as soon as you confirm it: the copy is
+  filed locally first and the upload fills in behind it, and a sticker sent
+  while a reply was open goes as that reply. Tiles that fail to load retry with
+  a fresh download instead of
   sticking on an error, and a page fills in a few tiles at a time instead of
   asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
@@ -180,7 +183,10 @@ without embedding a browser engine.
 - **Local storage.** Messages, contacts and sticker metadata are stored in a
   SQLCipher-encrypted archive, unlocked automatically through your OS keyring.
   Existing plaintext archives are migrated on first use. Attachments remain
-  ordinary files in the cache directory. Unlinking deletes both and removes this device from
+  ordinary files in the cache directory, filed under the hash of their content
+  when they are stickers. A sweep once per run reclaims attachment files no
+  message points at any more, and what it freed goes to the log. Unlinking
+  deletes both and removes this device from
   your phone.
 
 ## What it does not do yet

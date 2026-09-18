@@ -6,6 +6,8 @@ use crate::app::App;
 use crate::model::{Action, Dialog};
 use crate::theme::{self, Icon};
 
+use super::widgets;
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(dialog) = app.dialog.clone() else {
         return;
@@ -120,12 +122,7 @@ fn confirm_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
         let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
         if ui.is_rect_visible(rect) {
             ui.painter().rect_filled(rect, 8.0, palette.surface);
-            egui::Image::new(crate::util::image_uri(path))
-                .fit_to_exact_size(vec2(side - 16.0, side - 16.0))
-                .paint_at(
-                    ui,
-                    egui::Rect::from_center_size(rect.center(), vec2(side - 16.0, side - 16.0)),
-                );
+            widgets::picture(ui, path, rect.shrink(8.0));
         }
     });
     let exists = path.exists();
@@ -195,12 +192,7 @@ fn peek_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
         let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
         if ui.is_rect_visible(rect) {
             ui.painter().rect_filled(rect, 10.0, palette.surface);
-            egui::Image::new(crate::util::image_uri(path))
-                .fit_to_exact_size(vec2(side - 20.0, side - 20.0))
-                .paint_at(
-                    ui,
-                    egui::Rect::from_center_size(rect.center(), vec2(side - 20.0, side - 20.0)),
-                );
+            widgets::picture(ui, path, rect.shrink(10.0));
         }
     });
     ui.add_space(6.0);

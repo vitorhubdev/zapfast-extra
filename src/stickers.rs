@@ -34,6 +34,28 @@ pub fn thumb_path(thumbs: &Path, file: &Path) -> Option<PathBuf> {
     Some(thumbs.join(format!("{id}.png")))
 }
 
+/// Files one sticker copy under its content hash, inside its own folder.
+///
+/// A copy that is already named after its hash stays where it is. One that
+/// carries a message name is renamed once, so the thumbnail, the picker, and
+/// the duplicate check all see the same identity for the same picture.
+pub fn file_by_hash(dir: &Path, file: &Path) -> Result<PathBuf, String> {
+    if id_of(file).is_some() {
+        return Ok(file.to_path_buf());
+    }
+    let bytes = std::fs::read(file).map_err(|error| error.to_string())?;
+    let target = dir.join(format!("{}.webp", hash_of(&bytes)));
+    if target != file {
+        if target.is_file() {
+            // The same picture is already filed: this copy goes.
+            std::fs::remove_file(file).map_err(|error| error.to_string())?;
+        } else {
+            std::fs::rename(file, &target).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(target)
+}
+
 /// Builds the thumbnail of one sticker, unless it is already there.
 ///
 /// Only the first frame of an animated sticker is decoded, so this stays
@@ -232,6 +254,29 @@ mod tests {
             .encode(&picture, 200, 200, image::ExtendedColorType::Rgba8)
             .expect("encodes");
         out
+    }
+
+    #[test]
+    fn a_sticker_copy_is_filed_under_its_hash() {
+        let dir = std::env::temp_dir().join(format!("zapfast-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let bytes = small_picture([10, 200, 90]);
+        let named = dir.join("5541999999999-3EB0C19.webp");
+        std::fs::write(&named, &bytes).expect("writes");
+        let filed = file_by_hash(&dir, &named).expect("files");
+        assert_eq!(filed, dir.join(format!("{}.webp", hash_of(&bytes))));
+        assert!(filed.is_file());
+        assert!(!named.exists(), "the message name is gone");
+        // Asking again keeps the file that is already there.
+        assert_eq!(file_by_hash(&dir, &filed).expect("files"), filed);
+        // A second copy of the same picture goes instead of piling up.
+        let other = dir.join("another.webp");
+        std::fs::write(&other, &bytes).expect("writes");
+        assert_eq!(file_by_hash(&dir, &other).expect("files"), filed);
+        assert!(!other.exists());
+        assert!(filed.is_file());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

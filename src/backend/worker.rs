@@ -292,6 +292,7 @@ pub async fn run(
         download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
         sticker_tries: HashMap::new(),
         thumb_tries: HashMap::new(),
+        cache_swept: false,
         read_sync: ReadSync::default(),
         poll_decrypting: 0,
         poll_history: Default::default(),
@@ -330,6 +331,7 @@ pub async fn run(
                 worker.pump_read_sync();
                 worker.pump_poll_votes();
                 worker.pump_poll_history();
+                worker.pump_cache();
             }
         }
     }
@@ -391,6 +393,8 @@ struct Worker {
     sticker_tries: HashMap<String, u32>,
     /// Sticker previews that failed to build, so they are not retried forever.
     thumb_tries: HashMap<PathBuf, u32>,
+    /// Whether the app's own cache folders were swept this run.
+    cache_swept: bool,
 }
 
 /// Decoded history chunk waiting to be canonicalized and archived.
@@ -2545,7 +2549,11 @@ impl Worker {
                 mentions,
             } => self.send_pasted_image(chat, width, height, rgba, caption, mentions),
             Command::Outbound { chat, row, raw } => self.outbound(chat, *row, raw),
-            Command::SendSticker { chat, path } => self.send_sticker(chat, path),
+            Command::SendSticker {
+                chat,
+                path,
+                quoting,
+            } => self.send_sticker(chat, path, quoting),
             Command::SaveSticker { path } => match self.save_sticker(&path) {
                 Ok(()) => self.emit_stickers(),
                 Err(error) => self.emit(Event::Error(format!("Could not save sticker: {error}"))),
@@ -3094,6 +3102,39 @@ impl Worker {
         }
     }
 
+    /// The reply context and the archived row for one quoted message.
+    fn quote_of(&self, chat: &str, id: &str, jid: &Jid) -> Option<(wa::ContextInfo, Message)> {
+        let raw = self.archive.raw(chat, id).ok().flatten()?;
+        let quoted = wa::Message::decode_from_slice(&raw).ok()?;
+        let row = self.archive.message(chat, id).ok().flatten()?;
+        let sender = Self::jid_of(&row.sender).unwrap_or_else(|| jid.clone());
+        let context = whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info(
+            row.id.clone(),
+            &sender,
+            jid,
+            jid,
+            &quoted,
+        );
+        Some((context, row))
+    }
+
+    /// The summary a reply shows for the message it answers.
+    fn quoted_summary(&self, row: Message) -> Quoted {
+        Quoted {
+            mentions: row.mentions.clone(),
+            id: row.id,
+            sender_name: if row.from_me {
+                Some("You".to_owned())
+            } else {
+                row.sender_name
+                    .clone()
+                    .or_else(|| self.name_for(&row.sender))
+            },
+            sender: row.sender,
+            summary: row.content.summary(),
+        }
+    }
+
     fn send_text(
         &mut self,
         chat: ChatId,
@@ -3107,17 +3148,7 @@ impl Worker {
         };
         let mut quoted_row = None;
         let context = quoting.as_deref().and_then(|id| {
-            let raw = self.archive.raw(&chat, id).ok().flatten()?;
-            let quoted = wa::Message::decode_from_slice(&raw).ok()?;
-            let row = self.archive.message(&chat, id).ok().flatten()?;
-            let sender = Self::jid_of(&row.sender).unwrap_or_else(|| jid.clone());
-            let context = whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info(
-                row.id.clone(),
-                &sender,
-                &jid,
-                &jid,
-                &quoted,
-            );
+            let (context, row) = self.quote_of(&chat, id, &jid)?;
             quoted_row = Some(row);
             Some(context)
         });
@@ -3136,19 +3167,7 @@ impl Worker {
             status: Delivery::Pending,
             delivered_at: None,
             read_at: None,
-            quoted: quoted_row.map(|row| Quoted {
-                mentions: row.mentions.clone(),
-                id: row.id,
-                sender_name: if row.from_me {
-                    Some("You".to_owned())
-                } else {
-                    row.sender_name
-                        .clone()
-                        .or_else(|| self.name_for(&row.sender))
-                },
-                sender: row.sender,
-                summary: row.content.summary(),
-            }),
+            quoted: quoted_row.map(|row| self.quoted_summary(row)),
             reactions: Vec::new(),
             edited: false,
             mentions,
@@ -3766,6 +3785,77 @@ impl Worker {
         self.download(chat, id);
     }
 
+    /// Reclaims the app's own attachment cache, once per run.
+    ///
+    /// The archive is the list of what still matters: the file every message
+    /// points at. Anything else in the folder is left over from a failed
+    /// write, an interrupted download, or a message that is gone. Nothing
+    /// the user saved lives there, so nothing of theirs can be lost.
+    fn pump_cache(&mut self) {
+        if self.cache_swept {
+            return;
+        }
+        self.cache_swept = true;
+        let media = self.dirs.media_cache_dir();
+        let keep: HashSet<String> = match self.archive.media_paths() {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|(_, _, path)| path.to_string_lossy().into_owned())
+                .collect(),
+            Err(error) => {
+                // Without the list, every file would look like rubbish.
+                log::warn!("attachments: keeping them all, the list failed: {error}");
+                return;
+            }
+        };
+        tokio::task::spawn_blocking(move || {
+            let held = crate::cache::usage(&media);
+            let freed = crate::cache::sweep(&media, &|path| {
+                keep.contains(&path.to_string_lossy().into_owned())
+            });
+            if freed.files > 0 {
+                let left = crate::cache::usage(&media);
+                log::info!(
+                    "attachments: reclaimed {freed} of {held}, {left} left in {}",
+                    media.display()
+                );
+            }
+        });
+    }
+
+    /// Files a sticker copy in the app's own cache under its content hash.
+    ///
+    /// A sticker the user sent is filed with its message, under a name that
+    /// carries the message id. Naming it after the hash of its bytes instead
+    /// gives the picture one identity: the picker builds a single preview for
+    /// it, however many times it was sent, and two copies of the same
+    /// picture are never listed twice.
+    fn adopt_sticker_file(&mut self, file: &Path) -> PathBuf {
+        let Some(dir) = file.parent() else {
+            return file.to_path_buf();
+        };
+        let filed = match crate::stickers::file_by_hash(dir, file) {
+            Ok(filed) => filed,
+            Err(error) => {
+                log::debug!("could not file {} under its hash: {error}", file.display());
+                return file.to_path_buf();
+            }
+        };
+        if filed == file {
+            return filed;
+        }
+        // The archive still points at the old name: it follows the file.
+        let Ok(rows) = self.archive.media_paths() else {
+            return filed;
+        };
+        for (chat, id, known) in rows {
+            if known == file && self.archive.set_media_path(&chat, &id, &filed).is_ok() {
+                self.emit_message(&chat, &id);
+            }
+        }
+        filed
+    }
+
     /// Returns distinct downloaded stickers by most recent use.
     fn emit_stickers(&mut self) {
         let saved = self.saved_stickers();
@@ -3821,7 +3911,8 @@ impl Worker {
                     // another, so its path stands in for it.
                     let key = hash.unwrap_or_else(|| sticker.path.display().to_string());
                     if shown.insert(key) {
-                        list.push((sticker.last_used, sticker.path));
+                        let path = self.adopt_sticker_file(&sticker.path);
+                        list.push((sticker.last_used, path));
                     }
                 }
             }
@@ -4490,25 +4581,95 @@ impl Worker {
         });
     }
 
-    fn send_sticker(&mut self, chat: ChatId, path: PathBuf) {
+    /// Sends a WebP sticker.
+    ///
+    /// The local copy is filed and drawn before the upload starts: the bubble
+    /// paints the sticker at once and only its tick waits for the server.
+    fn send_sticker(&mut self, chat: ChatId, path: PathBuf, quoting: Option<String>) {
         let Some(client) = self.client.clone() else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
         };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                self.emit(Event::Error(format!("Could not read the sticker: {error}")));
+                return;
+            }
+        };
+        let Some(shape) = sticker_shape(&bytes) else {
+            self.emit(Event::Error(
+                "Could not read the sticker: it is not a picture".to_owned(),
+            ));
+            return;
+        };
+        let quote = quoting.as_deref().and_then(|id| {
+            let jid = Self::jid_of(&chat)?;
+            self.quote_of(&chat, id, &jid)
+        });
+        let quoted = quote
+            .as_ref()
+            .map(|(_, row)| self.quoted_summary(row.clone()));
+        let context = quote.map(|(context, _)| context);
+        let (animated, width, height) = shape;
+        let id = client.generate_message_id();
+        // Filed under the hash of its bytes, like every other sticker copy:
+        // the same picture is one file, one preview, and one entry.
+        let file = self
+            .dirs
+            .media_cache_dir()
+            .join(format!("{}.webp", crate::stickers::hash_of(&bytes)));
+        // The copy beside the archive is what the bubble, the reply bar, and
+        // the viewer read while the upload is still on its way.
+        let kept = std::fs::create_dir_all(self.dirs.media_cache_dir())
+            .and_then(|()| std::fs::write(&file, &bytes));
+        if let Err(error) = &kept {
+            log::warn!("could not keep the sticker copy: {error}");
+        }
+        let mut content = Content::Sticker {
+            media: media(
+                Some(&"image/webp".to_owned()),
+                Some(bytes.len() as u64),
+                Some(width),
+                Some(height),
+            ),
+            animated,
+        };
+        if let Some(media) = content.media_mut() {
+            // The copy beside the archive is what the bubble, the reply bar,
+            // and the viewer read. Without one the send still goes, and the
+            // file the picker drew from stands in: a picture beats a bubble
+            // that spins forever over a file nobody can read.
+            media.path = Some(if kept.is_ok() { file } else { path });
+        }
+        let row = Message {
+            id: id.clone(),
+            chat: chat.clone(),
+            sender: self.me(),
+            sender_name: None,
+            from_me: true,
+            timestamp: crate::util::now(),
+            content,
+            status: Delivery::Pending,
+            delivered_at: None,
+            read_at: None,
+            quoted,
+            reactions: Vec::new(),
+            edited: false,
+            mentions: Vec::new(),
+            forwarded: false,
+            thumbnail: None,
+        };
+        self.store_message(row.clone(), None, None);
         let commands = self.commands.clone();
-        let dir = self.dirs.media_cache_dir();
-        let me = self.me();
         tokio::spawn(async move {
             let outcome = async {
-                let bytes = tokio::fs::read(&path)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                let prepared = prepare_sticker(&client, bytes).await?;
-                file_outbound(&client, &chat, &me, &dir, prepared, None, Vec::new()).await
+                let prepared = prepare_sticker(&client, bytes, shape, context).await?;
+                Ok::<_, String>(prepared.message.encode_to_vec())
             }
             .await;
             match outcome {
-                Ok((row, raw)) => {
+                Ok(raw) => {
                     let _ = commands.send(Command::Outbound {
                         chat,
                         row: Box::new(row),
@@ -4518,7 +4679,7 @@ impl Worker {
                 Err(error) => {
                     let _ = commands.send(Command::Sent {
                         chat,
-                        id: String::new(),
+                        id,
                         error: Some(format!("Could not send the sticker: {error}")),
                     });
                 }
@@ -5376,25 +5537,27 @@ async fn prepare_media(
     })
 }
 
+/// Whether a sticker animates and how big it is, read from its own header.
+fn sticker_shape(bytes: &[u8]) -> Option<(bool, u32, u32)> {
+    let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes)).ok()?;
+    let animated = decoder.has_animation();
+    let (width, height) = image::ImageDecoder::dimensions(&decoder);
+    Some((animated, width, height))
+}
+
 /// Uploads a WebP sticker and builds its message without a library builder.
-async fn prepare_sticker(client: &Client, bytes: Vec<u8>) -> Result<Prepared, String> {
-    let (animated, width, height) = tokio::task::spawn_blocking({
-        let bytes = bytes.clone();
-        move || {
-            let decoder = image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(&bytes))
-                .map_err(|error| error.to_string())?;
-            let animated = decoder.has_animation();
-            let (width, height) = image::ImageDecoder::dimensions(&decoder);
-            Ok::<_, String>((animated, width, height))
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())??;
+async fn prepare_sticker(
+    client: &Client,
+    bytes: Vec<u8>,
+    shape: (bool, u32, u32),
+    context: Option<wa::ContextInfo>,
+) -> Result<Prepared, String> {
+    let (animated, width, height) = shape;
     let upload = client
         .upload(bytes.clone(), MediaType::Sticker, UploadOptions::default())
         .await
         .map_err(|error| error.to_string())?;
-    let message = wa::Message {
+    let mut message = wa::Message {
         sticker_message: MessageField::some(wa::message::StickerMessage {
             url: Some(upload.url),
             direct_path: Some(upload.direct_path),
@@ -5411,6 +5574,9 @@ async fn prepare_sticker(client: &Client, bytes: Vec<u8>) -> Result<Prepared, St
         }),
         ..Default::default()
     };
+    if let Some(context) = context {
+        message.set_context_info(context);
+    }
     Ok(Prepared {
         message,
         content: Content::Sticker {
@@ -6272,6 +6438,7 @@ mod receipt_tests {
             download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
             sticker_tries: HashMap::new(),
             thumb_tries: HashMap::new(),
+            cache_swept: false,
             read_sync: ReadSync::default(),
             poll_decrypting: 0,
             poll_history: Default::default(),

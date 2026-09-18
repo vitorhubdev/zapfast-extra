@@ -2,6 +2,33 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.22] - 2026-09-18
+
+### Fixed
+
+- A sticker you send is on screen as soon as you confirm it. The bubble used
+  to wait for the whole upload before it appeared, so a slow one left a
+  spinner in the chat for minutes with nothing to show. The copy is filed
+  locally and drawn first, the upload fills in the tick behind it, and a send
+  that fails marks the bubble instead of leaving it spinning.
+- Sending a sticker no longer leaves the reply bar armed, and a sticker sent
+  while a reply was open is sent as that reply.
+- Stickers keep their shape. egui paints a picture into whatever rectangle it
+  is handed, so a sticker that is not square was stretched to fill its tile in
+  the picker and its box in the send and peek dialogs. Every picture drawn by
+  the picker or those dialogs is now measured and fitted.
+
+### Changed
+
+- Every sticker copy in the app's own cache is filed under the hash of its
+  bytes. The phone's recents get the same small previews as saved stickers and
+  packs instead of being decoded at full size, and the same picture is one
+  file, one preview, and one entry in the picker.
+- The attachment cache is swept once per run. Files no message points at any
+  more, left over from an interrupted download, a failed write, or a message
+  that is gone, are reclaimed and the freed space is written to the log.
+  Saved stickers and imported packs are your own files and are never touched.
+
 ## [1.0.21] - 2026-09-18
 
 ### Fixed

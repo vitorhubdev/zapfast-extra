@@ -806,9 +806,12 @@ fn sticker_picture(
     // animated, and decoding one per tile is what used to stall the picker.
     let preview = thumb.filter(|thumb| thumb.is_file());
     let source = preview.unwrap_or(path);
-    let image = egui::Image::new(crate::util::image_uri(source)).fit_to_exact_size(rect.size());
+    let image = egui::Image::new(crate::util::image_uri(source));
     match image.load_for_size(ui.ctx(), rect.size()) {
-        Ok(egui::load::TexturePoll::Ready { .. }) => image.paint_at(ui, rect),
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            // Painted inside its own shape: a wide sticker keeps its width.
+            image.paint_at(ui, widgets::picture_rect(rect, texture.size));
+        }
         Ok(egui::load::TexturePoll::Pending { .. }) => {
             // A tile that is still being read shows its tile, not a hole.
             if ui.is_rect_visible(rect) {

@@ -67,18 +67,7 @@ pub fn respond(app: &mut App) {
                 quoting,
                 mentions,
             } => {
-                let quoted = quoting.and_then(|id| {
-                    app.conversations
-                        .get(&chat)?
-                        .message(&id)
-                        .map(|row| Quoted {
-                            id,
-                            sender: row.sender.clone(),
-                            sender_name: row.sender_name.clone(),
-                            summary: row.summary(),
-                            mentions: row.mentions.clone(),
-                        })
-                });
+                let quoted = quoting.and_then(|id| quote_of(app, &chat, id));
                 let mut row = outgoing(app, &chat, Content::text(text));
                 row.quoted = quoted;
                 row.mentions = mentions
@@ -90,7 +79,12 @@ pub fn respond(app: &mut App) {
                     .collect();
                 append(app, row);
             }
-            Command::SendSticker { chat, path } => {
+            Command::SendSticker {
+                chat,
+                path,
+                quoting,
+            } => {
+                let quoted = quoting.and_then(|id| quote_of(app, &chat, id));
                 let mut media = super::super::media(
                     "image/webp",
                     path.metadata().map_or(0, |meta| meta.len()),
@@ -98,7 +92,7 @@ pub fn respond(app: &mut App) {
                     Some(192),
                 );
                 media.path = Some(path);
-                let row = outgoing(
+                let mut row = outgoing(
                     app,
                     &chat,
                     Content::Sticker {
@@ -106,6 +100,7 @@ pub fn respond(app: &mut App) {
                         animated: false,
                     },
                 );
+                row.quoted = quoted;
                 append(app, row);
             }
             Command::RecentStickers => app.stickers_pending = false,
@@ -132,6 +127,17 @@ pub fn respond(app: &mut App) {
             _ => {}
         }
     }
+}
+
+/// The quote a reply shows for one message of the open conversation.
+fn quote_of(app: &App, chat: &str, id: String) -> Option<Quoted> {
+    app.conversations.get(chat)?.message(&id).map(|row| Quoted {
+        id,
+        sender: row.sender.clone(),
+        sender_name: row.sender_name.clone(),
+        summary: row.summary(),
+        mentions: row.mentions.clone(),
+    })
 }
 
 fn outgoing(app: &App, chat: &str, content: Content) -> Message {
