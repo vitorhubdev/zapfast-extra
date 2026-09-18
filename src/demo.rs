@@ -1242,6 +1242,32 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.composer = "Look at these".into();
             }
             "archived" => app.show_archived = true,
+            "peek" => {
+                let (_, sticker) = sample_files(app);
+                app.dialog = Some(crate::model::Dialog::PeekSticker { path: sticker });
+            }
+            "fileinfo" => {
+                let (photo, _) = sample_files(app);
+                app.dialog = Some(crate::model::Dialog::FileInfo(Box::new(
+                    crate::model::FileInfo {
+                        title: "Notes on the Engine.pdf".to_owned(),
+                        rows: vec![
+                            ("Type".to_owned(), "PDF".to_owned()),
+                            ("MIME".to_owned(), "application/pdf".to_owned()),
+                            ("Size".to_owned(), crate::util::bytes(482_113)),
+                            ("Pages".to_owned(), "3".to_owned()),
+                            ("Sent".to_owned(), "Today at 16:35".to_owned()),
+                            ("File".to_owned(), photo.display().to_string()),
+                            (
+                                "SHA-256".to_owned(),
+                                "9f2c1b4e5a6d7c8b9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d"
+                                    .to_owned(),
+                            ),
+                        ],
+                        note: None,
+                    },
+                )));
+            }
             "picker" => app.picker = Some(crate::model::PickerTab::Emoji),
             "stickers" => {
                 app.picker = Some(crate::model::PickerTab::Stickers);
@@ -1419,6 +1445,8 @@ mod tests {
             "viewer",
             "find",
             "pdf",
+            "peek",
+            "fileinfo",
         ] {
             let mut app = self::app();
             apply_flags(&mut app, Some(page));

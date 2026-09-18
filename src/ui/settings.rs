@@ -123,22 +123,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     toggle(ui, app, "Show shortcut hints", "", |settings| &mut settings.show_shortcut_hints);
 
                     section(ui, app, "Audio");
-                    widgets::setting_row(
+                    theme::paragraph(
                         ui,
-                        &palette,
-                        "Playback speed",
-                        "Voice messages and audio play at this speed. The same control sits in every audio bubble.",
-                        |ui| {
-                            let speed = crate::settings::snap_audio_speed(app.settings.audio_speed);
-                            let label = if speed.fract() == 0.0 {
-                                format!("{}x", speed as i32)
-                            } else {
-                                format!("{speed}x")
-                            };
-                            if theme::soft_button(ui, &palette, None, &label, false).clicked() {
-                                app.actions.push(Action::CycleAudioSpeed);
-                            }
-                        },
+                        "Each audio bubble carries its own speed chip: 1x, 1.5x or 2x. Changing it takes effect straight away, from where the clip already is.",
+                        theme::regular(12.5),
+                        palette.secondary,
                     );
                     toggle(ui, app, "Play the next audio automatically", "When a voice message or audio clip ends, continue with the next one in the same chat.", |settings| &mut settings.play_next_audio);
 

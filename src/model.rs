@@ -9,6 +9,85 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 
 /// Chat JID string: `<phone>@s.whatsapp.net`, `<id>@g.us`, or `<id>@lid`.
+/// What a file attachment is, for labels and for safe handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileKind {
+    Image,
+    Pdf,
+    Audio,
+    Video,
+    Archive,
+    /// Something that can run code on this computer.
+    Installer,
+    Other,
+}
+
+impl FileKind {
+    /// Reads the kind from the MIME type, with the name as the tie breaker.
+    pub fn of(mime: &str, name: &str) -> Self {
+        let extension = name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase())
+            .unwrap_or_default();
+        match extension.as_str() {
+            "exe" | "msi" | "bat" | "cmd" | "com" | "scr" | "ps1" | "jar" | "apk" | "dmg"
+            | "appimage" | "deb" | "rpm" => return Self::Installer,
+            "zip" | "rar" | "7z" | "tar" | "gz" | "xz" | "bz2" => return Self::Archive,
+            _ => {}
+        }
+        let mime = mime.split(';').next().unwrap_or_default().trim();
+        match mime {
+            "application/pdf" => Self::Pdf,
+            "application/zip"
+            | "application/gzip"
+            | "application/x-tar"
+            | "application/x-7z-compressed"
+            | "application/x-rar-compressed" => Self::Archive,
+            "application/vnd.android.package-archive"
+            | "application/x-msdownload"
+            | "application/x-msi"
+            | "application/x-executable" => Self::Installer,
+            _ if mime.starts_with("image/") => Self::Image,
+            _ if mime.starts_with("audio/") => Self::Audio,
+            _ if mime.starts_with("video/") => Self::Video,
+            _ => Self::Other,
+        }
+    }
+
+    /// A short word for the file, shown beside its size.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Image => "Image",
+            Self::Pdf => "PDF",
+            Self::Audio => "Audio",
+            Self::Video => "Video",
+            Self::Archive => "Archive",
+            Self::Installer => "Program",
+            Self::Other => "File",
+        }
+    }
+
+    /// A picture sent as a file is still a picture.
+    pub fn is_image(self) -> bool {
+        self == Self::Image
+    }
+
+    /// Opening one of these can run code, so it is saved first instead.
+    pub fn runs_code(self) -> bool {
+        self == Self::Installer
+    }
+}
+
+/// Everything the "Show info" dialog lists about one attachment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileInfo {
+    pub title: String,
+    /// Label and value pairs, in the order they are shown.
+    pub rows: Vec<(String, String)>,
+    /// A closing line, used for the caution on programs.
+    pub note: Option<String>,
+}
+/// Chat JID string: `<phone>@s.whatsapp.net`, `<id>@g.us`, or `<id>@lid`.
 pub type ChatId = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +318,10 @@ pub enum Content {
         media: Media,
         animated: bool,
     },
+    /// A photo or video marked as view once by its sender.
+    ViewOnce {
+        what: String,
+    },
     Location {
         latitude: f64,
         longitude: f64,
@@ -361,6 +444,7 @@ impl Content {
             }
             Self::Document { file_name, .. } => format!("Document: {file_name}"),
             Self::Sticker { .. } => "Sticker".to_owned(),
+            Self::ViewOnce { what } => format!("View once {what}"),
             Self::Location { name, .. } => match name {
                 Some(name) => format!("Location: {name}"),
                 None => "Location".to_owned(),
@@ -568,8 +652,6 @@ pub struct ViewerItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ViewerKind {
     Picture,
-    /// A sticker: no frame and no caption.
-    Sticker,
     /// A PDF, rendered one page at a time.
     Pdf,
 }
@@ -599,6 +681,12 @@ pub enum Dialog {
     ConfirmSticker {
         path: PathBuf,
     },
+    /// Shows a sticker on its own, bigger, with a save button.
+    PeekSticker {
+        path: PathBuf,
+    },
+    /// Lists everything known about one attachment.
+    FileInfo(Box<FileInfo>),
     CreatePoll(ChatId),
 }
 
@@ -707,8 +795,8 @@ pub enum Action {
     CloseChatSearch,
     /// Asks for a path and saves a copy of a file the app shows.
     SaveCopy(PathBuf),
-    /// Steps the audio playback speed through its fixed cycle.
-    CycleAudioSpeed,
+    /// Steps one message's playback speed through its fixed cycle.
+    CycleAudioSpeed(String),
     OpenUrl(String),
     CopyText(String),
     /// Starts a reply to a message in the open chat.
@@ -786,6 +874,13 @@ pub enum Action {
     ForgetSticker(PathBuf),
     /// Marks a sticker as a favourite, or clears the mark.
     FavoriteSticker(PathBuf),
+    /// Shows one sticker bigger, without opening the media viewer.
+    PeekSticker(PathBuf),
+    /// Asks for the details of one attachment.
+    ShowFileInfo {
+        chat: ChatId,
+        message: String,
+    },
     /// Imports a sticker pack from a signal.art link.
     ImportStickerUrl(String),
     /// Selects and imports a .wastickers or zip file.

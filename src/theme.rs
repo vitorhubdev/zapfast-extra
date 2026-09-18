@@ -720,6 +720,33 @@ pub fn spinner(ui: &mut egui::Ui, size: f32, color: Color32) -> Response {
     response
 }
 
+/// An indeterminate progress bar: a highlight sweeping along a track.
+///
+/// Downloads do not report their position, so this shows that work is
+/// happening without inventing a percentage.
+pub fn paint_download_bar(ui: &egui::Ui, rect: egui::Rect, palette: &Palette) {
+    if !ui.is_rect_visible(rect) || rect.width() <= 2.0 {
+        return;
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
+    let radius = rect.height() / 2.0;
+    ui.painter()
+        .rect_filled(rect, radius, palette.surface_hover);
+    let phase = (ui.input(|input| input.time) * 0.7).fract() as f32;
+    let sweep = (rect.width() * 0.4).max(24.0);
+    let left = rect.left() - sweep + phase * (rect.width() + sweep);
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(
+        egui::Rect::from_min_size(
+            egui::pos2(left, rect.top()),
+            egui::vec2(sweep, rect.height()),
+        ),
+        radius,
+        palette.accent,
+    );
+}
+
 /// Paints a centered spinner without allocating space.
 pub fn paint_spinner(ui: &egui::Ui, rect: egui::Rect, size: f32, color: Color32) {
     if !ui.is_rect_visible(rect) {

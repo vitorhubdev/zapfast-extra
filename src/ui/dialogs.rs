@@ -35,6 +35,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ChatInfo(_) => 360.0,
                 Dialog::Forward { .. } => 420.0,
                 Dialog::ConfirmSticker { .. } => 340.0,
+                Dialog::PeekSticker { .. } => 320.0,
+                Dialog::FileInfo(_) => 400.0,
                 Dialog::ConfirmDeleteMany { .. } => 420.0,
                 Dialog::CreatePoll(_) => 420.0,
             });
@@ -49,6 +51,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::ChatInfo(id) => chat_info(app, ui, &id),
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::ConfirmSticker { path } => confirm_sticker(app, ui, &path),
+                Dialog::PeekSticker { path } => peek_sticker(app, ui, &path),
+                Dialog::FileInfo(info) => file_info(app, ui, &info),
                 Dialog::ConfirmDeleteMany { ids, revocable, .. } => {
                     confirm_delete_many(app, ui, ids, revocable)
                 }
@@ -143,6 +147,74 @@ fn confirm_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
                 app.actions.push(Action::SendSticker(path.to_path_buf()));
             }
             if theme::pill_button(ui, &palette, "Cancel", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
+
+/// Shows one sticker bigger, with a way to keep it.
+/// Lists what is known about one attachment.
+fn file_info(app: &mut App, ui: &mut egui::Ui, info: &crate::model::FileInfo) {
+    let palette = app.palette;
+    title(ui, app, "File info");
+    theme::paragraph(ui, &info.title, theme::medium(14.0), palette.text);
+    ui.add_space(4.0);
+    for (label, value) in &info.rows {
+        ui.horizontal(|ui| {
+            ui.set_width(360.0);
+            ui.vertical(|ui| {
+                ui.set_width(120.0);
+                theme::text(ui, label, theme::regular(12.5), palette.secondary);
+            });
+            ui.vertical(|ui| {
+                ui.set_width(230.0);
+                theme::paragraph(ui, value, theme::regular(12.5), palette.text);
+            });
+        });
+    }
+    if let Some(note) = &info.note {
+        ui.add_space(6.0);
+        theme::paragraph(ui, note, theme::regular(12.5), palette.danger);
+    }
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if theme::pill_button(ui, &palette, "Close", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
+
+fn peek_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
+    let palette = app.palette;
+    title(ui, app, "Sticker");
+    let side = 240.0;
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+        if ui.is_rect_visible(rect) {
+            ui.painter().rect_filled(rect, 10.0, palette.surface);
+            egui::Image::new(crate::util::image_uri(path))
+                .fit_to_exact_size(vec2(side - 20.0, side - 20.0))
+                .paint_at(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), vec2(side - 20.0, side - 20.0)),
+                );
+        }
+    });
+    ui.add_space(6.0);
+    // A copy that already lives in the saved folder needs no button.
+    let saved = path.starts_with(app.dirs.saved_sticker_dir());
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if theme::pill_button(ui, &palette, "Close", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+            if saved {
+                theme::text(ui, "Saved", theme::regular(13.0), palette.secondary);
+            } else if theme::pill_button(ui, &palette, "Save sticker", true).clicked() {
+                app.actions.push(Action::SaveSticker(path.to_path_buf()));
                 app.actions.push(Action::CloseDialog);
             }
         });
@@ -376,7 +448,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     theme::paragraph(
         ui,
-        "A native WhatsApp client written in Rust with egui. It connects through whatsapp-rust. Messages are end-to-end encrypted on this device.",
+        "ZapExt is a community fork of ZapFast, a native WhatsApp client written in Rust with egui. It connects through whatsapp-rust, and messages are end-to-end encrypted on this device.",
         theme::regular(13.0),
         palette.text,
     );

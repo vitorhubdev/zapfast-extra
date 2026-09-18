@@ -300,6 +300,26 @@ pub fn menu_separator(ui: &mut Ui, palette: &Palette) {
 }
 
 /// Shared popup-menu frame.
+/// A menu line that only says something: a warning or a status.
+pub fn menu_note(ui: &mut Ui, icon: Icon, label: &str, colour: Color32) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), Sense::hover());
+    let icon_rect =
+        Rect::from_center_size(pos2(rect.left() + 19.0, rect.center().y), Vec2::splat(15.0));
+    icon.image(colour, 15.0).paint_at(ui, icon_rect);
+    let text = ui.painter().layout(
+        label.to_owned(),
+        theme::regular(12.5),
+        colour,
+        (rect.width() - 44.0).max(40.0),
+    );
+    ui.painter().galley(
+        pos2(rect.left() + 34.0, rect.center().y - text.size().y / 2.0),
+        text,
+        colour,
+    );
+}
+/// Shared popup-menu frame.
 pub fn menu_frame(palette: &Palette) -> egui::Frame {
     egui::Frame::new()
         .fill(palette.overlay)

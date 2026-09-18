@@ -230,14 +230,23 @@ fn list(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
     if !app.show_archived {
-        ui.horizontal(|ui| {
-            if ui.selectable_label(!app.show_channels, "Chats").clicked() {
-                app.show_channels = false;
-            }
-            if ui.selectable_label(app.show_channels, "Channels").clicked() {
-                app.show_channels = true;
-            }
-        });
+        Frame::new()
+            .inner_margin(Margin {
+                left: 14,
+                right: 14,
+                top: 8,
+                bottom: 0,
+            })
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(!app.show_channels, "Chats").clicked() {
+                        app.show_channels = false;
+                    }
+                    if ui.selectable_label(app.show_channels, "Channels").clicked() {
+                        app.show_channels = true;
+                    }
+                });
+            });
         ui.add_space(6.0);
     }
     let chats: Vec<Chat> = app.visible_chats().into_iter().cloned().collect();

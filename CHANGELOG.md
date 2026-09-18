@@ -2,6 +2,44 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.20] - 2026-09-18
+
+### Changed
+
+- A sticker no longer opens the media viewer. Clicking one shows it bigger in
+  a small dialog with a Save button, and stickers stay out of the viewer's next
+  and previous order.
+- The sticker picker never lists the same picture twice: a sticker that is
+  saved or marked as a favourite is not repeated under the phone's recents.
+- Attachments say what they are. An image sent as a file shows as an image and
+  opens in the viewer, a document shows its kind (PDF, Program, Archive) beside
+  the size, and a page count of zero is no longer printed as "0 pages".
+- A program carries a warning and its menu offers Save a copy instead of
+  opening it, so running something from a chat takes a deliberate step.
+- Every attachment menu has Show info, listing the type, MIME type, size,
+  pixels, length, pages, date, chat, message id, the file on disk and its
+  SHA-256.
+- Downloads show a moving bar while the bytes are on their way, on file cards
+  and on video posters.
+- The message menu shows one line for its timeline (sent, delivered, read)
+  instead of a row per step.
+- The Chats and Channels tabs are inset from the sidebar edge.
+- The audio speed chip belongs to its own bubble: 1x, 1.5x or 2x for that clip
+  alone, applied the moment it is clicked and from where the clip already is.
+  Settings explains the chip instead of carrying a global speed.
+- View-once photos and videos are labelled as such, with no download that can
+  only fail and no quiet retries behind them.
+- A file WhatsApp does not offer to linked devices says so in plain words
+  instead of repeating the library's error.
+- The About dialog says ZapExt is a community fork of ZapFast, and the
+  repository description no longer points at the upstream site.
+
+### Tests
+
+- Added per-message speed tests in audio.rs and app.rs, and demo pages for the
+  sticker peek and the file info dialog so the headless layout test renders
+  them.
+
 ## [1.0.19] - 2026-09-18
 
 ### Fixed

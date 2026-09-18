@@ -156,13 +156,16 @@ impl Downloadable for PhoneSticker {
 /// message the downloader reports for it are final. Anything else can be a
 /// dropped connection or a busy server and deserves another try.
 fn retriable_download(error: &str) -> bool {
-    const FINAL: [&str; 5] = [
+    const FINAL: [&str; 6] = [
         "403",
         "404",
         "410",
         "No longer available",
         // Without the keys in the archived message no attempt can succeed.
         "keys are missing",
+        // A message with no direct path (a view-once payload, for example)
+        // cannot be fetched here at all.
+        "Missing direct_path",
     ];
     !FINAL.iter().any(|code| error.contains(code))
 }
@@ -209,6 +212,16 @@ fn stickers_to_fetch(
         .filter(|sticker| tries.get(&sticker.hash).copied().unwrap_or(0) < STICKER_TRIES)
         .take(STICKER_ROUND)
         .collect()
+}
+
+/// The content hash a saved or cached sticker is filed under.
+///
+/// Saved copies are named after their content, so the file name identifies
+/// the picture and lets the picker hide a cache copy it already lists.
+fn sticker_id(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    (stem.len() == 64 && stem.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| stem.to_ascii_lowercase())
 }
 
 /// Stable sticker hash across messages and the phone's recent list.
@@ -1705,6 +1718,13 @@ impl Worker {
         let Some(content) = classify(base) else {
             return;
         };
+        // A view-once payload is a one-shot that a linked device cannot fetch:
+        // say what it is instead of offering a download that can only fail.
+        let content = if message.is_view_once() {
+            view_once_of(base, content)
+        } else {
+            content
+        };
         let quoted = self.quoted_of(base);
         let mentions = self.mentions_of(&mentioned_of(base));
         let row = Message {
@@ -2456,6 +2476,14 @@ impl Worker {
                     });
                     self.emit_chat(&chat);
                 }
+            }
+            Command::FileInfo { chat, message } => {
+                let result = self.file_info(&chat, &message);
+                self.emit(Event::FileInfo {
+                    chat,
+                    message,
+                    result,
+                });
             }
             Command::PickFiles(chat) => {
                 let commands = self.commands.clone();
@@ -3732,8 +3760,86 @@ impl Worker {
     }
 
     /// Returns distinct downloaded stickers by most recent use.
+    /// Collects everything the info dialog shows about one attachment.
+    fn file_info(&self, chat: &str, id: &str) -> Result<crate::model::FileInfo, String> {
+        let row = self
+            .archive
+            .message(chat, id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "That message is not in the archive".to_owned())?;
+        let media = row
+            .content
+            .media()
+            .ok_or_else(|| "That message carries no file".to_owned())?;
+        let name = match &row.content {
+            Content::Document { file_name, .. } => file_name.clone(),
+            other => other.summary(),
+        };
+        let kind = crate::model::FileKind::of(&media.mime, &name);
+        let mut rows = vec![
+            ("Type".to_owned(), kind.label().to_owned()),
+            (
+                "MIME".to_owned(),
+                if media.mime.is_empty() {
+                    "unknown".to_owned()
+                } else {
+                    media.mime.clone()
+                },
+            ),
+            ("Size".to_owned(), crate::util::bytes(media.size)),
+        ];
+        if let (Some(width), Some(height)) = (media.width, media.height) {
+            rows.push(("Pixels".to_owned(), format!("{width} x {height}")));
+        }
+        if let Content::Video { seconds, .. } | Content::Audio { seconds, .. } = &row.content
+            && let Some(seconds) = seconds
+        {
+            rows.push(("Length".to_owned(), crate::util::duration(*seconds)));
+        }
+        if let Content::Document {
+            pages: Some(pages), ..
+        } = &row.content
+            && *pages > 0
+        {
+            rows.push(("Pages".to_owned(), pages.to_string()));
+        }
+        rows.push(("Sent".to_owned(), crate::util::moment_stamp(row.timestamp)));
+        rows.push(("Message".to_owned(), id.to_owned()));
+        if let Some(known) = self.archive.chat(chat).ok().flatten() {
+            rows.push(("Chat".to_owned(), known.name));
+        }
+        match media.path.as_ref().filter(|path| path.is_file()) {
+            Some(path) => {
+                rows.push(("File".to_owned(), path.display().to_string()));
+                if let Ok(metadata) = path.metadata() {
+                    rows.push(("On disk".to_owned(), crate::util::bytes(metadata.len())));
+                }
+                if let Ok(hash) = sha256_of(path) {
+                    rows.push(("SHA-256".to_owned(), hash));
+                }
+            }
+            None => rows.push(("File".to_owned(), "Not downloaded yet".to_owned())),
+        }
+        Ok(crate::model::FileInfo {
+            title: name,
+            rows,
+            note: kind.runs_code().then(|| {
+                "This is a program. Save it and check where it came from before running it."
+                    .to_owned()
+            }),
+        })
+    }
+
     fn emit_stickers(&mut self) {
-        let mut seen = HashSet::new();
+        let saved = self.saved_stickers();
+        let favorites = self.archive.sticker_favorites().unwrap_or_default();
+        // The same picture under two headings reads like a bug: a sticker that
+        // is saved or marked as a favourite is not offered again as a recent.
+        let mut seen: HashSet<String> = saved
+            .iter()
+            .chain(favorites.iter())
+            .filter_map(|path| sticker_id(path))
+            .collect();
         let mut list: Vec<(i64, PathBuf)> = Vec::new();
         if let Ok(phone) = self.archive.phone_stickers() {
             for sticker in phone {
@@ -3769,9 +3875,8 @@ impl Worker {
             Err(error) => log::warn!("could not list stickers: {error}"),
         }
         list.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
-        let favorites = self.archive.sticker_favorites().unwrap_or_default();
         self.emit(Event::Stickers {
-            saved: self.saved_stickers(),
+            saved,
             packs: self.sticker_packs(),
             recent: list.into_iter().map(|(_, path)| path).collect(),
             favorites,
@@ -4735,6 +4840,41 @@ fn thumbnail_of(base: &wa::Message) -> Option<Vec<u8>> {
 }
 
 /// Converts a protocol message to visible content, or `None` for internal traffic.
+/// Turns a view-once payload into the note shown in its place.
+/// Streams a file through SHA-256 without holding all of it in memory.
+fn sha256_of(path: &Path) -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn view_once_of(base: &wa::Message, content: Content) -> Content {
+    let what = match &content {
+        Content::Video { .. } => "video",
+        Content::Image { .. } => "photo",
+        Content::Audio { .. } => "voice message",
+        _ if base.video_message.is_set() => "video",
+        _ if base.image_message.is_set() => "photo",
+        _ => "message",
+    };
+    Content::ViewOnce {
+        what: what.to_owned(),
+    }
+}
+
 fn classify(base: &wa::Message) -> Option<Content> {
     if let Some(text) = base.text_content() {
         let preview = base.extended_text_message.as_option().and_then(|extended| {

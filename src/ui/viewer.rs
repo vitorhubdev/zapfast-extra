@@ -269,8 +269,6 @@ fn chrome(
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "PDF".to_owned())
-    } else if kind == ViewerKind::Sticker {
-        "Sticker".to_owned()
     } else {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())

@@ -63,9 +63,10 @@ without embedding a browser engine.
   recover previously lost mute settings and pin order, without relinking.
 - **Voice messages.** Play, seek, record, reply with, and send voice messages
   in the chat. The app normalizes quiet recordings and handles OGG/Opus
-  without external tools. A chip on every audio bubble walks through 1x, 1.5x
-  and 2x, and Settings offers the same. When a clip ends, the next one in the
-  chat plays on its own unless you turn that off (Settings, Audio).
+  without external tools. A chip on every audio bubble walks that clip through
+  1x, 1.5x and 2x, taking effect at once and from where the clip already is,
+  and the choice stays with that clip. When one ends, the next clip in the chat
+  plays on its own unless you turn that off (Settings, Audio).
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
   You can swap these keys in Settings. The composer is focused when you open
   or return to a conversation; invoking search keeps focus in search, and
@@ -88,14 +89,21 @@ without embedding a browser engine.
 - **View attachments.** ZapExt downloads files up to 64 MB automatically or
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos and other documents open
-  in their default desktop apps, and a PDF opens in the app's own viewer page
-  by page. Profile pictures and downloaded images support
-  Windows drive paths and filenames with spaces or non-ASCII characters.
-  Clicking a picture or sticker opens a full-window viewer: scroll to zoom,
-  drag to move, the arrow keys walk the chat's pictures, 0 or F fits it again,
-  and Esc closes. It can save a copy or hand the file to the desktop.
-  If an attachment has expired, ZapExt asks your
-  phone to upload it again.
+  in their default desktop apps, and a PDF opens in the viewer built into this
+  app, page by page. Files say what they are: an image sent as a file opens in
+  the viewer, a document shows its kind beside the size, and a program carries
+  a warning with Save a copy in place of opening it. Every attachment menu has
+  **Show info**, with the MIME type, size, pixels or length, the path on disk
+  and the SHA-256 hash of the file. View-once photos and videos are labelled
+  and left for your phone, and a download in progress shows a moving bar.
+  Profile pictures and downloaded images support Windows drive paths and
+  filenames with spaces or non-ASCII characters.
+  Clicking a picture opens a full-window viewer: scroll to zoom, drag to move,
+  the arrow keys walk the pictures of the chat, 0 or F fits it again, and Esc
+  closes. It can save a copy or hand the file to the desktop. A sticker opens
+  bigger in a small dialog instead, with a Save button, and stays out of the
+  order walked by the viewer.
+  If an attachment has expired, ZapExt asks your phone to upload it again.
 - **Polls.** Use the checklist button beside the paperclip to create a poll with
   2–12 answers. Turn off **Allow multiple answers** for a single-choice poll.
   Click an answer in a poll to vote; click a selected answer again to remove
@@ -117,6 +125,9 @@ without embedding a browser engine.
   sticking on an error, and a page fills in a few tiles at a time instead of
   asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
+  A sticker that is saved or marked as a favourite is not offered again under
+  the phone's recents, and clicking one shows it bigger with a Save button
+  instead of the full viewer.
 - **Sticker packs.** Import a pack from a `signal.art` link or `.wastickers`
   file. Animated packs remain animated. Packs are stored as WebP files on your
   computer.
@@ -171,6 +182,8 @@ without embedding a browser engine.
 
 - Play ordinary videos in the app (they open in your player), or reply to
   a message with an attachment.
+- Open a view-once photo or video here: they are marked and left for your
+  phone, which is the only device WhatsApp hands them to.
 - Calls, status posts, communities, newsletters, and group administration.
 
 ## Installing

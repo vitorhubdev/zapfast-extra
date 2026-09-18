@@ -70,6 +70,31 @@ struct SpooledClip {
 
 type Decoded = Arc<Mutex<Option<Result<DecodedClip, String>>>>;
 
+/// Playback speeds the audio button walks through, slowest first.
+pub const SPEEDS: [f32; 3] = [1.0, 1.5, 2.0];
+
+/// Snaps any number to a supported playback speed.
+pub fn snap_speed(speed: f32) -> f32 {
+    if !speed.is_finite() {
+        return 1.0;
+    }
+    SPEEDS
+        .iter()
+        .copied()
+        .min_by(|a, b| (a - speed).abs().total_cmp(&(b - speed).abs()))
+        .unwrap_or(1.0)
+}
+
+/// The next playback speed, wrapping around at the fastest one.
+pub fn next_speed(speed: f32) -> f32 {
+    let snapped = snap_speed(speed);
+    let index = SPEEDS
+        .iter()
+        .position(|value| (*value - snapped).abs() < f32::EPSILON)
+        .unwrap_or(0);
+    SPEEDS[(index + 1) % SPEEDS.len()]
+}
+
 /// Plays one clip at a time through the default output device.
 pub struct Player {
     waker: Waker,
@@ -78,8 +103,8 @@ pub struct Player {
     decoding: Option<Decoding>,
     /// Generated waveforms for clips that did not include one.
     bars: HashMap<String, Vec<u8>>,
-    /// Playback speed applied to every clip.
-    speed: f32,
+    /// Playback speed chosen for one clip, by message id.
+    speeds: HashMap<String, f32>,
     /// The message that finished playing, reported once for autoplay.
     finished: Option<String>,
 }
@@ -227,20 +252,31 @@ impl Player {
             loaded: None,
             decoding: None,
             bars: HashMap::new(),
-            speed: 1.0,
+            speeds: HashMap::new(),
             finished: None,
         }
     }
 
-    /// Sets the playback speed of this clip and the ones after it.
+    /// Sets the speed of one clip and applies it right away.
     ///
     /// Rodio speeds a clip up by resampling, so the voice rises in pitch the
-    /// same way WhatsApp's own faster playback does.
-    pub fn set_speed(&mut self, speed: f32) {
-        self.speed = speed.clamp(0.5, 3.0);
-        if let Some((_, sink)) = &self.output {
-            sink.set_speed(self.speed);
+    /// same way WhatsApp's own faster playback does. The change reaches the
+    /// clip that is playing at the moment it is made, from where it is.
+    pub fn set_speed(&mut self, message: &str, speed: f32) {
+        let speed = snap_speed(speed);
+        self.speeds.insert(message.to_owned(), speed);
+        let playing = self
+            .loaded
+            .as_ref()
+            .is_some_and(|loaded| loaded.message == message);
+        if playing && let Some((_, sink)) = &self.output {
+            sink.set_speed(speed);
         }
+    }
+
+    /// The speed chosen for one clip, 1x until the reader says otherwise.
+    pub fn speed_of(&self, message: &str) -> f32 {
+        self.speeds.get(message).copied().unwrap_or(1.0)
     }
 
     /// The message that just reached its end, reported once.
@@ -521,7 +557,13 @@ impl Player {
         }
         let (_, sink) = self.output.as_ref().expect("just opened");
         sink.clear();
-        sink.set_speed(self.speed);
+        // Every clip keeps the speed the reader chose for it.
+        let speed = self
+            .loaded
+            .as_ref()
+            .map(|loaded| self.speed_of(&loaded.message))
+            .unwrap_or(1.0);
+        sink.set_speed(speed);
         // Seeking never copies the tail anymore: memory clips play from the
         // shared samples at an offset, file clips stream from their spool.
         let base = match start {
@@ -1015,6 +1057,28 @@ pub fn recording_path(dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_speed_cycle_walks_one_and_a_half_and_two() {
+        assert_eq!(snap_speed(1.4), 1.5);
+        assert_eq!(snap_speed(0.1), 1.0);
+        assert_eq!(snap_speed(f32::NAN), 1.0);
+        assert_eq!(snap_speed(-3.0), 1.0);
+        assert_eq!(next_speed(1.0), 1.5);
+        assert_eq!(next_speed(1.5), 2.0);
+        assert_eq!(next_speed(2.0), 1.0);
+        // A strange number snaps to a supported speed first.
+        assert_eq!(next_speed(1.9), 1.0);
+    }
+
+    #[test]
+    fn a_speed_stays_with_the_clip_it_was_set_on() {
+        let mut player = Player::new(crate::backend::Waker::default());
+        assert_eq!(player.speed_of("a"), 1.0);
+        player.set_speed("a", 2.0);
+        assert_eq!(player.speed_of("a"), 2.0);
+        assert_eq!(player.speed_of("b"), 1.0);
+    }
 
     /// A video file gives up its soundtrack once its metadata leads.
     ///

@@ -370,7 +370,7 @@ impl App {
                 _ => Palette::dark(),
             });
         let open_chat = settings.last_chat.clone();
-        let mut app = Self {
+        Self {
             dirs,
             settings,
             settings_dirty: false,
@@ -490,11 +490,7 @@ impl App {
             control_commands: None,
             notification_opens: Default::default(),
             notifications: Default::default(),
-        };
-        // The stored playback speed is already in force for the first clip.
-        app.player
-            .set_speed(crate::settings::snap_audio_speed(app.settings.audio_speed));
-        app
+        }
     }
 
     /// Updates the linked app while no window exists.
@@ -1113,6 +1109,22 @@ impl App {
                         }
                     }
                 }
+                Event::FileInfo {
+                    chat,
+                    message,
+                    result,
+                } => {
+                    // The dialog belongs to the message it was asked about.
+                    if self.open_chat.as_deref() == Some(chat.as_str()) {
+                        match result {
+                            Ok(info) => self.dialog = Some(Dialog::FileInfo(Box::new(info))),
+                            Err(error) => {
+                                self.toast_error(format!("Could not read the details: {error}"));
+                            }
+                        }
+                    }
+                    let _ = message;
+                }
                 Event::PdfPage {
                     path,
                     page,
@@ -1566,7 +1578,7 @@ impl App {
         }
     }
 
-    /// The chat's pictures, stickers and PDFs that are on disk, oldest first.
+    /// The chat's pictures and PDFs that are on disk, oldest first.
     ///
     /// The viewer walks this list, so it only holds files it can actually
     /// show and keeps the message each one came from.
@@ -1580,7 +1592,10 @@ impl App {
             .filter_map(|message| {
                 let (media, kind) = match &message.content {
                     Content::Image { media, .. } => (media, ViewerKind::Picture),
-                    Content::Sticker { media, .. } => (media, ViewerKind::Sticker),
+                    // A picture sent as a file is still a picture.
+                    Content::Document { media, .. } if media.mime.starts_with("image/") => {
+                        (media, ViewerKind::Picture)
+                    }
                     Content::Document { media, .. } if media.mime == "application/pdf" => {
                         (media, ViewerKind::Pdf)
                     }
@@ -2254,11 +2269,10 @@ impl App {
                 self.refocus_composer(ctx);
             }
             Action::SaveCopy(path) => self.backend.send(Command::SaveCopy { from: path }),
-            Action::CycleAudioSpeed => {
-                let speed = crate::settings::next_audio_speed(self.settings.audio_speed);
-                self.settings.audio_speed = speed;
-                self.mark_settings_dirty();
-                self.player.set_speed(speed);
+            Action::CycleAudioSpeed(message) => {
+                let speed = crate::audio::next_speed(self.player.speed_of(&message));
+                self.player.set_speed(&message, speed);
+                self.waker.wake();
             }
             Action::OpenUrl(url) => ctx.open_url(egui::OpenUrl::new_tab(url)),
             Action::CopyText(text) => {
@@ -2514,6 +2528,12 @@ impl App {
             }
             Action::FavoriteSticker(path) => {
                 self.backend.send(Command::FavoriteSticker { path });
+            }
+            Action::PeekSticker(path) => {
+                self.dialog = Some(Dialog::PeekSticker { path });
+            }
+            Action::ShowFileInfo { chat, message } => {
+                self.backend.send(Command::FileInfo { chat, message });
             }
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
@@ -3272,6 +3292,21 @@ mod tests {
             media: media(second.clone()),
             animated: false,
         };
+        // An image that arrived as a document still opens in the viewer.
+        let mut sent_png = message(chat, "png-doc", 25);
+        sent_png.content = Content::Document {
+            media: Media {
+                mime: "image/png".to_owned(),
+                size: 3,
+                width: None,
+                height: None,
+                path: Some(second.clone()),
+                state: MediaState::Idle,
+            },
+            file_name: "shot.png".to_owned(),
+            caption: None,
+            pages: Some(0),
+        };
         let mut broken = message(chat, "third", 30);
         broken.content = Content::Image {
             caption: None,
@@ -3282,7 +3317,7 @@ mod tests {
             Conversation {
                 requested: true,
                 complete: true,
-                messages: vec![photo, sticker, broken],
+                messages: vec![photo, sticker, sent_png, broken],
                 ..Default::default()
             },
         );
@@ -3295,10 +3330,13 @@ mod tests {
             &ctx,
         );
         let viewer = app.viewer.as_ref().expect("the viewer opens");
-        assert_eq!(viewer.items.len(), 2, "a file that is gone is not offered");
+        assert_eq!(
+            viewer.items.len(),
+            2,
+            "a sticker stays out of the viewer and a file that is gone is not offered"
+        );
         assert_eq!(viewer.index, 0);
         assert_eq!(viewer.items[0].kind, ViewerKind::Picture);
-        assert_eq!(viewer.items[1].kind, ViewerKind::Sticker);
 
         // Walking stops at either end and a new picture starts fitted.
         app.apply(Action::ViewerStep(-1), &ctx);
@@ -3946,11 +3984,14 @@ mod tests {
     fn the_speed_button_walks_the_supported_speeds() {
         let mut app = app();
         let ctx = egui::Context::default();
-        assert_eq!(app.settings.audio_speed, 1.0);
+        let message = "voice-1".to_owned();
+        assert_eq!(app.player.speed_of(&message), 1.0);
         for expected in [1.5, 2.0, 1.0] {
-            app.apply(Action::CycleAudioSpeed, &ctx);
-            assert_eq!(app.settings.audio_speed, expected);
+            app.apply(Action::CycleAudioSpeed(message.clone()), &ctx);
+            assert_eq!(app.player.speed_of(&message), expected);
         }
+        // Another clip keeps its own speed.
+        assert_eq!(app.player.speed_of("voice-2"), 1.0);
     }
 
     #[test]

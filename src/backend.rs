@@ -293,6 +293,11 @@ pub enum Command {
         page: usize,
         width: u32,
     },
+    /// Collects the details of one attachment for the info dialog.
+    FileInfo {
+        chat: ChatId,
+        message: String,
+    },
     /// Manual update check from the About dialog. Unlike the daily check it
     /// always reports back, so the button never spins forever.
     CheckUpdatesNow,
@@ -503,6 +508,12 @@ pub enum Event {
         page: usize,
         width: u32,
         result: Result<crate::pdf::Page, String>,
+    },
+    /// Details of one attachment, or why they could not be collected.
+    FileInfo {
+        chat: ChatId,
+        message: String,
+        result: Result<crate::model::FileInfo, String>,
     },
     Media {
         chat: ChatId,

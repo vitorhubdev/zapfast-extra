@@ -62,9 +62,6 @@ pub struct Settings {
     pub show_shortcut_hints: bool,
     /// Recently used emoji, newest first.
     pub recent_emoji: Vec<String>,
-    /// Playback speed for voice messages and audio.
-    #[serde(default = "default_audio_speed")]
-    pub audio_speed: f32,
     /// Start the next voice message in a chat when one finishes.
     #[serde(default = "default_true")]
     pub play_next_audio: bool,
@@ -102,7 +99,6 @@ impl Default for Settings {
             last_chat: None,
             show_shortcut_hints: true,
             recent_emoji: Vec::new(),
-            audio_speed: default_audio_speed(),
             play_next_audio: true,
             keep_running_in_background: true,
             notifications: true,
@@ -115,39 +111,9 @@ impl Default for Settings {
     }
 }
 
-/// Playback speeds the audio button walks through, slowest first.
-pub const AUDIO_SPEEDS: [f32; 3] = [1.0, 1.5, 2.0];
-
 /// Whether a preference that defaults to on is missing from the file.
 fn default_true() -> bool {
     true
-}
-
-/// Playback speed a fresh installation uses.
-pub fn default_audio_speed() -> f32 {
-    1.0
-}
-
-/// Snaps any stored number to a supported playback speed.
-pub fn snap_audio_speed(speed: f32) -> f32 {
-    if !speed.is_finite() {
-        return default_audio_speed();
-    }
-    AUDIO_SPEEDS
-        .iter()
-        .copied()
-        .min_by(|a, b| (a - speed).abs().total_cmp(&(b - speed).abs()))
-        .unwrap_or_else(default_audio_speed)
-}
-
-/// The next playback speed, wrapping around at the fastest one.
-pub fn next_audio_speed(speed: f32) -> f32 {
-    let snapped = snap_audio_speed(speed);
-    let index = AUDIO_SPEEDS
-        .iter()
-        .position(|value| (*value - snapped).abs() < f32::EPSILON)
-        .unwrap_or(0);
-    AUDIO_SPEEDS[(index + 1) % AUDIO_SPEEDS.len()]
 }
 
 impl Settings {
@@ -253,18 +219,5 @@ mod tests {
         settings.save(&path).expect("saves");
         assert_eq!(Settings::load(&path), settings);
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn audio_speed_walks_a_fixed_cycle() {
-        assert_eq!(snap_audio_speed(1.4), 1.5);
-        assert_eq!(snap_audio_speed(0.1), 1.0);
-        assert_eq!(snap_audio_speed(f32::NAN), 1.0);
-        assert_eq!(snap_audio_speed(-3.0), 1.0);
-        assert_eq!(next_audio_speed(1.0), 1.5);
-        assert_eq!(next_audio_speed(1.5), 2.0);
-        assert_eq!(next_audio_speed(2.0), 1.0);
-        // A file with an odd number snaps to a supported speed first.
-        assert_eq!(next_audio_speed(1.9), 1.0);
     }
 }

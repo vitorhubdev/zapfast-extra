@@ -1392,8 +1392,6 @@ struct View<'a> {
     avatars: &'a HashMap<String, Option<PathBuf>>,
     now: i64,
     player: &'a crate::audio::Player,
-    /// Playback speed for voice messages and audio.
-    audio_speed: f32,
     copy_rows: &'a std::sync::Mutex<Vec<crate::transcript::Row>>,
     /// Multi-select mode: row taps toggle instead of opening.
     selecting: bool,
@@ -1440,7 +1438,6 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         avatars: &avatars,
         now: crate::util::now(),
         player: &app.player,
-        audio_speed: app.settings.audio_speed,
         copy_rows: app.copy_rows.as_ref(),
         selecting: !app.selected.is_empty(),
         selected: app.selected.clone(),
@@ -2594,10 +2591,26 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
         actions.push(Action::SaveSticker(path.clone()));
     }
     if let Some(media) = message.content.media() {
+        let name = match &message.content {
+            Content::Document { file_name, .. } => file_name.clone(),
+            other => other.summary(),
+        };
+        let kind = crate::model::FileKind::of(&media.mime, &name);
         match &media.path {
             Some(path) => {
-                if widgets::menu_item(ui, &palette, Some(Icon::ExternalLink), "Open file") {
+                // A program is saved first: running it can harm this computer.
+                if kind.runs_code() {
+                    widgets::menu_note(
+                        ui,
+                        Icon::CircleAlert,
+                        "A program: save it and check where it came from",
+                        palette.danger,
+                    );
+                } else if widgets::menu_item(ui, &palette, Some(Icon::ExternalLink), "Open file") {
                     actions.push(Action::OpenFile(path.clone()));
+                }
+                if widgets::menu_item(ui, &palette, Some(Icon::Download), "Save a copy…") {
+                    actions.push(Action::SaveCopy(path.clone()));
                 }
                 if let Some(folder) = path.parent()
                     && widgets::menu_item(ui, &palette, Some(Icon::FileText), "Show in folder")
@@ -2614,46 +2627,39 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
                 }
             }
         }
+        if widgets::menu_item(ui, &palette, Some(Icon::Info), "Show info") {
+            actions.push(Action::ShowFileInfo {
+                chat: chat.clone(),
+                message: message.id.clone(),
+            });
+        }
     }
     widgets::menu_separator(ui, &palette);
-    // Show sent, delivered, and read times as available.
-    if widgets::menu_item(
-        ui,
-        &palette,
-        Some(Icon::Check),
-        &format!("Sent {}", crate::util::moment_stamp(message.timestamp)),
-    ) {
-        actions.push(Action::CopyText(message.id.clone()));
-    }
+    // One line for the message timeline instead of a row per step.
+    let mut timeline = vec![format!(
+        "Sent {}",
+        crate::util::moment_stamp(message.timestamp)
+    )];
     if message.from_me {
         if message.delivered_at.is_some() || message.status == Delivery::Delivered {
-            let _ = widgets::menu_item(
-                ui,
-                &palette,
-                Some(Icon::CheckCheck),
-                &match message.delivered_at {
-                    Some(when) => format!("Delivered {}", crate::util::moment_stamp(when)),
-                    None => "Delivered".to_owned(),
-                },
-            );
+            timeline.push(match message.delivered_at {
+                Some(when) => format!("delivered {}", crate::util::moment_stamp(when)),
+                None => "delivered".to_owned(),
+            });
         }
         if matches!(message.status, Delivery::Read | Delivery::Played) {
             let what = if message.status == Delivery::Played {
-                "Played"
+                "played"
             } else {
-                "Read"
+                "read"
             };
-            let _ = widgets::menu_item(
-                ui,
-                &palette,
-                Some(Icon::CheckCheck),
-                &match message.read_at {
-                    Some(when) => format!("{what} {}", crate::util::moment_stamp(when)),
-                    None => what.to_owned(),
-                },
-            );
+            timeline.push(match message.read_at {
+                Some(when) => format!("{what} {}", crate::util::moment_stamp(when)),
+                None => what.to_owned(),
+            });
         }
     }
+    widgets::menu_note(ui, Icon::Check, &timeline.join(" · "), palette.dim);
 }
 
 fn mentions_of(view: &View<'_>, message: &Message) -> Vec<markup::Mention> {
@@ -2770,18 +2776,23 @@ fn content(
             voice_player(ui, view, message, media, *seconds, waveform, width, actions);
             None
         }
+        Content::ViewOnce { what } => {
+            view_once_note(ui, view, what, width);
+            None
+        }
         Content::Document {
             media,
             file_name,
             caption,
             pages,
         } => {
-            let mut detail = Vec::new();
-            if let Some(pages) = pages {
-                detail.push(format!(
-                    "{pages} page{}",
-                    if *pages == 1 { "" } else { "s" }
-                ));
+            let kind = crate::model::FileKind::of(&media.mime, file_name);
+            let mut detail = vec![kind.label().to_owned()];
+            // A missing page count means the sender never said, not zero.
+            if let Some(pages) = *pages
+                && pages > 0
+            {
+                detail.push(format!("{pages} page{}", if pages == 1 { "" } else { "s" }));
             }
             detail.push(crate::util::bytes(media.size));
             attachment(
@@ -2789,12 +2800,24 @@ fn content(
                 view,
                 message,
                 media,
-                Icon::FileText,
+                if kind.is_image() {
+                    Icon::Image
+                } else {
+                    Icon::FileText
+                },
                 file_name,
                 &detail.join(" · "),
                 width,
                 actions,
             );
+            if kind.runs_code() {
+                theme::paragraph(
+                    ui,
+                    "Save it first: running a program from a chat can harm this computer.",
+                    theme::regular(11.5),
+                    palette.danger,
+                );
+            }
             caption.as_ref().and_then(|caption| {
                 rich_body(
                     ui,
@@ -3323,9 +3346,14 @@ fn picture(
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .clicked()
             {
-                actions.push(Action::OpenViewer {
-                    chat: message.chat.clone(),
-                    message: message.id.clone(),
+                actions.push(if sticker == Some(true) {
+                    // A sticker gets a quick look, not the full viewer.
+                    Action::PeekSticker(path.clone())
+                } else {
+                    Action::OpenViewer {
+                        chat: message.chat.clone(),
+                        message: message.id.clone(),
+                    }
                 });
             }
             return size.x;
@@ -3349,9 +3377,13 @@ fn picture(
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked()
                 {
-                    actions.push(Action::OpenViewer {
-                        chat: message.chat.clone(),
-                        message: message.id.clone(),
+                    actions.push(if sticker.is_some() {
+                        Action::PeekSticker(path.clone())
+                    } else {
+                        Action::OpenViewer {
+                            chat: message.chat.clone(),
+                            message: message.id.clone(),
+                        }
                     });
                 }
                 size.x
@@ -3602,6 +3634,14 @@ fn video(
             ui.painter()
                 .galley(chip.min + vec2(6.0, 3.0), galley, Color32::WHITE);
         }
+        // A quiet bar while a video is on its way in.
+        if media.path.is_none() && matches!(media.state, MediaState::Downloading) {
+            let bar = Rect::from_min_size(
+                pos2(rect.left() + 8.0, rect.bottom() - 10.0),
+                vec2(rect.width() - 16.0, 4.0),
+            );
+            theme::paint_download_bar(ui, bar, &palette);
+        }
     }
     let auto = ui.is_rect_visible(rect)
         && media.path.is_none()
@@ -3629,6 +3669,54 @@ fn video(
         }
     }
     size.x
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Friendlier words for the reasons a download can fail.
+fn download_error(error: &str) -> String {
+    if error.contains("Missing direct_path") || error.contains("No longer available") {
+        "This file is not available to linked devices".to_owned()
+    } else if error.contains("keys are missing") {
+        "The keys for this file are missing".to_owned()
+    } else {
+        error.to_owned()
+    }
+}
+
+/// A one-shot photo or video that only the phone can open.
+fn view_once_note(ui: &mut egui::Ui, view: &View<'_>, what: &str, width: f32) {
+    let palette = view.palette;
+    Frame::new()
+        .fill(palette.window.gamma_multiply(0.35))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width((width - 20.0).max(120.0));
+            ui.horizontal(|ui| {
+                let (disc, _) = ui.allocate_exact_size(Vec2::splat(36.0), Sense::hover());
+                ui.painter().circle_filled(
+                    disc.center(),
+                    18.0,
+                    palette.accent.gamma_multiply(0.25),
+                );
+                theme::paint_icon(ui, Icon::Eye, disc, 18.0, palette.accent);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    theme::text(
+                        ui,
+                        format!("View once {what}"),
+                        theme::medium(13.5),
+                        palette.text,
+                    );
+                    theme::text(
+                        ui,
+                        "Open it on your phone",
+                        theme::regular(11.5),
+                        palette.secondary,
+                    );
+                });
+            });
+        });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3680,7 +3768,9 @@ fn attachment(
                     ui.set_width(card - 70.0);
                     widgets::rich_text(ui, title, theme::medium(14.0), palette.text);
                     let detail = match &media.state {
-                        MediaState::Failed(error) => format!("{error}. Click to retry."),
+                        MediaState::Failed(error) => {
+                            format!("{}. Click to retry.", download_error(error))
+                        }
                         _ => detail.to_owned(),
                     };
                     theme::text(ui, detail, theme::regular(12.0), palette.secondary);
@@ -3696,6 +3786,13 @@ fn attachment(
                     action(ui);
                 },
             );
+            // A quiet bar while the bytes are on their way: the worker does
+            // not report a position, so this shows movement, not a percentage.
+            if media.path.is_none() && matches!(media.state, MediaState::Downloading) {
+                ui.add_space(8.0);
+                let (bar, _) = ui.allocate_exact_size(vec2(card, 4.0), Sense::hover());
+                theme::paint_download_bar(ui, bar, &palette);
+            }
         })
         .response;
     let auto = ui.is_rect_visible(response.rect)
@@ -3894,10 +3991,13 @@ fn voice_player(
                         .unwrap_or_else(|| crate::util::bytes(media.size)),
                 };
                 let text = match &media.state {
-                    MediaState::Failed(error) => format!("{error}. Click to retry."),
+                    MediaState::Failed(error) => {
+                        format!("{}. Click to retry.", download_error(error))
+                    }
                     _ => shown,
                 };
-                let speed = crate::settings::snap_audio_speed(view.audio_speed);
+                // The chip belongs to this bubble: the speed is per message.
+                let speed = crate::audio::snap_speed(view.player.speed_of(&message.id));
                 let label = if speed.fract() == 0.0 {
                     format!("{}x", speed as i32)
                 } else {
@@ -3915,7 +4015,7 @@ fn voice_player(
                                 .on_hover_text("Playback speed")
                                 .clicked()
                             {
-                                actions.push(Action::CycleAudioSpeed);
+                                actions.push(Action::CycleAudioSpeed(message.id.clone()));
                             }
                         });
                     },
