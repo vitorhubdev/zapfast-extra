@@ -916,6 +916,15 @@ impl Archive {
         )?;
         Ok(())
     }
+    /// Stores a generated video poster, keeping the phone's own thumbnail
+    /// when one arrived with the message.
+    pub fn set_thumbnail(&self, chat: &str, id: &str, thumbnail: &[u8]) -> Result<()> {
+        self.connection.execute(
+            "UPDATE messages SET thumbnail = COALESCE(thumbnail, ?3) WHERE chat = ?1 AND id = ?2",
+            params![chat, id, thumbnail],
+        )?;
+        Ok(())
+    }
 
     /// Every phone-sticker file the picker may still list.
     ///

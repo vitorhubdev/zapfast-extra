@@ -85,6 +85,70 @@ struct Frame {
     pts: Duration,
     image: ColorImage,
 }
+/// The first frame of a video as small RGBA bytes, for posters.
+///
+/// Videos that arrive without the phone's thumbnail get this instead, so the
+/// bubble and the viewer never show a bare file row for bytes on disk.
+pub fn preview(path: &Path) -> Option<Vec<u8>> {
+    let image = first_frame(path, 320)?;
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Jpeg,
+        )
+        .ok()?;
+    Some(bytes)
+}
+/// Decodes until the first picture comes out, scaled to a width.
+fn first_frame(path: &Path, width: u32) -> Option<image::RgbaImage> {
+    let file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut mp4 = mp4::Mp4Reader::read_header(BufReader::new(file), size).ok()?;
+    let track = mp4
+        .tracks()
+        .values()
+        .find(|track| track.track_type().ok() == Some(mp4::TrackType::Video))?;
+    let (track_id, count) = (track.track_id(), track.sample_count());
+    let sps = track.sequence_parameter_set().ok()?.to_vec();
+    let pps = track.picture_parameter_set().ok()?.to_vec();
+    let mut decoder = openh264::decoder::Decoder::new().ok()?;
+    let mut parameters = Vec::new();
+    push_annex_b(&mut parameters, &sps);
+    push_annex_b(&mut parameters, &pps);
+    let _ = decoder.decode(&parameters);
+    for sample_id in 1..=count {
+        let sample = mp4.read_sample(track_id, sample_id).ok()??;
+        let mut annex_b = Vec::with_capacity(sample.bytes.len() + 16);
+        avcc_to_annex_b(&mut annex_b, &sample.bytes);
+        if let Some(yuv) = decoder.decode(&annex_b).ok().flatten() {
+            use openh264::formats::YUVSource;
+            let (w, h) = yuv.dimensions();
+            if w == 0 || h == 0 {
+                continue;
+            }
+            let mut rgba = vec![0u8; w * h * 4];
+            yuv.write_rgba8(&mut rgba);
+            let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+            let out_width = (w as u32).min(width).max(2);
+            let out_height = ((h as u64 * u64::from(out_width) / w as u64) as u32).max(2);
+            return Some(if out_width == w as u32 {
+                image
+            } else {
+                image::imageops::resize(
+                    &image,
+                    out_width,
+                    out_height,
+                    image::imageops::FilterType::Triangle,
+                )
+            });
+        }
+        if sample_id > 120 {
+            break;
+        }
+    }
+    None
+}
 
 struct Active {
     path: PathBuf,
@@ -97,6 +161,8 @@ struct Active {
     /// counts from there.
     base: Duration,
     started: Instant,
+    /// A jump is still catching up: the keyframe still shows until live frames arrive.
+    seeking: bool,
     frames: Receiver<Frame>,
     buffered: VecDeque<Frame>,
     shown: Duration,
@@ -107,12 +173,23 @@ struct Active {
 }
 
 /// Plays the video open in the viewer. Only one plays at a time.
-#[derive(Default)]
 pub struct Player {
     active: Option<Active>,
     /// The file the viewer already refused, and why. The view reads this so
     /// opening an unplayable file complains once instead of every frame.
     refused: Option<(PathBuf, String)>,
+    volume: f32,
+    muted: bool,
+}
+impl Default for Player {
+    fn default() -> Self {
+        Self {
+            active: None,
+            refused: None,
+            volume: 1.0,
+            muted: false,
+        }
+    }
 }
 
 /// What the viewer paints for the open video.
@@ -127,6 +204,8 @@ pub enum State {
         total: Duration,
         playing: bool,
         finished: bool,
+        /// A jump is catching up: the keyframe still shows, not a scan.
+        seeking: bool,
     },
     /// The file cannot play in-process; the viewer offers the system player.
     Unsupported(String),
@@ -192,7 +271,17 @@ impl Player {
             }
         };
         let at = at.min(clip.duration);
-        let audio = audio_at(path, at);
+        // The soundtrack seeks instantly while the picture catches up, so a
+        // file that cannot seek restarts from the beginning instead of
+        // drifting apart.
+        let (audio, at) = match audio_at(path, at) {
+            Audio::Sound(audio) => (Some(audio), at),
+            Audio::Silent => (None, at),
+            Audio::Restart => (audio_at(path, Duration::ZERO).ok(), Duration::ZERO),
+        };
+        // A jump opens on its keyframe still and resumes at the target once
+        // live frames arrive; opening at zero plays straight away.
+        let seeking = !at.is_zero();
         let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
         let generation = Arc::new(AtomicU64::new(1));
         spawn_decode(
@@ -203,6 +292,7 @@ impl Player {
             tx,
         );
         if let Some((_, sink)) = &audio {
+            sink.set_volume(if self.muted { 0.0 } else { self.volume });
             sink.play();
         }
         self.active = Some(Active {
@@ -218,6 +308,7 @@ impl Player {
             texture: None,
             generation,
             decode_done: false,
+            seeking,
             finished: false,
         });
         Ok(())
@@ -245,6 +336,22 @@ impl Player {
             .filter(|(known, _)| known == path)
             .map(|(_, why)| why.clone())
     }
+    /// Remembers the output level for the next file and applies it to the
+    /// one playing now. The view calls this every frame, so playback
+    /// follows the slider without reopening anything.
+    pub fn set_output(&mut self, volume: f32, muted: bool) {
+        let volume = volume.clamp(0.0, 1.0);
+        if self.volume == volume && self.muted == muted {
+            return;
+        }
+        self.volume = volume;
+        self.muted = muted;
+        if let Some(active) = self.active.as_mut()
+            && let Some((_, sink)) = &active.audio
+        {
+            sink.set_volume(if muted { 0.0 } else { volume });
+        }
+    }
 
     /// Pumps decoded frames and answers what the viewer should paint.
     pub fn poll(&mut self, ctx: &egui::Context, path: &Path) -> State {
@@ -270,9 +377,12 @@ impl Player {
             }
         }
         let position = active.position();
-        // Drop what is well behind, but keep the frame on screen.
-        while active.buffered.len() > 1 && active.buffered[1].pts + KEEP_BEHIND < position {
-            active.buffered.pop_front();
+        // Drop what is well behind, but keep the frame on screen. While a jump
+        // catches up every frame stays, keyframe still included.
+        if !active.seeking {
+            while active.buffered.len() > 1 && active.buffered[1].pts + KEEP_BEHIND < position {
+                active.buffered.pop_front();
+            }
         }
         let total = active.clip.duration;
         if position >= total {
@@ -283,69 +393,107 @@ impl Player {
                 sink.pause();
             }
         }
-        let pts = active
-            .buffered
-            .iter()
-            .rev()
-            .find(|frame| frame.pts <= position)
-            .or(active.buffered.front())
-            .map(|frame| frame.pts);
-        match pts {
-            Some(pts) => {
-                // The texture name carries the timestamp, so every upload is a
-                // new texture and dropping the old handle frees it.
-                let texture = match active.texture.clone() {
-                    Some((texture, size, shown)) if shown == pts => Some((texture, size)),
-                    _ => active
-                        .buffered
-                        .iter()
-                        .find(|frame| frame.pts == pts)
-                        .map(|frame| {
-                            let texture = ctx.load_texture(
-                                format!("video-{}-{}", path.display(), pts.as_millis()),
-                                frame.image.clone(),
-                                TextureOptions::LINEAR,
-                            );
-                            let size =
-                                Vec2::new(frame.image.width() as f32, frame.image.height() as f32);
-                            active.shown = pts;
-                            active.texture = Some((texture.clone(), size, pts));
-                            (texture, size)
-                        }),
-                };
-                match texture {
-                    Some((texture, size)) => {
-                        if active.playing {
-                            ctx.request_repaint_after(next_repaint(active, position));
-                        }
-                        State::Showing {
-                            texture,
-                            size,
-                            position: position.min(total),
-                            total,
-                            playing: active.playing,
-                            finished: active.finished,
-                        }
+        if active.seeking {
+            // A jump shows its keyframe still, never a scan.
+            let live = active.base.saturating_sub(Duration::from_millis(80));
+            match active
+                .buffered
+                .iter()
+                .find(|frame| frame.pts >= live)
+                .map(|frame| frame.pts)
+            {
+                Some(pts) => {
+                    active.seeking = false;
+                    show_frame(active, ctx, path, pts, position, total)
+                }
+                None => {
+                    if active.playing {
+                        ctx.request_repaint_after(Duration::from_millis(100));
                     }
-                    None => State::Loading,
+                    match active.buffered.front().map(|frame| frame.pts) {
+                        Some(pts) => show_frame(active, ctx, path, pts, position, total),
+                        None if active.decode_done => {
+                            active.playing = false;
+                            active.seeking = false;
+                            if let Some((_, sink)) = &active.audio {
+                                sink.pause();
+                            }
+                            State::Unsupported("This video could not be decoded.".to_owned())
+                        }
+                        None => State::Loading,
+                    }
                 }
             }
-            None if active.decode_done => {
-                // The track ended without a single frame: the file is damaged
-                // in a way the header did not show. Say so instead of spinning.
-                active.playing = false;
-                if let Some((_, sink)) = &active.audio {
-                    sink.pause();
+        } else {
+            let pts = active
+                .buffered
+                .iter()
+                .rev()
+                .find(|frame| frame.pts <= position)
+                .or(active.buffered.front())
+                .map(|frame| frame.pts);
+            match pts {
+                Some(pts) => show_frame(active, ctx, path, pts, position, total),
+                None if active.decode_done => {
+                    active.playing = false;
+                    if let Some((_, sink)) = &active.audio {
+                        sink.pause();
+                    }
+                    State::Unsupported("This video could not be decoded.".to_owned())
                 }
-                State::Unsupported("This video could not be decoded.".to_owned())
-            }
-            None => {
-                if active.playing {
-                    ctx.request_repaint_after(Duration::from_millis(100));
+                None => {
+                    if active.playing {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                    }
+                    State::Loading
                 }
-                State::Loading
             }
         }
+    }
+}
+/// Uploads one frame and answers what the viewer paints for it.
+fn show_frame(
+    active: &mut Active,
+    ctx: &egui::Context,
+    path: &Path,
+    pts: Duration,
+    position: Duration,
+    total: Duration,
+) -> State {
+    let texture = match active.texture.clone() {
+        Some((texture, size, shown)) if shown == pts => Some((texture, size)),
+        _ => active
+            .buffered
+            .iter()
+            .find(|frame| frame.pts == pts)
+            .map(|frame| {
+                let texture = ctx.load_texture(
+                    format!("video-{}-{}", path.display(), pts.as_millis()),
+                    frame.image.clone(),
+                    TextureOptions::LINEAR,
+                );
+                let size = Vec2::new(frame.image.width() as f32, frame.image.height() as f32);
+                active.shown = pts;
+                active.texture = Some((texture.clone(), size, pts));
+                (texture, size)
+            }),
+    };
+    match texture {
+        Some((texture, size)) => {
+            if active.playing {
+                ctx.request_repaint_after(next_repaint(active, position));
+            }
+            State::Showing {
+                texture,
+                size,
+                position: position.min(total),
+                total,
+                playing: active.playing,
+                finished: active.finished,
+                seeking: active.seeking,
+            }
+        }
+        None => State::Loading,
     }
 }
 
@@ -373,20 +521,43 @@ fn next_repaint(active: &Active, position: Duration) -> Duration {
 }
 
 /// The soundtrack from a position, or silence when the file has none.
-fn audio_at(path: &Path, at: Duration) -> Option<(rodio::MixerDeviceSink, rodio::Player)> {
-    use rodio::Source;
-    let file = std::fs::File::open(path).ok()?;
-    let mut decoder = rodio::Decoder::new(BufReader::new(file)).ok()?;
-    if !at.is_zero() && decoder.try_seek(at).is_err() {
-        // Without seeking, sound and picture would drift apart from the
-        // first second, so a file that cannot seek restarts instead.
-        return audio_at(path, Duration::ZERO);
+/// What opening the soundtrack at a position gives.
+enum Audio {
+    /// Sound from the asked position.
+    Sound((rodio::MixerDeviceSink, rodio::Player)),
+    /// No soundtrack to play; the wall clock drives the picture.
+    Silent,
+    /// Seeking failed: reopen from the beginning instead of drifting apart.
+    Restart,
+}
+impl Audio {
+    fn ok(self) -> Option<(rodio::MixerDeviceSink, rodio::Player)> {
+        match self {
+            Audio::Sound(audio) => Some(audio),
+            Audio::Silent | Audio::Restart => None,
+        }
     }
-    let device = rodio::DeviceSinkBuilder::open_default_sink().ok()?;
+}
+/// The soundtrack from a position, or why it starts elsewhere.
+fn audio_at(path: &Path, at: Duration) -> Audio {
+    use rodio::Source;
+    let Some(file) = std::fs::File::open(path).ok() else {
+        return Audio::Silent;
+    };
+    let mut decoder = match rodio::Decoder::new(BufReader::new(file)) {
+        Ok(decoder) => decoder,
+        Err(_) => return Audio::Silent,
+    };
+    if !at.is_zero() && decoder.try_seek(at).is_err() {
+        return Audio::Restart;
+    }
+    let Some(device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
+        return Audio::Silent;
+    };
     let sink = rodio::Player::connect_new(device.mixer());
     sink.append(decoder);
     sink.pause();
-    Some((device, sink))
+    Audio::Sound((device, sink))
 }
 
 /// Decodes one video track from a position, sending frames with timestamps.

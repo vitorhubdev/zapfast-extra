@@ -2806,6 +2806,12 @@ impl Worker {
                 self.fetch_missing_stickers();
                 self.emit_stickers();
             }
+            Command::VideoPreview { chat, id, preview } => {
+                if let Some(bytes) = preview {
+                    let _ = self.archive.set_thumbnail(&chat, &id, &bytes);
+                    self.emit_message(&chat, &id);
+                }
+            }
             Command::StickerThumbsReady => self.emit_stickers(),
             Command::FavoriteSticker { path } => {
                 if let Err(error) = self.archive.toggle_sticker_favorite(&path) {
@@ -2862,6 +2868,53 @@ impl Worker {
                 width,
                 result,
             }),
+            Command::PdfThumbs { path } => {
+                let commands = self.commands.clone();
+                let reader = self.pdf.clone();
+                let generation = self.pdf_generation.clone();
+                let thumbs = self.dirs.pdf_thumb_dir();
+                let pass = generation.load(std::sync::atomic::Ordering::SeqCst);
+                tokio::task::spawn_blocking(move || {
+                    let _ = std::fs::create_dir_all(&thumbs);
+                    let key = crate::pdf::thumb_key(&path);
+                    let mut files = Vec::new();
+                    let count = reader
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pages(&path)
+                        .unwrap_or(0)
+                        .min(crate::pdf::THUMB_PAGES);
+                    for page in 0..count {
+                        // A newer document stands this loop down; whatever is
+                        // already on disk shows up next time the file opens.
+                        if generation.load(std::sync::atomic::Ordering::SeqCst) != pass {
+                            return;
+                        }
+                        let target = thumbs.join(format!("{key}-{page:04}.png"));
+                        if !target.is_file() {
+                            let rendered = reader
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .thumb(&path, page, crate::pdf::THUMB_WIDTH);
+                            let saved = rendered.ok().and_then(|rendered| {
+                                let image = image::RgbaImage::from_raw(
+                                    rendered.width,
+                                    rendered.height,
+                                    rendered.rgba,
+                                )?;
+                                image.save(&target).ok()?;
+                                Some(())
+                            });
+                            if saved.is_none() {
+                                continue;
+                            }
+                        }
+                        files.push(target);
+                    }
+                    let _ = commands.send(Command::PdfThumbsReady { path, files });
+                });
+            }
+            Command::PdfThumbsReady { path, files } => self.emit(Event::PdfThumbs { path, files }),
             Command::StickerFetched { hash, result } => {
                 self.sticker_fetches.remove(&hash);
                 match result {
@@ -3031,6 +3084,7 @@ impl Worker {
                     Ok(path) => {
                         let _ = self.archive.set_media_path(&chat, &id, path);
                         self.download_retries.remove(&(chat.clone(), id.clone()));
+                        self.preview_video(&chat, &id);
                     }
                     Err(error) => {
                         let key = (chat.clone(), id.clone());
@@ -3780,6 +3834,36 @@ impl Worker {
         }
     }
 
+    /// Builds the poster of a downloaded video that arrived without one.
+    ///
+    /// Some videos carry no thumbnail from the phone. The first decoded
+    /// frame stands in, so the bubble and the viewer never show a bare file
+    /// row for a video that is already on disk.
+    fn preview_video(&mut self, chat: &str, id: &str) {
+        let ready = self.archive.message(chat, id).ok().flatten().filter(|row| {
+            matches!(&row.content, Content::Video { gif: false, .. })
+                && row.thumbnail.is_none()
+                && row
+                    .content
+                    .media()
+                    .is_some_and(|media| media.path.is_some())
+        });
+        let Some(row) = ready else {
+            return;
+        };
+        let path = row
+            .content
+            .media()
+            .and_then(|media| media.path.clone())
+            .expect("just checked");
+        let commands = self.commands.clone();
+        let (chat, id) = (chat.to_owned(), id.to_owned());
+        tokio::task::spawn_blocking(move || {
+            let preview = crate::video::preview(&path);
+            let _ = commands.send(Command::VideoPreview { chat, id, preview });
+        });
+    }
+
     /// Evicts a cached file that never decodes and fetches it again.
     ///
     /// Phone-cache copies are cleared and re-downloaded through the sticker
@@ -3844,6 +3928,15 @@ impl Worker {
             }
         });
         self.sweep_stickers();
+        // Page previews are tiny and keyed by file, but a removed document
+        // must not keep its strip on disk forever.
+        let thumbs = crate::cache::expire(
+            &self.dirs.pdf_thumb_dir(),
+            Duration::from_secs(30 * 24 * 3600),
+        );
+        if thumbs.files > 0 {
+            log::info!("pdf previews: reclaimed {thumbs}");
+        }
     }
 
     /// Reclaims sticker previews and phone copies nothing points at anymore.

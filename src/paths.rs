@@ -125,6 +125,10 @@ impl AppDirs {
     pub fn sticker_thumb_dir(&self) -> PathBuf {
         self.sticker_cache_dir().join("thumbs")
     }
+    /// Small previews of PDF pages, built once per file and reused.
+    pub fn pdf_thumb_dir(&self) -> PathBuf {
+        self.cache.join("pdf-thumbs")
+    }
 
     /// Saved stickers keyed by content hash. These are user data, not cache.
     pub fn saved_sticker_dir(&self) -> PathBuf {

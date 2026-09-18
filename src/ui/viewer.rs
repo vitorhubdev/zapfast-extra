@@ -52,6 +52,14 @@ fn video_view(
         app.actions.push(Action::VideoToggle);
     }
     let palette = app.palette;
+    app.video
+        .set_output(app.settings.video_volume, app.settings.video_muted);
+    // The sender's poster shows until the first frame is decoded.
+    let poster: Option<(String, String, Vec<u8>)> = app.viewer.as_ref().and_then(|viewer| {
+        let id = viewer.current()?.message.clone();
+        let row = app.conversations.get(&viewer.chat)?.message(&id)?;
+        Some((viewer.chat.clone(), id, row.thumbnail.clone()?))
+    });
     let state = app.video.poll(ctx, path);
     let mut actions = Vec::new();
     let title = path
@@ -75,6 +83,7 @@ fn video_view(
                     total,
                     playing,
                     finished,
+                    seeking,
                 } => {
                     let natural = if size.x > 0.0 && size.y > 0.0 {
                         size
@@ -93,9 +102,35 @@ fn video_view(
                             Color32::WHITE,
                         );
                     }
+                    // The picture itself plays or pauses on click, like the phone.
+                    if ui
+                        .interact(placed, ui.id().with("video"), Sense::click())
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        actions.push(Action::VideoToggle);
+                    }
+                    if *seeking && ui.is_rect_visible(placed) {
+                        // The jump landed instantly on its keyframe; this says the live
+                        // picture is still catching up.
+                        let chip =
+                            Rect::from_min_size(placed.min + vec2(10.0, 10.0), vec2(86.0, 24.0));
+                        ui.painter().rect_filled(
+                            chip,
+                            chip.height() / 2.0,
+                            Color32::from_black_alpha(140),
+                        );
+                        ui.painter().text(
+                            chip.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Seeking",
+                            theme::regular(12.0),
+                            Color32::WHITE,
+                        );
+                    }
                     video_bar(
+                        app,
                         ui,
-                        &palette,
                         rect,
                         path,
                         *position,
@@ -106,12 +141,19 @@ fn video_view(
                     );
                 }
                 crate::video::State::Loading => {
-                    theme::paint_spinner(
-                        ui,
-                        Rect::from_center_size(area.center(), Vec2::splat(48.0)),
-                        34.0,
-                        palette.accent,
-                    );
+                    // The sender's poster fills the wait for the first frame.
+                    if poster
+                        .as_ref()
+                        .and_then(|(chat, id, bytes)| video_poster(ui, ctx, area, chat, id, bytes))
+                        .is_none()
+                    {
+                        theme::paint_spinner(
+                            ui,
+                            Rect::from_center_size(area.center(), Vec2::splat(48.0)),
+                            34.0,
+                            palette.accent,
+                        );
+                    }
                 }
                 crate::video::State::Unsupported(why) => {
                     video_unsupported(ui, &palette, area, path, why, &mut actions);
@@ -126,6 +168,50 @@ fn video_view(
 }
 
 /// Title, counter, and close button over the playing video.
+/// Registers raw poster bytes with the image loader once and paints them.
+///
+/// Returns where the poster landed, so the wait for the first decoded frame
+/// shows the sender's picture instead of a spinner.
+fn video_poster(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    area: Rect,
+    chat: &str,
+    id: &str,
+    bytes: &[u8],
+) -> Option<Rect> {
+    let uri = poster_uri(ctx, chat, id, bytes);
+    let texture = match egui::Image::new(&uri).load_for_size(ctx, area.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => texture,
+        _ => return None,
+    };
+    let placed = widgets::picture_rect(area, texture.size);
+    egui::Image::new(&uri).paint_at(ui, placed);
+    Some(placed)
+}
+/// The loader URI of a poster's bytes, registering them a single time.
+fn poster_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
+    let uri = format!(
+        "bytes://poster-{}-{id}",
+        chat.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+    );
+    let seen = ctx.data_mut(|data| {
+        let mut known = data
+            .get_temp_mut_or_default::<std::collections::HashSet<String>>(egui::Id::new(
+                "video-posters",
+            ))
+            .clone();
+        let fresh = known.insert(uri.clone());
+        data.insert_temp(egui::Id::new("video-posters"), known);
+        fresh
+    });
+    if seen {
+        ctx.include_bytes(uri.clone(), bytes.to_vec());
+    }
+    uri
+}
 fn video_head(
     ui: &mut egui::Ui,
     palette: &Palette,
@@ -172,8 +258,8 @@ fn video_head(
 /// Playback controls under the playing video.
 #[allow(clippy::too_many_arguments)]
 fn video_bar(
+    app: &mut App,
     ui: &mut egui::Ui,
-    palette: &Palette,
     rect: Rect,
     path: &Path,
     position: Duration,
@@ -182,6 +268,7 @@ fn video_bar(
     finished: bool,
     actions: &mut Vec<Action>,
 ) {
+    let palette = app.palette;
     let bar = Rect::from_center_size(
         pos2(rect.center().x, rect.bottom() - 46.0),
         vec2((rect.width() - 56.0).min(560.0), 40.0),
@@ -208,7 +295,7 @@ fn video_bar(
             let total_secs = total.as_secs().max(1);
             let mut fraction = (position.as_secs_f32() / total_secs as f32).clamp(0.0, 1.0);
             let slider = ui.add_sized(
-                vec2((ui.available_width() - 170.0).max(80.0), 22.0),
+                vec2((ui.available_width() - 300.0).max(60.0), 22.0),
                 egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
             );
             if slider.drag_stopped() {
@@ -220,11 +307,32 @@ fn video_bar(
                 theme::regular(13.0),
                 palette.secondary,
             );
-            if theme::soft_button(ui, palette, Some(Icon::Download), "Save a copy", false).clicked()
+            // The output level lives here, beside the picture it belongs to.
+            let (mut volume, muted) = (app.settings.video_volume, app.settings.video_muted);
+            let icon = if muted || volume <= 0.01 {
+                Icon::VolumeX
+            } else {
+                Icon::Volume
+            };
+            if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, "Mute (M)").clicked() {
+                actions.push(Action::VideoMuteToggle);
+            }
+            let loud = ui.add_sized(
+                vec2(90.0, 22.0),
+                egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+            );
+            if loud.changed() {
+                actions.push(Action::VideoVolume(volume.clamp(0.0, 1.0)));
+            }
+            if loud.drag_stopped() {
+                actions.push(Action::SettingsChanged);
+            }
+            if theme::soft_button(ui, &palette, Some(Icon::Download), "Save a copy", false)
+                .clicked()
             {
                 actions.push(Action::SaveCopy(path.to_path_buf()));
             }
-            if theme::soft_button(ui, palette, Some(Icon::ExternalLink), "Default app", false)
+            if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), "Default app", false)
                 .on_hover_text("Open in the default app")
                 .clicked()
             {
@@ -243,7 +351,7 @@ fn video_bar(
         |ui| {
             theme::text(
                 ui,
-                "Space plays or pauses \u{b7} drag the bar to jump \u{b7} Esc to close",
+                "Space plays or pauses \u{b7} M mutes \u{b7} drag the bar to jump \u{b7} Esc to close",
                 theme::regular(12.0),
                 palette.dim,
             );
@@ -325,6 +433,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             let (rect, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
             ui.painter().rect_filled(rect, CornerRadius::ZERO, BACKDROP);
             let area = usable_area(rect);
+            // A PDF with previews gives up a strip on the left: every page
+            // one click away, with the open one marked.
+            let area = match kind {
+                ViewerKind::Pdf => pdf_area(app, ui, area, &path, page, &mut actions),
+                _ => area,
+            };
             // Remember how wide the view is, so the worker rasterises the
             // page at the size it will be shown at.
             app.viewer_view_width = area.width() * ctx.pixels_per_point();
@@ -481,6 +595,17 @@ fn upload_page(app: &mut App, ctx: &egui::Context, path: &Path, page: usize) {
     if rendered.page != page {
         return;
     }
+    let turns = app
+        .viewer
+        .as_ref()
+        .filter(|viewer| {
+            viewer
+                .current()
+                .is_some_and(|item| item.kind == ViewerKind::Pdf)
+        })
+        .map(|viewer| viewer.pdf_rotate)
+        .unwrap_or(0);
+    let rendered = rendered.rotated(turns);
     // A sharper render of the page on screen replaces the one in memory; an
     // older, coarser one is left alone.
     if let Some((known, known_page, known_width, _)) = app.pdf_texture.as_ref()
@@ -591,6 +716,65 @@ fn page_field(ui: &mut egui::Ui, palette: &Palette, page: usize, pages: usize) -
     asked
 }
 /// Draws the title, the counter, and the controls over the picture.
+/// The page strip on the left of an open PDF, or the untouched area.
+///
+/// Every preview is one click away from its page, and the open page carries
+/// the accent border so the reader always knows where they are.
+fn pdf_area(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    area: Rect,
+    path: &Path,
+    page: usize,
+    actions: &mut Vec<Action>,
+) -> Rect {
+    let palette = app.palette;
+    let thumbs = match app.pdf_thumbs.as_ref() {
+        Some((known, files)) if known == path && files.len() > 1 => files.clone(),
+        _ => return area,
+    };
+    let wide = 84.0;
+    let strip = Rect::from_min_max(area.min, pos2(area.min.x + wide, area.max.y));
+    let cell = vec2(wide - 12.0, 92.0);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(strip), |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("pdf-thumbs")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (index, file) in thumbs.iter().enumerate() {
+                    let (tile, response) = ui.allocate_exact_size(cell, Sense::click());
+                    if ui.is_rect_visible(tile) {
+                        ui.painter().rect_filled(tile, 6.0, palette.surface);
+                        if index == page {
+                            ui.painter().rect_stroke(
+                                tile,
+                                6.0,
+                                egui::Stroke::new(2.0, palette.accent),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+                        let inner = tile.shrink(5.0);
+                        let image = egui::Image::new(crate::util::image_uri(file));
+                        if let Ok(egui::load::TexturePoll::Ready { texture }) =
+                            image.load_for_size(ui.ctx(), inner.size())
+                        {
+                            image.paint_at(ui, widgets::picture_rect(inner, texture.size));
+                        }
+                        theme::text(
+                            ui,
+                            format!("{}", index + 1),
+                            theme::regular(11.0),
+                            palette.secondary,
+                        );
+                    }
+                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        actions.push(Action::ViewerPageTo(index + 1));
+                    }
+                }
+            });
+    });
+    Rect::from_min_max(pos2(area.min.x + wide + 8.0, area.min.y), area.max)
+}
 #[allow(clippy::too_many_arguments)]
 fn chrome(
     ui: &mut egui::Ui,
@@ -761,6 +945,13 @@ fn chrome(
             if theme::soft_button(ui, palette, Some(Icon::Maximize), "Fit", zoom <= 1.01).clicked()
             {
                 actions.push(Action::ViewerFit);
+            }
+            if pdf
+                && theme::soft_button(ui, palette, Some(Icon::RotateCw), "Rotate", false)
+                    .on_hover_text("Turn the page (R)")
+                    .clicked()
+            {
+                actions.push(Action::ViewerRotate);
             }
             if theme::soft_button(ui, palette, Some(Icon::Copy), "Copy", false)
                 .on_hover_text("Copy the picture to the clipboard")

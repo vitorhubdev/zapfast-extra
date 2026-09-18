@@ -2,6 +2,23 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.27] - 2026-09-18
+
+### New
+
+- Jumps land instantly. A jump opens on its keyframe still right away and
+  resumes at the asked second once live frames arrive, instead of scanning
+  through everything between. A Seeking chip marks the catch-up.
+- The player has sound controls: a mute button, a level slider, and the M
+  key, with the level remembered across restarts. Clicking the picture
+  itself plays or pauses.
+- A video shows the sender's poster until its first frame decodes, and a
+  video that arrived without one gets its first frame as a poster after
+  downloading.
+- A PDF reopens where its reader left it, turns pages with a quarter-turn
+  button or the R key, and grows a strip of page previews on the left,
+  with the open page marked.
+
 ## [1.0.26] - 2026-09-18
 
 ### New

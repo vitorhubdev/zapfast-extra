@@ -293,6 +293,10 @@ pub enum Command {
     },
     /// Drops the PDF kept open for the viewer.
     ForgetPdf,
+    /// Builds small previews of every page of the PDF on screen.
+    PdfThumbs {
+        path: PathBuf,
+    },
     /// Collects the details of one attachment for the info dialog.
     FileInfo {
         chat: ChatId,
@@ -345,6 +349,12 @@ pub enum Command {
         hash: String,
         result: Result<PathBuf, String>,
     },
+    /// Internal generated video-poster result.
+    VideoPreview {
+        chat: ChatId,
+        id: String,
+        preview: Option<Vec<u8>>,
+    },
     /// Internal profile-picture result.
     AvatarFetched {
         id: String,
@@ -380,6 +390,11 @@ pub enum Command {
         page: usize,
         width: u32,
         result: Result<crate::pdf::Page, String>,
+    },
+    /// Internal finished PDF previews, oldest page first.
+    PdfThumbsReady {
+        path: PathBuf,
+        files: Vec<PathBuf>,
     },
     /// Internal uploaded attachment ready for archiving and sending.
     Outbound {
@@ -517,6 +532,11 @@ pub enum Event {
         page: usize,
         width: u32,
         result: Result<crate::pdf::Page, String>,
+    },
+    /// Small previews of a PDF's pages, oldest first, for the viewer strip.
+    PdfThumbs {
+        path: PathBuf,
+        files: Vec<PathBuf>,
     },
     /// Details of one attachment, or why they could not be collected.
     FileInfo {

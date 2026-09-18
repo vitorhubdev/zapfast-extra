@@ -91,15 +91,21 @@ without embedding a browser engine.
 - **View attachments.** ZapExt downloads files up to 64 MB automatically or
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos play in the app with
-  their soundtrack: click one to watch it in the viewer, with play and pause,
-  a bar to jump through it, and the true length on screen. A file the player
+  their soundtrack: click one to watch it in the viewer, with play and pause
+  (click the picture, or Space), a bar that jumps to the exact second with
+  the keyframe still on screen while it catches up, a mute button with a
+  level slider and the M key, and the true length on screen. A video shows
+  the sender's poster until its first frame decodes. A file the player
   cannot read still opens in the default desktop app. Other documents open
   in their default desktop apps, and a PDF opens in the viewer built into this
   app, page by page: turn pages with the arrows or the buttons, type a page
   number in the top bar to jump to it, PageUp and PageDown walk ten pages at a
   time, and Home and End go to the first and last page. The page after the one
   on screen is rendered ahead, a page that was already drawn comes back from
-  memory, and a protected or damaged file says so instead of waiting. Files say
+  memory, and a protected or damaged file says so instead of waiting. A document
+  reopens where its reader left it, turns a quarter with the Rotate button or
+  the R key, and grows a strip of page previews on the left with the open page
+  marked. Files say
   what they are: an image sent as a file opens in
   the viewer, a document shows its kind beside the size, and a program carries
   a warning with Save a copy in place of opening it. Clicking a program never

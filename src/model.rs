@@ -597,6 +597,8 @@ pub struct Viewer {
     pub pdf_page: usize,
     /// Pages the current PDF holds, once the first one has been rendered.
     pub pdf_pages: usize,
+    /// Quarter turns clockwise of the PDF page on screen.
+    pub pdf_rotate: u8,
 }
 
 impl Viewer {
@@ -619,10 +621,16 @@ impl Viewer {
         self.offset = (0.0, 0.0);
         self.pdf_page = 0;
         self.pdf_pages = 0;
+        self.pdf_rotate = 0;
     }
 
     /// Moves to another page of the PDF on screen, stopping at either end.
     pub fn page_by(&mut self, step: i32) {
+        // The count arrives with the first render; stepping before that is a
+        // no-op instead of clamping against an empty range.
+        if self.pdf_pages == 0 {
+            return;
+        }
         let last = self.pdf_pages.saturating_sub(1) as i64;
         let next = (self.pdf_page as i64 + i64::from(step)).clamp(0, last);
         self.pdf_page = next as usize;
@@ -631,6 +639,9 @@ impl Viewer {
     /// Jumps to a page of the PDF on screen, counted from one, stopping at
     /// either end of the document.
     pub fn page_to(&mut self, page: usize) {
+        if self.pdf_pages == 0 {
+            return;
+        }
         let last = self.pdf_pages.saturating_sub(1);
         self.pdf_page = page.saturating_sub(1).min(last);
     }
@@ -791,6 +802,8 @@ pub enum Action {
     ViewerPage(i32),
     /// Jumps to a page of the PDF in the media viewer, counted from one.
     ViewerPageTo(usize),
+    /// Turns the PDF page on screen a quarter clockwise.
+    ViewerRotate,
     /// Zooms the media viewer around an anchor in points from its centre.
     ViewerZoom {
         factor: f32,
@@ -804,6 +817,10 @@ pub enum Action {
     VideoToggle,
     /// Jumps to a fraction of the video open in the viewer, from 0 to 1.
     VideoSeek(f32),
+    /// Applies a video output level while it plays; saving follows on release.
+    VideoVolume(f32),
+    /// Mutes or unmutes the video open in the viewer.
+    VideoMuteToggle,
     /// Closes the media viewer.
     CloseViewer,
     /// Opens or closes the search bar inside the open chat.

@@ -4,7 +4,7 @@
 //! and processes backend events.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::audio::{Player, Recorder};
@@ -180,6 +180,8 @@ pub struct App {
     pub chat_search_open: bool,
     /// The PDF page the worker last rendered, waiting to be uploaded.
     pub pdf_page: Option<crate::pdf::Page>,
+    /// Small previews of the open PDF's pages, oldest first.
+    pub pdf_thumbs: Option<(PathBuf, Vec<PathBuf>)>,
     /// Path, page and width of the uploaded PDF texture.
     pub pdf_texture: Option<(PathBuf, usize, u32, egui::TextureHandle)>,
     /// What the worker is rendering right now.
@@ -425,6 +427,7 @@ impl App {
             pdf_page: None,
             pdf_texture: None,
             pdf_rendering: None,
+            pdf_thumbs: None,
             pdf_error: None,
             viewer_view_width: 0.0,
             chat_search: String::new(),
@@ -1187,14 +1190,36 @@ impl App {
                             Ok(rendered) => {
                                 if let Some(viewer) = self.viewer.as_mut() {
                                     viewer.pdf_pages = rendered.pages;
+                                    // A remembered page may outrun a changed file.
+                                    viewer.pdf_page =
+                                        viewer.pdf_page.min(rendered.pages.saturating_sub(1));
                                 }
                                 self.pdf_error = None;
                                 self.pdf_page = Some(rendered);
                             }
                             Err(error) => {
-                                self.pdf_error = Some(error);
+                                // A remembered page may outrun a file that changed
+                                // on disk: fall back to the first page instead of
+                                // leaving the error on screen.
+                                if error == "That page is not in the document"
+                                    && let Some(viewer) = self.viewer.as_mut()
+                                    && viewer.pdf_page > 0
+                                {
+                                    viewer.pdf_page = 0;
+                                    self.pdf_error = None;
+                                } else {
+                                    self.pdf_error = Some(error);
+                                }
                             }
                         }
+                    }
+                }
+                Event::PdfThumbs { path, files } => {
+                    // Late previews for a file already left behind are dropped.
+                    let current = self.viewer.as_ref().and_then(|viewer| viewer.current());
+                    if current.is_some_and(|item| item.kind == ViewerKind::Pdf && item.path == path)
+                    {
+                        self.pdf_thumbs = Some((path, files));
                     }
                 }
                 Event::PollCreated { chat, error } => {
@@ -1627,6 +1652,18 @@ impl App {
         }
     }
 
+    /// Identifies a PDF for its remembered page: file name plus size on disk.
+    ///
+    /// Cache names already carry the chat and message, so this survives restarts
+    /// without pointing at anything personal.
+    fn pdf_key(path: &Path) -> String {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+        format!("{name}:{size}")
+    }
     /// The chat's pictures and PDFs that are on disk, oldest first.
     ///
     /// The viewer walks this list, so it only holds files it can actually
@@ -1681,7 +1718,49 @@ impl App {
             offset: (0.0, 0.0),
             pdf_page: 0,
             pdf_pages: 0,
+            pdf_rotate: 0,
         });
+        self.restore_pdf_page();
+        self.request_pdf_thumbs();
+    }
+    /// Reopens a PDF on the page where the reader left it.
+    fn restore_pdf_page(&mut self) {
+        let path = match self.viewer.as_ref().and_then(|viewer| viewer.current()) {
+            Some(item) if item.kind == ViewerKind::Pdf => item.path.clone(),
+            _ => return,
+        };
+        // The count is still unknown here; turning pages clamps it later.
+        if let Some(page) = self.settings.pdf_pages.get(&Self::pdf_key(&path))
+            && let Some(viewer) = self.viewer.as_mut()
+        {
+            viewer.pdf_page = *page;
+        }
+    }
+    /// Remembers the page of the PDF on screen, capped so the setting stays small.
+    fn remember_pdf_page(&mut self) {
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.current() else {
+            return;
+        };
+        if item.kind != ViewerKind::Pdf {
+            return;
+        }
+        // The count is unknown until the first page renders; clamp then.
+        let page = viewer.pdf_page.min(viewer.pdf_pages.saturating_sub(1));
+        self.settings
+            .pdf_pages
+            .insert(Self::pdf_key(&item.path), page);
+        while self.settings.pdf_pages.len() > 100 {
+            // Drop an arbitrary old entry; order does not matter here.
+            if let Some(first) = self.settings.pdf_pages.keys().next().cloned() {
+                self.settings.pdf_pages.remove(&first);
+            } else {
+                break;
+            }
+        }
+        self.mark_settings_dirty();
     }
 
     /// Returns keyboard focus to the open conversation when no search or
@@ -1966,6 +2045,30 @@ impl App {
         self.pdf_texture = None;
         self.pdf_rendering = None;
         self.pdf_error = None;
+        self.pdf_thumbs = None;
+    }
+    /// Asks the worker for the open PDF's page previews, unless they are here.
+    fn request_pdf_thumbs(&mut self) {
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
+        let Some(item) = viewer.current() else {
+            return;
+        };
+        if item.kind != ViewerKind::Pdf {
+            return;
+        }
+        if self
+            .pdf_thumbs
+            .as_ref()
+            .is_some_and(|(known, _)| known == &item.path)
+        {
+            return;
+        }
+        self.pdf_thumbs = None;
+        self.backend.send(Command::PdfThumbs {
+            path: item.path.clone(),
+        });
     }
     /// Runs the in-chat search once the typing in its field pauses.
     fn poll_chat_search(&mut self) {
@@ -2272,20 +2375,35 @@ impl App {
                 self.open_viewer(&chat, &message);
             }
             Action::ViewerStep(step) => {
+                // The page of the file left behind is kept before the view moves on.
+                self.remember_pdf_page();
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.step(step);
                 }
                 self.video.stop();
+                // A new PDF opens where its reader left it.
+                self.restore_pdf_page();
+                self.request_pdf_thumbs();
             }
             Action::ViewerPage(step) => {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.page_by(step);
                 }
+                self.remember_pdf_page();
             }
             Action::ViewerPageTo(page) => {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.page_to(page);
                 }
+                self.remember_pdf_page();
+            }
+            Action::ViewerRotate => {
+                if let Some(viewer) = self.viewer.as_mut() {
+                    viewer.pdf_rotate = (viewer.pdf_rotate + 1) % 4;
+                }
+                // The texture holds the old orientation; the rotated pixels
+                // upload over it on the next frame.
+                self.pdf_texture = None;
             }
             Action::VideoToggle => {
                 if let Some(item) = self.viewer.as_ref().and_then(|viewer| viewer.current()) {
@@ -2302,6 +2420,20 @@ impl App {
                 {
                     self.toast_error(error);
                 }
+            }
+            Action::VideoVolume(volume) => {
+                let volume = volume.clamp(0.0, 1.0);
+                self.settings.video_volume = volume;
+                if volume > 0.01 {
+                    self.settings.video_muted = false;
+                }
+                self.video.set_output(volume, self.settings.video_muted);
+            }
+            Action::VideoMuteToggle => {
+                self.settings.video_muted = !self.settings.video_muted;
+                self.video
+                    .set_output(self.settings.video_volume, self.settings.video_muted);
+                self.mark_settings_dirty();
             }
             Action::ViewerZoom { factor, anchor } => {
                 if let Some(viewer) = self.viewer.as_mut() {
@@ -2320,6 +2452,7 @@ impl App {
                 }
             }
             Action::CloseViewer => {
+                self.remember_pdf_page();
                 self.viewer = None;
                 self.forget_pdf();
                 self.video.stop();
@@ -4012,6 +4145,30 @@ mod tests {
         assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 2);
         app.apply(Action::ViewerPageTo(0), &ctx);
         assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 0);
+        // Turning the page turns the sheet a quarter at a time and back again.
+        app.apply(Action::ViewerRotate, &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_rotate, 1);
+        for _ in 0..3 {
+            app.apply(Action::ViewerRotate, &ctx);
+        }
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_rotate, 0);
+        // The page is remembered across closing and reopening.
+        app.apply(Action::ViewerPageTo(3), &ctx);
+        assert_eq!(app.viewer.as_ref().unwrap().pdf_page, 2);
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(app.settings.pdf_pages.values().any(|page| *page == 2));
+        app.apply(
+            Action::OpenViewer {
+                chat: chat.into(),
+                message: "doc".into(),
+            },
+            &ctx,
+        );
+        assert_eq!(
+            app.viewer.as_ref().unwrap().pdf_page,
+            2,
+            "the reader returns where they left"
+        );
 
         // Closing leaves nothing behind.
         app.apply(Action::CloseViewer, &ctx);

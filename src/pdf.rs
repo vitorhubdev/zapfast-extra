@@ -14,6 +14,23 @@ use hayro::{RenderCache, RenderSettings, render};
 /// Narrowest and widest raster the viewer asks for.
 pub const MIN_WIDTH: u32 = 320;
 pub const MAX_WIDTH: u32 = 2400;
+/// How wide a page thumbnail is, and how many pages get one.
+pub const THUMB_WIDTH: u32 = 96;
+pub const THUMB_PAGES: usize = 300;
+/// Names the previews of one file: file name plus size on disk.
+/// Cache names already carry the chat and message, so this survives restarts
+/// without pointing at anything personal.
+pub fn thumb_key(path: &Path) -> String {
+    let name: String = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+    format!("{name}-{size}")
+}
 /// Largest page raster kept, however tall the page is.
 const MAX_PIXELS: f64 = 12.0 * 1024.0 * 1024.0;
 /// Pages kept beside the open document, and what they may take together.
@@ -31,6 +48,29 @@ pub struct Page {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+impl Page {
+    /// Returns the page turned clockwise a quarter at a time, in memory.
+    ///
+    /// Rotating the rendered pixels is instant beside re-rendering the
+    /// document, so the viewer turns the page without asking the worker.
+    pub fn rotated(&self, turns: u8) -> Page {
+        let mut page = self.clone();
+        for _ in 0..turns % 4 {
+            let (width, height) = (page.width as usize, page.height as usize);
+            let mut out = vec![0u8; page.rgba.len()];
+            for y in 0..height {
+                for x in 0..width {
+                    let from = (y * width + x) * 4;
+                    let to = (x * height + (height - 1 - y)) * 4;
+                    out[to..to + 4].copy_from_slice(&page.rgba[from..from + 4]);
+                }
+            }
+            page.rgba = out;
+            (page.width, page.height) = (page.height, page.width);
+        }
+        page
+    }
 }
 
 /// How wide a page should be rasterised for a view of the given size.
@@ -94,6 +134,18 @@ impl Reader {
     pub fn clear(&mut self) {
         self.file = None;
         self.pages.clear();
+    }
+    /// How many pages the file holds, parsing it when it changed.
+    pub fn pages(&mut self, path: &Path) -> Result<usize, String> {
+        Ok(self.document(path)?.pages().len())
+    }
+    /// Renders a small preview of one page without touching the kept pages.
+    ///
+    /// Thumbnails share the parsed document but never evict the pages the
+    /// reader is looking at.
+    pub fn thumb(&mut self, path: &Path, page: usize, width: u32) -> Result<Page, String> {
+        let rendered = render_page_of(self.document(path)?, page, width)?;
+        Ok(rendered)
     }
 
     /// A page already in hand, as long as it is not coarser than asked for.
@@ -322,6 +374,34 @@ trailer<</Root 1 0 R>>\n\
             render_page(&path, 3, 200).is_err(),
             "a missing page reports"
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn a_page_turns_without_rerendering_and_names_its_previews() {
+        let dir = std::env::temp_dir().join(format!("zapfast-pdf-turn-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("tall portrait.pdf");
+        std::fs::write(&path, TINY).expect("writes");
+        let page = render_page(&path, 0, 400).expect("renders");
+        assert!(page.width > page.height, "the test page is landscape");
+        let turned = page.rotated(1);
+        assert_eq!((turned.width, turned.height), (page.height, page.width));
+        assert_eq!(
+            turned.rgba.len(),
+            turned.width as usize * turned.height as usize * 4
+        );
+        assert_eq!(page.rotated(4), page, "four turns come home");
+        assert_eq!(page.rotated(0).rgba, page.rgba);
+        let key = thumb_key(&path);
+        assert!(
+            key.starts_with("tall_portrait_pdf"),
+            "names stay readable: {key}"
+        );
+        assert_eq!(key, thumb_key(&path), "the same file keeps its name");
+        let mut reader = Reader::default();
+        assert_eq!(reader.pages(&path).expect("counts"), 1);
+        let thumb = reader.thumb(&path, 0, THUMB_WIDTH).expect("previews");
+        assert!(thumb.width <= THUMB_WIDTH, "small enough for the strip");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

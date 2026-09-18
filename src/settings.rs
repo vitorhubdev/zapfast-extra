@@ -1,5 +1,6 @@
 //! User preferences stored in JSON.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -80,6 +81,14 @@ pub struct Settings {
     /// Picker tab reopened above the composer. Old files default to emoji.
     #[serde(default, deserialize_with = "picker_tab_from_name")]
     pub picker_tab: crate::model::PickerTab,
+    /// Video playback volume, from silence to full.
+    #[serde(default = "default_volume")]
+    pub video_volume: f32,
+    /// Video playback starts muted when this is set.
+    pub video_muted: bool,
+    /// Last page read of each PDF, keyed by file name and size.
+    #[serde(default)]
+    pub pdf_pages: HashMap<String, usize>,
 }
 
 impl Default for Settings {
@@ -107,6 +116,9 @@ impl Default for Settings {
             names_from_contacts: true,
             save_contacts_to_phone: true,
             picker_tab: crate::model::PickerTab::Emoji,
+            video_volume: default_volume(),
+            video_muted: false,
+            pdf_pages: HashMap::new(),
         }
     }
 }
@@ -114,6 +126,10 @@ impl Default for Settings {
 /// Whether a preference that defaults to on is missing from the file.
 fn default_true() -> bool {
     true
+}
+/// Full volume for video playback when the setting is missing.
+fn default_volume() -> f32 {
+    1.0
 }
 
 impl Settings {

@@ -40,6 +40,7 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
                 key(Modifiers::NONE, Key::PageUp, Action::ViewerPage(-10));
                 key(Modifiers::NONE, Key::Home, Action::ViewerPageTo(1));
                 key(Modifiers::NONE, Key::End, Action::ViewerPageTo(usize::MAX));
+                key(Modifiers::NONE, Key::R, Action::ViewerRotate);
             }
         } else {
             key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
@@ -49,6 +50,9 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
         }
         if video {
             key(Modifiers::NONE, Key::Space, Action::VideoToggle);
+        }
+        if video {
+            key(Modifiers::NONE, Key::M, Action::VideoMuteToggle);
         }
         key(
             Modifiers::NONE,
