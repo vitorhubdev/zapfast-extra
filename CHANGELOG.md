@@ -2,6 +2,22 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.29] - 2026-09-18
+
+### Fixed
+
+- Videos with trailing metadata or odd streams play with sound. Files
+  the streaming decoder cannot read fall back to an in-process background
+  extraction (symphonia) instead of going quiet, so sound works without
+  ffmpeg installed; ffmpeg stays only as a last resort for exotic codecs.
+  Fragmented files and other codecs play through ffmpeg when it is
+  installed instead of refusing.
+- Seeks jump instead of scanning: the player searches a small window of
+  samples around the estimated position for the nearest key frame, so
+  dragging the bar lands at once instead of fast-forwarding.
+- Unplayable files say why: HEVC (often from iPhone) and other codecs are
+  named, and fragmented files explain they need ffmpeg or the default app.
+
 ## [1.0.28] - 2026-09-18
 
 ### Fixed
