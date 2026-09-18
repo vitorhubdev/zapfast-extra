@@ -917,6 +917,22 @@ impl Archive {
         Ok(())
     }
 
+    /// Every phone-sticker file the picker may still list.
+    ///
+    /// The cache sweep keeps these and may reclaim anything else in the
+    /// sticker folders.
+    pub fn sticker_file_refs(&self) -> Result<Vec<std::path::PathBuf>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT path FROM stickers WHERE path IS NOT NULL")?;
+        let rows = statement.query_map([], |row| {
+            Ok(row
+                .get::<_, Option<String>>(0)?
+                .map(std::path::PathBuf::from))
+        })?;
+        Ok(rows.flatten().flatten().collect())
+    }
+
     /// Returns raw messages for re-deriving fields in newer versions.
     pub fn rows_with_raw(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
         let mut statement = self

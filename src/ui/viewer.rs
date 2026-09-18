@@ -1,6 +1,7 @@
 //! Full-window viewer for a chat's pictures, stickers, and PDFs.
 
 use std::path::Path;
+use std::time::Duration;
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Key, Layout, Rect, Sense, Vec2, pos2, vec2};
 
@@ -35,6 +36,258 @@ enum Surface {
     Failed,
 }
 
+/// Full-window playback for the chat video on screen: the viewer opens a video
+/// playing, with sound, and offers the system player only for files the in-process
+/// decoder cannot read.
+fn video_view(
+    app: &mut App,
+    ctx: &egui::Context,
+    screen: Rect,
+    path: &Path,
+    index: usize,
+    count: usize,
+) {
+    if !app.video.is_active(path) && app.video.refusal(path).is_none() {
+        // Opening a video starts it, with sound, like the phone does.
+        app.actions.push(Action::VideoToggle);
+    }
+    let palette = app.palette;
+    let state = app.video.poll(ctx, path);
+    let mut actions = Vec::new();
+    let title = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Video".to_owned());
+    egui::Area::new(egui::Id::new("viewer"))
+        .fixed_pos(screen.min)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.set_width(screen.width());
+            ui.set_height(screen.height());
+            let (rect, backdrop) = ui.allocate_exact_size(screen.size(), Sense::click_and_drag());
+            ui.painter().rect_filled(rect, CornerRadius::ZERO, BACKDROP);
+            let area = usable_area(rect);
+            match &state {
+                crate::video::State::Showing {
+                    texture,
+                    size,
+                    position,
+                    total,
+                    playing,
+                    finished,
+                } => {
+                    let natural = if size.x > 0.0 && size.y > 0.0 {
+                        size
+                    } else {
+                        &vec2(4.0, 3.0)
+                    };
+                    let placed = Rect::from_center_size(
+                        area.center(),
+                        *natural * fit_scale(*natural, area.size()),
+                    );
+                    if ui.is_rect_visible(placed) {
+                        ui.painter().image(
+                            texture.id(),
+                            placed,
+                            Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+                    video_bar(
+                        ui,
+                        &palette,
+                        rect,
+                        path,
+                        *position,
+                        *total,
+                        *playing,
+                        *finished,
+                        &mut actions,
+                    );
+                }
+                crate::video::State::Loading => {
+                    theme::paint_spinner(
+                        ui,
+                        Rect::from_center_size(area.center(), Vec2::splat(48.0)),
+                        34.0,
+                        palette.accent,
+                    );
+                }
+                crate::video::State::Unsupported(why) => {
+                    video_unsupported(ui, &palette, area, path, why, &mut actions);
+                }
+            }
+            if backdrop.clicked() {
+                actions.push(Action::CloseViewer);
+            }
+            video_head(ui, &palette, rect, &title, index, count, &mut actions);
+        });
+    app.actions.extend(actions);
+}
+
+/// Title, counter, and close button over the playing video.
+fn video_head(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    rect: Rect,
+    title: &str,
+    index: usize,
+    count: usize,
+    actions: &mut Vec<Action>,
+) {
+    let top = Rect::from_min_max(
+        rect.min + vec2(28.0, 20.0),
+        pos2(rect.right() - 28.0, rect.top() + 56.0),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(top), |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(title)
+                    .font(theme::medium(14.0))
+                    .color(palette.text),
+            );
+            ui.label(
+                egui::RichText::new(format!("{} of {count}", index + 1))
+                    .font(theme::regular(13.0))
+                    .color(palette.secondary),
+            );
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::CircleX,
+                    18.0,
+                    palette.dim,
+                    palette.text,
+                    "Close (Esc)",
+                )
+                .clicked()
+                {
+                    actions.push(Action::CloseViewer);
+                }
+            });
+        });
+    });
+}
+
+/// Playback controls under the playing video.
+#[allow(clippy::too_many_arguments)]
+fn video_bar(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    rect: Rect,
+    path: &Path,
+    position: Duration,
+    total: Duration,
+    playing: bool,
+    finished: bool,
+    actions: &mut Vec<Action>,
+) {
+    let bar = Rect::from_center_size(
+        pos2(rect.center().x, rect.bottom() - 46.0),
+        vec2((rect.width() - 56.0).min(560.0), 40.0),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+        ui.horizontal(|ui| {
+            let icon = if playing { Icon::Pause } else { Icon::Play };
+            let hint = if finished {
+                "Play again"
+            } else if playing {
+                "Pause (Space)"
+            } else {
+                "Play (Space)"
+            };
+            if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, hint).clicked() {
+                actions.push(Action::VideoToggle);
+            }
+            theme::text(
+                ui,
+                crate::util::duration(position.as_secs().min(u64::from(u32::MAX)) as u32),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+            let total_secs = total.as_secs().max(1);
+            let mut fraction = (position.as_secs_f32() / total_secs as f32).clamp(0.0, 1.0);
+            let slider = ui.add_sized(
+                vec2((ui.available_width() - 170.0).max(80.0), 22.0),
+                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+            );
+            if slider.drag_stopped() {
+                actions.push(Action::VideoSeek(fraction));
+            }
+            theme::text(
+                ui,
+                crate::util::duration(total_secs.min(u64::from(u32::MAX)) as u32),
+                theme::regular(13.0),
+                palette.secondary,
+            );
+            if theme::soft_button(ui, palette, Some(Icon::Download), "Save a copy", false).clicked()
+            {
+                actions.push(Action::SaveCopy(path.to_path_buf()));
+            }
+            if theme::soft_button(ui, palette, Some(Icon::ExternalLink), "Default app", false)
+                .on_hover_text("Open in the default app")
+                .clicked()
+            {
+                actions.push(Action::OpenFile(path.to_path_buf()));
+            }
+        });
+    });
+    let hint = Rect::from_min_max(
+        rect.min + vec2(28.0, 0.0),
+        pos2(rect.right() - 28.0, rect.bottom() - 12.0),
+    );
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(hint)
+            .layout(Layout::bottom_up(Align::Min)),
+        |ui| {
+            theme::text(
+                ui,
+                "Space plays or pauses \u{b7} drag the bar to jump \u{b7} Esc to close",
+                theme::regular(12.0),
+                palette.dim,
+            );
+        },
+    );
+}
+
+/// What the viewer shows for a video it cannot play in-process.
+fn video_unsupported(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    area: Rect,
+    path: &Path,
+    why: &str,
+    actions: &mut Vec<Action>,
+) {
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(Rect::from_center_size(
+            area.center(),
+            vec2(area.width().min(420.0), 160.0),
+        )),
+        |ui| {
+            ui.vertical_centered(|ui| {
+                theme::paragraph(ui, why, theme::regular(14.0), palette.secondary);
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    ui.add_space((ui.available_width() - 220.0).max(0.0) / 2.0);
+                    if theme::soft_button(
+                        ui,
+                        palette,
+                        Some(Icon::ExternalLink),
+                        "Open in the default app",
+                        false,
+                    )
+                    .clicked()
+                    {
+                        actions.push(Action::OpenFile(path.to_path_buf()));
+                    }
+                });
+            });
+        },
+    );
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(viewer) = app.viewer.as_ref() else {
         return;
@@ -53,6 +306,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let pages = viewer.pdf_pages;
     let mut actions = Vec::new();
     let screen = ctx.content_rect();
+    if kind == ViewerKind::Video {
+        // Videos play with their soundtrack instead of showing a still.
+        video_view(app, ctx, screen, &path, index, count);
+        return;
+    }
     // A rendered PDF page arrives as raw pixels; the texture is made here,
     // on the thread that owns the graphics context.
     if kind == ViewerKind::Pdf {

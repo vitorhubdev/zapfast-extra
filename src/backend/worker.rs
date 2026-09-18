@@ -2866,6 +2866,11 @@ impl Worker {
                 self.sticker_fetches.remove(&hash);
                 match result {
                     Ok(path) => {
+                        // The file name carries the hash the phone announced,
+                        // but the identity the picker uses is the hash of the
+                        // bytes. If they ever disagree, the bytes win, so the
+                        // copy cannot show twice under two names.
+                        let path = self.adopt_fetched_sticker(&hash, &path);
                         if let Err(error) = self.archive.set_sticker_path(&hash, &path) {
                             log::warn!("could not file sticker {hash}: {error}");
                         }
@@ -3838,6 +3843,92 @@ impl Worker {
                 );
             }
         });
+        self.sweep_stickers();
+    }
+
+    /// Reclaims sticker previews and phone copies nothing points at anymore.
+    ///
+    /// Previews are keyed by content hash, so one whose sticker file is gone
+    /// (a removed pack, a healed copy, a favourite that moved) is rubbish. A
+    /// phone copy the stickers table no longer names is a failed download or
+    /// an entry from an older version. Saved stickers and packs are the
+    /// user's own files and are never touched here.
+    fn sweep_stickers(&self) {
+        let dir = self.dirs.sticker_cache_dir();
+        let thumbs = self.dirs.sticker_thumb_dir();
+        let mut hashed: HashSet<String> = HashSet::new();
+        for folder in [
+            dir.clone(),
+            self.dirs.saved_sticker_dir(),
+            self.dirs.media_cache_dir(),
+        ] {
+            let Ok(entries) = std::fs::read_dir(&folder) else {
+                continue;
+            };
+            for path in entries.flatten().map(|entry| entry.path()) {
+                if let Some(id) = crate::stickers::id_of(&path) {
+                    hashed.insert(id);
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(self.packs_dir()) {
+            for pack in entries.flatten().map(|entry| entry.path()) {
+                let Ok(files) = std::fs::read_dir(&pack) else {
+                    continue;
+                };
+                for path in files.flatten().map(|entry| entry.path()) {
+                    if let Some(id) = crate::stickers::id_of(&path) {
+                        hashed.insert(id);
+                    }
+                }
+            }
+        }
+        let thumbs_freed = crate::cache::sweep(&thumbs, &|path| {
+            path.file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(|stem| hashed.contains(stem))
+        });
+        let refs: HashSet<String> = self
+            .archive
+            .sticker_file_refs()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let copies_freed = crate::cache::sweep(&dir, &|path| {
+            refs.contains(&path.to_string_lossy().into_owned())
+        });
+        if thumbs_freed.files + copies_freed.files > 0 {
+            log::info!(
+                "stickers: reclaimed {thumbs_freed} of previews and {copies_freed} of copies in {}",
+                dir.display()
+            );
+        }
+    }
+
+    /// Files a freshly downloaded phone sticker under the hash of its bytes.
+    ///
+    /// The download lands under the hash the phone announced. When the bytes
+    /// hash to something else, the file is renamed (or folded into the copy
+    /// already there), so the picker never lists one picture twice.
+    fn adopt_fetched_sticker(&self, hash: &str, path: &Path) -> PathBuf {
+        let Ok(bytes) = std::fs::read(path) else {
+            return path.to_path_buf();
+        };
+        let content = crate::stickers::hash_of(&bytes);
+        if content == hash {
+            return path.to_path_buf();
+        }
+        log::warn!("sticker {hash} arrived with unexpected bytes; filing by content");
+        let filed = path.with_file_name(format!("{content}.webp"));
+        if filed == path {
+            return filed;
+        }
+        if filed.is_file() {
+            let _ = std::fs::remove_file(path);
+            return filed;
+        }
+        std::fs::rename(path, &filed).map_or_else(|_| path.to_path_buf(), |()| filed)
     }
 
     /// Files a sticker copy in the app's own cache under its content hash.
@@ -3878,10 +3969,19 @@ impl Worker {
 
     /// Returns distinct downloaded stickers by most recent use.
     fn emit_stickers(&mut self) {
+        // Saved stickers from older versions carry plain file names, which
+        // have no thumbnail and no shared identity. Filing them under their
+        // content hash gives every copy one name, one preview, and one entry.
+        for (before, after) in crate::stickers::adopt_dir(&self.dirs.saved_sticker_dir()) {
+            let _ = self.archive.rename_sticker_favorite(&before, &after);
+        }
         let saved = self.saved_stickers();
         let mut favorites = self.archive.sticker_favorites().unwrap_or_default();
         // One picture, one place: a sticker already listed under favourites or
         // saved stickers is not offered again in a pack or under recents.
+        // The key is the content hash of the file on disk whenever it exists,
+        // so the phone's list and the chat history agree even when one of them
+        // arrived without its hash.
         let mut shown: HashSet<String> = saved
             .iter()
             .chain(favorites.iter())
@@ -3906,41 +4006,51 @@ impl Worker {
             for sticker in phone {
                 if let Some(path) = sticker.path
                     && path.exists()
-                    && shown.insert(sticker.hash)
                 {
-                    list.push((sticker.last_used, path));
+                    // The file on disk wins over the stored hash: it is the
+                    // same picture the packs and the saved stickers are keyed
+                    // by, so all three lists finally agree.
+                    let key = crate::stickers::id_of(&path).unwrap_or(sticker.hash);
+                    if shown.insert(key) {
+                        list.push((sticker.last_used, path));
+                    }
                 }
             }
         }
         match self.archive.recent_stickers(80) {
             Ok(rows) => {
                 for sticker in rows {
-                    let hash = sticker
-                        .raw
-                        .as_deref()
-                        .and_then(|raw| wa::Message::decode_from_slice(raw).ok())
-                        .and_then(|message| {
-                            let base = message.get_base_message();
-                            let sticker = base.sticker_message.as_option()?;
-                            sticker_hash(
-                                sticker.file_sha256.as_deref(),
-                                sticker.file_enc_sha256.as_deref(),
-                            )
-                        });
-                    // A row with no hash to read cannot be told apart from
-                    // another, so its path stands in for it.
-                    let key = hash.unwrap_or_else(|| sticker.path.display().to_string());
-                    if shown.insert(key) {
-                        let before = sticker.path.clone();
-                        let path = self.adopt_sticker_file(&before);
-                        if path != before {
-                            // The list in hand still names the old file.
-                            for favorite in &mut favorites {
-                                if *favorite == before {
-                                    *favorite = path.clone();
-                                }
+                    let before = sticker.path.clone();
+                    let path = self.adopt_sticker_file(&before);
+                    if path != before {
+                        // The list in hand still names the old file.
+                        for favorite in &mut favorites {
+                            if *favorite == before {
+                                *favorite = path.clone();
                             }
                         }
+                    }
+                    // The adopted file carries the content hash in its name, so
+                    // prefer it: our own sends have no raw message to read a
+                    // hash from, and the stored one may be missing as well.
+                    let key = crate::stickers::id_of(&path).or_else(|| {
+                        sticker.raw.as_deref().and_then(|raw| {
+                            wa::Message::decode_from_slice(raw)
+                                .ok()
+                                .and_then(|message| {
+                                    let base = message.get_base_message();
+                                    let sticker = base.sticker_message.as_option()?;
+                                    sticker_hash(
+                                        sticker.file_sha256.as_deref(),
+                                        sticker.file_enc_sha256.as_deref(),
+                                    )
+                                })
+                        })
+                    });
+                    // A row with no hash to read cannot be told apart from
+                    // another, so its path stands in for it.
+                    let key = key.unwrap_or_else(|| path.display().to_string());
+                    if shown.insert(key) {
                         list.push((sticker.last_used, path));
                     }
                 }

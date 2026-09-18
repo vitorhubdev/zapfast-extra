@@ -32,6 +32,7 @@ pub mod tray;
 pub mod ui;
 pub mod updates;
 pub mod util;
+pub mod video;
 pub mod voice;
 #[cfg(target_os = "windows")]
 pub mod winfocus;

@@ -2629,10 +2629,12 @@ fn context_menu(ui: &mut egui::Ui, view: &View<'_>, message: &Message, actions: 
                 if widgets::menu_item(ui, &palette, Some(Icon::Download), "Save a copy…") {
                     actions.push(Action::SaveCopy(path.clone()));
                 }
-                if let Some(folder) = path.parent()
+                if path.parent().is_some()
                     && widgets::menu_item(ui, &palette, Some(Icon::FileText), "Show in folder")
                 {
-                    actions.push(Action::OpenFile(folder.to_path_buf()));
+                    // The file comes selected in its folder, instead of a
+                    // plain folder open that leaves the reader hunting.
+                    actions.push(Action::ShowInFolder(path.clone()));
                 }
             }
             None => {
@@ -3686,6 +3688,9 @@ fn video(
             (Some(_), _) if matches!(playing, Some(animation::Frame::Pending)) => {
                 theme::paint_spinner(ui, disc, 24.0, Color32::WHITE)
             }
+            // A downloaded video plays in the viewer; anything else still
+            // opens outside the app.
+            (Some(_), _) if !gif => theme::paint_icon(ui, Icon::Play, disc, 22.0, Color32::WHITE),
             (Some(_), _) => theme::paint_icon(ui, Icon::ExternalLink, disc, 22.0, Color32::WHITE),
             (None, MediaState::Downloading) => theme::paint_spinner(ui, disc, 24.0, Color32::WHITE),
             (None, MediaState::Failed(_)) => {
@@ -3742,7 +3747,11 @@ fn video(
         .clicked()
     {
         match &media.path {
-            Some(path) => actions.push(Action::OpenFile(path.clone())),
+            Some(path) if gif => actions.push(Action::OpenFile(path.clone())),
+            Some(_) => actions.push(Action::OpenViewer {
+                chat: view.chat.id.clone(),
+                message: message.id.clone(),
+            }),
             None if !matches!(media.state, MediaState::Downloading) => {
                 actions.push(Action::Download {
                     chat: view.chat.id.clone(),
@@ -3911,6 +3920,11 @@ fn attachment(
                 chat: view.chat.id.clone(),
                 message: message.id.clone(),
             }),
+            // A program is never executed from a chat: clicking it reveals
+            // the file in its folder instead, like the menu does.
+            Some(path) if crate::model::FileKind::of(&media.mime, title).runs_code() => {
+                actions.push(Action::ShowInFolder(path.clone()))
+            }
             Some(path) => actions.push(Action::OpenFile(path.clone())),
             None if !matches!(media.state, MediaState::Downloading) => {
                 actions.push(Action::Download {

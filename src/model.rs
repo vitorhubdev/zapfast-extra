@@ -662,6 +662,8 @@ pub enum ViewerKind {
     Picture,
     /// A PDF, rendered one page at a time.
     Pdf,
+    /// A video, decoded and played in-app with its soundtrack.
+    Video,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -775,6 +777,9 @@ pub enum Action {
     CancelRecording,
     SendRecording,
     OpenFile(PathBuf),
+    /// Reveals a file in its folder, selecting it. Programs open this way
+    /// instead of running: clicking one must never execute it.
+    ShowInFolder(PathBuf),
     /// Opens the media viewer on a picture or sticker in a chat.
     OpenViewer {
         chat: ChatId,
@@ -795,6 +800,10 @@ pub enum Action {
     ViewerPan((f32, f32)),
     /// Returns the media viewer to fit the window.
     ViewerFit,
+    /// Plays or pauses the video open in the media viewer.
+    VideoToggle,
+    /// Jumps to a fraction of the video open in the viewer, from 0 to 1.
+    VideoSeek(f32),
     /// Closes the media viewer.
     CloseViewer,
     /// Opens or closes the search bar inside the open chat.

@@ -207,6 +207,8 @@ pub struct App {
     pub pending: Vec<Pending>,
     /// In-chat audio player.
     pub player: Player,
+    /// Plays the video open in the viewer. Only one plays at a time.
+    pub video: crate::video::Player,
     /// Active voice recorder.
     pub recording: Option<Recorder>,
     /// Voice messages with a sent played receipt.
@@ -435,6 +437,7 @@ impl App {
             picker_focus: false,
             pending: Vec::new(),
             player: Player::new(waker.clone()),
+            video: crate::video::Player::default(),
             recording: None,
             played_told: HashSet::new(),
             copy_rows: Default::default(),
@@ -1645,6 +1648,9 @@ impl App {
                     Content::Document { media, .. } if media.mime == "application/pdf" => {
                         (media, ViewerKind::Pdf)
                     }
+                    // Videos with a file play in the viewer; anything else
+                    // keeps its old behaviour.
+                    Content::Video { media, gif, .. } if !gif => (media, ViewerKind::Video),
                     _ => return None,
                 };
                 let path = media.path.as_ref().filter(|path| path.is_file())?;
@@ -2257,6 +2263,11 @@ impl App {
                     self.toast_error(format!("Could not open {}: {error}", path.display()));
                 }
             }
+            Action::ShowInFolder(path) => {
+                if let Err(error) = crate::util::reveal_in_folder(&path) {
+                    self.toast_error(error);
+                }
+            }
             Action::OpenViewer { chat, message } => {
                 self.open_viewer(&chat, &message);
             }
@@ -2264,6 +2275,7 @@ impl App {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.step(step);
                 }
+                self.video.stop();
             }
             Action::ViewerPage(step) => {
                 if let Some(viewer) = self.viewer.as_mut() {
@@ -2273,6 +2285,22 @@ impl App {
             Action::ViewerPageTo(page) => {
                 if let Some(viewer) = self.viewer.as_mut() {
                     viewer.page_to(page);
+                }
+            }
+            Action::VideoToggle => {
+                if let Some(item) = self.viewer.as_ref().and_then(|viewer| viewer.current()) {
+                    let path = item.path.clone();
+                    let (video, player) = (&mut self.video, &mut self.player);
+                    if let Err(error) = video.toggle(&path, &mut || player.stop()) {
+                        self.toast_error(error);
+                    }
+                }
+            }
+            Action::VideoSeek(fraction) => {
+                if let Some(item) = self.viewer.as_ref().and_then(|viewer| viewer.current())
+                    && let Err(error) = self.video.seek(&item.path, fraction)
+                {
+                    self.toast_error(error);
                 }
             }
             Action::ViewerZoom { factor, anchor } => {
@@ -2294,6 +2322,7 @@ impl App {
             Action::CloseViewer => {
                 self.viewer = None;
                 self.forget_pdf();
+                self.video.stop();
                 // The document does not stay in memory once it is closed.
                 self.backend.send(Command::ForgetPdf);
             }
@@ -2923,6 +2952,8 @@ impl App {
 
     /// Plays or pauses audio and sends the first played receipt when needed.
     fn play_voice(&mut self, message: String, path: PathBuf) {
+        // A voice note and a video never play over each other.
+        self.video.stop();
         if let Err(error) = self.player.toggle(&message, &path) {
             self.toast_error(error);
             return;
@@ -3374,12 +3405,42 @@ mod tests {
             caption: None,
             media: media(missing),
         };
+        let clip = dir.join("clip.mp4");
+        std::fs::write(&clip, b"mp4").expect("writes");
+        let mut video = message(chat, "fourth", 40);
+        video.content = Content::Video {
+            caption: None,
+            media: Media {
+                mime: "video/mp4".to_owned(),
+                size: 5,
+                width: Some(480),
+                height: Some(850),
+                path: Some(clip),
+                state: MediaState::Idle,
+            },
+            seconds: Some(64),
+            gif: false,
+        };
+        let mut gif = message(chat, "fifth", 50);
+        gif.content = Content::Video {
+            caption: None,
+            media: Media {
+                mime: "video/mp4".to_owned(),
+                size: 5,
+                width: Some(480),
+                height: Some(850),
+                path: Some(second.clone()),
+                state: MediaState::Idle,
+            },
+            seconds: Some(6),
+            gif: true,
+        };
         app.conversations.insert(
             chat.into(),
             Conversation {
                 requested: true,
                 complete: true,
-                messages: vec![photo, sticker, sent_png, broken],
+                messages: vec![photo, sticker, sent_png, broken, video, gif],
                 ..Default::default()
             },
         );
@@ -3394,11 +3455,12 @@ mod tests {
         let viewer = app.viewer.as_ref().expect("the viewer opens");
         assert_eq!(
             viewer.items.len(),
-            2,
-            "a sticker stays out of the viewer and a file that is gone is not offered"
+            3,
+            "a sticker and a GIF stay out of the viewer and a file that is gone is not offered"
         );
         assert_eq!(viewer.index, 0);
         assert_eq!(viewer.items[0].kind, ViewerKind::Picture);
+        assert_eq!(viewer.items[2].kind, ViewerKind::Video);
 
         // Walking stops at either end and a new picture starts fitted.
         app.apply(Action::ViewerStep(-1), &ctx);
@@ -3417,7 +3479,11 @@ mod tests {
         assert_eq!(viewer.zoom, 1.0);
         assert_eq!(viewer.offset, (0.0, 0.0));
         app.apply(Action::ViewerStep(1), &ctx);
-        assert_eq!(app.viewer.as_ref().unwrap().index, 1);
+        assert_eq!(
+            app.viewer.as_ref().unwrap().index,
+            2,
+            "walking stops at the last item"
+        );
 
         // The zoom stays between its limits.
         app.apply(

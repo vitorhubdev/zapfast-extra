@@ -891,6 +891,36 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 app.open_chat = Some(chat.to_owned());
                 app.open_viewer(chat, "ada-tall");
             }
+            "video" => {
+                let chat = SAMPLES[0].id;
+                app.open_chat = Some(chat.to_owned());
+                // A real two-second clip when ffmpeg is around, so the shot
+                // proves the player, not just its frame. Otherwise the
+                // picture viewer still exercises the shot harness.
+                let clip = app.dirs.media_cache_dir().join("demo-clip.mp4");
+                if !clip.is_file() {
+                    let _ = std::fs::create_dir_all(app.dirs.media_cache_dir());
+                    let _ = std::process::Command::new("ffmpeg")
+                        .args(["-v", "error", "-y"])
+                        .args(["-f", "lavfi", "-i", "color=c=teal:s=320x240:d=2:r=10"])
+                        .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+                        .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                        .args(["-profile:v", "baseline", "-bf", "0"])
+                        .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
+                        .arg(&clip)
+                        .status();
+                }
+                if clip.is_file()
+                    && let Some(conversation) = app.conversations.get_mut(chat)
+                    && let Some(row) = conversation.message_mut("ada-video")
+                    && let Content::Video { media, .. } = &mut row.content
+                {
+                    media.path = Some(clip);
+                    app.open_viewer(chat, "ada-video");
+                } else {
+                    app.open_viewer(chat, "ada-tall");
+                }
+            }
             "pdf" => {
                 let chat = SAMPLES[0].id;
                 app.open_chat = Some(chat.to_owned());
@@ -1450,6 +1480,7 @@ mod tests {
             "voice",
             "recording",
             "viewer",
+            "video",
             "find",
             "pdf",
             "peek",

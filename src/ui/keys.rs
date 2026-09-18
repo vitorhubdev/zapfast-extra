@@ -13,6 +13,11 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
         .as_ref()
         .and_then(|viewer| viewer.current())
         .is_some_and(|item| item.kind == crate::model::ViewerKind::Pdf);
+    let video = app
+        .viewer
+        .as_ref()
+        .and_then(|viewer| viewer.current())
+        .is_some_and(|item| item.kind == crate::model::ViewerKind::Video);
     let mut actions = Vec::new();
     // While a page number is being typed, the arrows and the page keys belong
     // to that field and not to the document.
@@ -41,6 +46,9 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
             key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
             key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
             key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+        }
+        if video {
+            key(Modifiers::NONE, Key::Space, Action::VideoToggle);
         }
         key(
             Modifiers::NONE,

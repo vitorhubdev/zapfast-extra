@@ -433,8 +433,68 @@ pub fn phone_matches(phone: &str, query: &str) -> bool {
     phone == query || phone.ends_with(&query) || query.ends_with(&phone)
 }
 
+/// Opens the folder containing a file with the file selected.
+///
+/// A plain folder open leaves the reader hunting; selecting the file shows
+/// exactly what came from the chat. Programs are revealed this way instead
+/// of opened, so clicking one can never run it.
+pub fn reveal_in_folder(path: &std::path::Path) -> Result<(), String> {
+    let argv = reveal_argv(path);
+    std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .spawn()
+        .map_err(|error| format!("Could not show {}: {error}", path.display()))?;
+    Ok(())
+}
+
+/// The program and arguments that reveal a file, split for tests.
+fn reveal_argv(path: &std::path::Path) -> Vec<String> {
+    let path = path.display().to_string();
+    #[cfg(target_os = "windows")]
+    {
+        // The comma belongs to the flag: explorer parses `/select,<file>`.
+        vec!["explorer".to_owned(), format!("/select,{path}")]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec!["open".to_owned(), "-R".to_owned(), path]
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // No portable select API: open the folder itself.
+        let parent = std::path::Path::new(&path)
+            .parent()
+            .map(|parent| parent.display().to_string())
+            .unwrap_or(path);
+        vec!["xdg-open".to_owned(), parent]
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn revealing_selects_the_file_in_its_folder() {
+        let argv = reveal_argv(std::path::Path::new("C:/chat/setup.exe"));
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            argv,
+            vec![
+                "explorer".to_owned(),
+                "/select,C:/chat/setup.exe".to_owned()
+            ]
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            argv,
+            vec![
+                "open".to_owned(),
+                "-R".to_owned(),
+                "C:/chat/setup.exe".to_owned()
+            ]
+        );
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        assert_eq!(argv, vec!["xdg-open".to_owned(), "C:/chat".to_owned()]);
+    }
     #[test]
     fn image_paths_keep_the_native_path_after_loader_conversion() {
         for path in [

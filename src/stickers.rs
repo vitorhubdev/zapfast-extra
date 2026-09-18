@@ -143,10 +143,33 @@ pub fn adopt_pack(dir: &Path, fallback_title: &str) -> Result<(String, Vec<PathB
                     .collect()
             })
             .unwrap_or_default();
-        // Anything else in the folder is still shown, after the listed ones.
+        // Anything else in the folder is filed under its content hash too, so
+        // a copy added later, or left behind by an older version, gets the
+        // same identity as every other sticker instead of showing twice.
         let mut extra = webp_files(dir)?;
         extra.retain(|path| !files.contains(path));
-        files.append(&mut extra);
+        let mut adopted = false;
+        let mut order: Vec<String> = files.iter().filter_map(|path| id_of(path)).collect();
+        for path in extra {
+            match file_by_hash(dir, &path) {
+                Ok(filed) => {
+                    adopted |= filed != path;
+                    if let Some(id) = id_of(&filed)
+                        && !order.contains(&id)
+                    {
+                        order.push(id);
+                    }
+                    if !files.contains(&filed) {
+                        files.push(filed);
+                    }
+                }
+                Err(_) => files.push(path),
+            }
+        }
+        if adopted {
+            let record = serde_json::json!({ "title": title, "order": order });
+            let _ = std::fs::write(&manifest, record.to_string());
+        }
         return Ok((title, files));
     }
     let files = webp_files(dir)?;
@@ -173,6 +196,37 @@ pub fn adopt_pack(dir: &Path, fallback_title: &str) -> Result<(String, Vec<PathB
         .filter(|path| path.is_file())
         .collect();
     Ok((fallback_title.to_owned(), files))
+}
+
+/// Files every sticker of a plain folder under its content hash.
+///
+/// Saved stickers from older versions carry plain names, which have no
+/// thumbnail and no shared identity, so the same picture shows twice and each
+/// tile decodes its full file. Returns the old and new path of every file
+/// that moved, so lists that name files (like favourites) can follow them.
+pub fn adopt_dir(dir: &Path) -> Vec<(PathBuf, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut moved = Vec::new();
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("webp"))
+        })
+        .collect();
+    files.sort();
+    for path in files {
+        match file_by_hash(dir, &path) {
+            Ok(filed) if filed != path => moved.push((path, filed)),
+            _ => {}
+        }
+    }
+    moved
 }
 
 /// Every WebP file in a folder, in name order.

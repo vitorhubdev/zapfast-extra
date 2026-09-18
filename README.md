@@ -90,7 +90,10 @@ without embedding a browser engine.
   the phone. Changing the default timer for new chats leaves existing chats alone.
 - **View attachments.** ZapExt downloads files up to 64 MB automatically or
   on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
-  polls, and link previews appear in the chat. Videos and other documents open
+  polls, and link previews appear in the chat. Videos play in the app with
+  their soundtrack: click one to watch it in the viewer, with play and pause,
+  a bar to jump through it, and the true length on screen. A file the player
+  cannot read still opens in the default desktop app. Other documents open
   in their default desktop apps, and a PDF opens in the viewer built into this
   app, page by page: turn pages with the arrows or the buttons, type a page
   number in the top bar to jump to it, PageUp and PageDown walk ten pages at a
@@ -99,7 +102,8 @@ without embedding a browser engine.
   memory, and a protected or damaged file says so instead of waiting. Files say
   what they are: an image sent as a file opens in
   the viewer, a document shows its kind beside the size, and a program carries
-  a warning with Save a copy in place of opening it. Every attachment menu has
+  a warning with Save a copy in place of opening it. Clicking a program never
+  runs it: it reveals the file selected in its folder instead. Every attachment menu has
   **Show info**, with the MIME type, size, pixels or length, the path on disk
   and the SHA-256 hash of the file. View-once photos and videos are labelled
   and left for your phone, and a download in progress shows a moving bar.
@@ -204,8 +208,7 @@ without embedding a browser engine.
 
 ## What it does not do yet
 
-- Play ordinary videos in the app (they open in your player), or reply to
-  a message with an attachment.
+- Reply to a message with an attachment.
 - Open a view-once photo or video here: they are marked and left for your
   phone, which is the only device WhatsApp hands them to.
 - Calls, status posts, communities, newsletters, and group administration.

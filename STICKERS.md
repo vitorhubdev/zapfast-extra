@@ -115,6 +115,10 @@ a standard:
   message points at, and never touches saved stickers or packs.
 - The favourites tab, and the glow that marks the message a quote jump
   landed on.
+- In-app video playback in `src/video.rs`: the H.264 track decodes beside the
+  soundtrack instead of handing the file to the system player, with the audio
+  clock deciding which frame is on screen. Seeking restarts at the nearest
+  earlier key frame, so it pays only for the frames between the two.
 
 ## Rules that came out of the references
 

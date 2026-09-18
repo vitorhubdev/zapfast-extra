@@ -2,6 +2,31 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.26] - 2026-09-18
+
+### New
+
+- Videos play inside the app. Clicking one opens the viewer playing it with
+  its soundtrack, with play and pause, a bar to jump through it, and Space
+  as a shortcut. The true length comes from the file itself. A file the
+  in-process decoder cannot read says why and still offers the default app.
+
+### Fixed
+
+- A program attached to a chat can no longer run from the app at all.
+  Clicking its card reveals the file selected in its folder instead of
+  executing it, and Show in folder now selects the file instead of opening
+  the bare folder.
+- Stickers from older versions are filed under their content hash on sight,
+  so they get thumbnails, one shared identity, and a single entry instead
+  of showing twice with full-size tiles.
+- The picker keys every downloaded sticker by the bytes on disk first, so
+  the phone's list and the chat history agree and the same picture is
+  listed once however it arrived.
+- Previews whose sticker file is gone, and phone copies nothing names
+  anymore, are reclaimed by the cache sweep. Saved stickers and packs are
+  never touched.
+
 ## [1.0.25] - 2026-09-18
 
 ### New
