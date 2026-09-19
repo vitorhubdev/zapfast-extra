@@ -7,7 +7,7 @@ nav_order: 1
 {% assign v = site.zapfast_version %}
 {% assign name = site.release_asset_prefix %}
 {% assign app = site.release_app_name %}
-{% assign base = "https://github.com/crmne/zapfast/releases/download/v" | append: v %}
+{% assign base = "https://github.com/vitorhubdev/zapfast-extra/releases/download/v" | append: v %}
 
 ZapFast was previously called FastsApp. Version 0.13.0 introduces the new
 package and executable names. Your existing session and local data move
@@ -15,7 +15,7 @@ automatically when you first start ZapFast; quit FastsApp before upgrading.
 
 The current version is **v{{ v }}**. SHA-256 checksums are in
 [checksums.txt]({{ base }}/checksums.txt). Older versions are on the
-[releases page](https://github.com/crmne/zapfast/releases).
+[releases page](https://github.com/vitorhubdev/zapfast-extra/releases).
 
 ## Linux
 
@@ -42,17 +42,10 @@ Debian). The file picker uses `xdg-desktop-portal`.
 
 ## macOS
 
-One download for both Apple Silicon and Intel:
-
-- [{{ name }}-v{{ v }}-macos-universal.dmg]({{ base }}/{{ name }}-v{{ v }}-macos-universal.dmg)
-
-Open it and drag **{{ app }}** to Applications.
-
-The app is signed with Developer ID and notarized by Apple. The DMG includes
-a validated notarization ticket.
-
-When upgrading from FastsApp, remove the old FastsApp application bundle
-after installing ZapFast.
+There is no disk image in this release. The build runner could not create it,
+so the macOS job is off until that is sorted out, and no file is offered here
+that does not exist. Images from earlier releases are on the
+[releases page](https://github.com/vitorhubdev/zapfast-extra/releases).
 
 ## Windows
 

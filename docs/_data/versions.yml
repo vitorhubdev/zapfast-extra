@@ -1,7 +1,7 @@
-current: v1.0.18
+current: v1.0.30
 items:
-  - id: v1.0.18
-    title: v1.0.18
+  - id: v1.0.30
+    title: v1.0.30
     url: /download/
   - title: Changelog
     url: https://github.com/vitorhubdev/zapfast-extra/blob/main/CHANGELOG.md
