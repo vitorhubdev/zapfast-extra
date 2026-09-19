@@ -382,7 +382,10 @@ struct Active {
     frames: Receiver<Frame>,
     buffered: VecDeque<Frame>,
     shown: Duration,
-    texture: Option<(TextureHandle, Vec2, Duration)>,
+    /// One texture for the whole clip, updated in place. Allocating a fresh
+    /// texture per frame churned GPU memory for nothing, and the handle has
+    /// to survive a seek because the picture size never changes.
+    texture: Option<TextureHandle>,
     generation: Arc<AtomicU64>,
     decode_done: bool,
     finished: bool,
@@ -484,7 +487,9 @@ impl Player {
             let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
             active.frames = rx;
             active.buffered.clear();
-            active.texture = None;
+            // The clip keeps its texture; a sentinel timestamp forces the
+            // next decoded frame to upload over the still on screen.
+            active.shown = Duration::MAX;
             active.decode_done = false;
             active.finished = false;
             active.seeking = !target.is_zero();
@@ -751,40 +756,40 @@ fn show_frame(
     position: Duration,
     total: Duration,
 ) -> State {
-    let texture = match active.texture.clone() {
-        Some((texture, size, shown)) if shown == pts => Some((texture, size)),
-        _ => active
-            .buffered
-            .iter()
-            .find(|frame| frame.pts == pts)
-            .map(|frame| {
-                let texture = ctx.load_texture(
-                    format!("video-{}-{}", path.display(), pts.as_millis()),
-                    frame.image.clone(),
+    // The picture between two decode steps is the same one, so only a new
+    // presentation time touches the GPU, and it lands in the clip's own
+    // texture instead of a new one.
+    if active.shown != pts
+        && let Some(frame) = active.buffered.iter().find(|frame| frame.pts == pts)
+    {
+        let image = frame.image.clone();
+        match active.texture.as_mut() {
+            Some(handle) => handle.set(image, TextureOptions::LINEAR),
+            None => {
+                active.texture = Some(ctx.load_texture(
+                    format!("video-{}", path.display()),
+                    image,
                     TextureOptions::LINEAR,
-                );
-                let size = Vec2::new(frame.image.width() as f32, frame.image.height() as f32);
-                active.shown = pts;
-                active.texture = Some((texture.clone(), size, pts));
-                (texture, size)
-            }),
-    };
-    match texture {
-        Some((texture, size)) => {
-            if active.playing {
-                ctx.request_repaint_after(next_repaint(active, position));
-            }
-            State::Showing {
-                texture,
-                size,
-                position: position.min(total),
-                total,
-                playing: active.playing,
-                finished: active.finished,
-                seeking: active.seeking,
+                ));
             }
         }
-        None => State::Loading,
+        active.shown = pts;
+    }
+    let Some(handle) = active.texture.as_ref() else {
+        return State::Loading;
+    };
+    let (texture, size) = (handle.clone(), handle.size_vec2());
+    if active.playing {
+        ctx.request_repaint_after(next_repaint(active, position));
+    }
+    State::Showing {
+        texture,
+        size,
+        position: position.min(total),
+        total,
+        playing: active.playing,
+        finished: active.finished,
+        seeking: active.seeking,
     }
 }
 
@@ -854,9 +859,12 @@ fn audio_at(path: &Path, at: Duration) -> Audio {
     if !at.is_zero() && decoder.try_seek(at).is_err() {
         return Audio::Restart;
     }
-    let Some(device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
+    // The player opens a fresh sink on every seek, so rodio's drop notice
+    // would print on each one; the sink is dropped on purpose here.
+    let Some(mut device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
         return Audio::Silent;
     };
+    device.log_on_drop(false);
     let sink = rodio::Player::connect_new(device.mixer());
     sink.append(decoder);
     sink.pause();
@@ -1034,9 +1042,10 @@ fn attach_cached(active: &mut Active, volume: f32, muted: bool, from: Duration) 
         return;
     };
     let skip = (from.as_secs_f32() * PCM_RATE as f32) as usize;
-    let Some(device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
+    let Some(mut device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
         return;
     };
+    device.log_on_drop(false);
     let sink = rodio::Player::connect_new(device.mixer());
     sink.append(MemSamples::from_pcm(pcm, skip));
     sink.set_volume(if muted { 0.0 } else { volume.clamp(0.0, 1.0) });
@@ -1233,23 +1242,68 @@ fn decode(
     }
 }
 
-/// The 1-based sample to decode from: the nearest key frame at or before the
-/// target in a table of start time and key-frame flag pairs.
-fn pick_start(table: &[(u64, bool)], target_units: u64) -> u32 {
-    let mut start = 1u32;
+/// Samples a seek may search, either side of its estimate. A chat encode
+/// puts a key frame every couple of seconds, so a few hundred samples cover
+/// it several times over.
+const SEEK_WINDOW: u32 = 400;
+/// The 1-based key frame a seek should start from, in a table of start time
+/// and key-frame flag pairs in time order: the last one at or before the
+/// target, or the first one after it. `None` when the table holds none.
+///
+/// A decode has to begin on a key frame: starting on a delta frame feeds the
+/// decoder pictures it cannot reconstruct, and the timestamps after it line
+/// up wrong, which is what made a jump play as a stutter.
+fn pick_keyframe(table: &[(u64, bool)], target_units: u64) -> Option<u32> {
+    let mut before = None;
     for (index, entry) in table.iter().enumerate() {
-        if entry.0 > target_units {
-            break;
+        if !entry.1 {
+            continue;
         }
-        if entry.1 {
-            start = index as u32 + 1;
+        if entry.0 <= target_units {
+            before = Some(index as u32 + 1);
+        } else {
+            // Past the target already: the closest key frame ahead wins when
+            // none sits behind it.
+            return before.or(Some(index as u32 + 1));
         }
     }
-    start
+    before
 }
-/// The sample to start decoding at: the nearest key frame at or before the
-/// target, so the decoder sees a clean entry point without replaying the
+/// Reads the samples of one search window, in time order.
+///
+/// Reads stop at the first key frame past the target: nothing later can
+/// change the answer, and every sample read loads its bytes from the file.
+fn sample_window(
+    mp4: &mut mp4::Mp4Reader<BufReader<std::fs::File>>,
+    track_id: u32,
+    from: u32,
+    span: u32,
+    count: u32,
+    target_units: u64,
+) -> Vec<(u64, bool)> {
+    let mut table = Vec::with_capacity(span as usize);
+    let last = from.saturating_add(span).min(count);
+    let mut sample_id = from.max(1);
+    while sample_id <= last {
+        let Ok(Some(sample)) = mp4.read_sample(track_id, sample_id) else {
+            break;
+        };
+        table.push((sample.start_time, sample.is_sync));
+        if sample.is_sync && sample.start_time > target_units {
+            break;
+        }
+        sample_id += 1;
+    }
+    table
+}
+/// The sample to start decoding at: a real key frame at or before the target
+/// when one is near, so the decoder enters cleanly without replaying the
 /// whole file.
+///
+/// The estimate comes from where the target sits in the clip, because
+/// walking the sample table from the start loads every sample's bytes and
+/// made a jump feel like a fast forward. The window widens only for files
+/// with an unusually long key-frame interval.
 fn first_sample_at(
     mp4: &mut mp4::Mp4Reader<BufReader<std::fs::File>>,
     track_id: u32,
@@ -1260,65 +1314,26 @@ fn first_sample_at(
     if target.is_zero() {
         return 1;
     }
-    let target_units = (target.as_secs_f64() * timescale as f64) as u64;
     let count = mp4.sample_count(track_id).unwrap_or(0);
     if count == 0 {
         return 1;
     }
-    // The keyframe interval of a chat encode is seconds, not minutes, so
-    // walking back a few hundred samples from the estimate lands on one
-    // without replaying the whole file. Reading a sample loads its bytes,
-    // which is why the old full scan from the start felt like a fast
-    // forward instead of a jump.
+    let target_units = (target.as_secs_f64() * timescale.max(1) as f64) as u64;
     let fraction = if total.is_zero() {
         0.0
     } else {
         (target.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0)
     };
     let guess = ((fraction * count as f64) as u32).clamp(1, count);
-    let mut window: Vec<(u64, bool)> = Vec::new();
-    let start = guess.saturating_sub(400).max(1);
-    let mut sample_id = start;
-    while sample_id <= guess {
-        match mp4.read_sample(track_id, sample_id) {
-            Ok(Some(sample)) => {
-                if sample.start_time > target_units {
-                    break;
-                }
-                window.push((sample.start_time, sample.is_sync));
-            }
-            _ => break,
-        }
-        sample_id += 1;
-        if sample_id - start > 600 {
-            break;
+    for span in [SEEK_WINDOW, SEEK_WINDOW * 3, SEEK_WINDOW * 9] {
+        let from = guess.saturating_sub(span).max(1);
+        let table = sample_window(mp4, track_id, from, span * 2, count, target_units);
+        if let Some(picked) = pick_keyframe(&table, target_units) {
+            return from + picked - 1;
         }
     }
-    // The sample table also tells a forward scan where the target lands
-    // when timestamps drift from the estimate (VFR, edits).
-    while window.last().is_some_and(|last| last.0 <= target_units)
-        && sample_id <= count
-        && sample_id - start <= 800
-    {
-        match mp4.read_sample(track_id, sample_id) {
-            Ok(Some(sample)) => {
-                if sample.start_time > target_units {
-                    break;
-                }
-                window.push((sample.start_time, sample.is_sync));
-            }
-            _ => break,
-        }
-        sample_id += 1;
-    }
-    let picked = pick_start(&window, target_units);
-    if picked == 1 && start > 1 {
-        // No key frame in the window (unusual intervals): fall back to the
-        // window start instead of the file start, still a clean entry.
-        return start;
-    }
-    // `pick_start` answers 1-based inside the window; shift to file ids.
-    start + picked - 1
+    // A track with no key frame anywhere decodes from the top.
+    1
 }
 
 /// Presentation time of a sample, honouring the composition offset that
@@ -1424,15 +1439,60 @@ mod tests {
             (99, true),
             (132, false),
         ];
-        assert_eq!(pick_start(&table, 150), 4);
+        assert_eq!(pick_keyframe(&table, 150), Some(4));
         // Before the second key frame, the first one still opens.
-        assert_eq!(pick_start(&table, 90), 1);
+        assert_eq!(pick_keyframe(&table, 90), Some(1));
         // Past the end, the last key frame opens.
-        assert_eq!(pick_start(&table, 10_000), 4);
-        // With no key frame at all, decoding starts at the beginning.
+        assert_eq!(pick_keyframe(&table, 10_000), Some(4));
+        // A target before the first key frame opens on that one, never on a
+        // delta frame the decoder could not reconstruct.
+        let late = vec![(99, false), (132, true), (165, false)];
+        assert_eq!(pick_keyframe(&late, 0), Some(2));
+        // With no key frame at all there is nothing to open on.
         let plain = vec![(0, false), (33, false)];
-        assert_eq!(pick_start(&plain, 100), 1);
-        assert_eq!(pick_start(&[], 100), 1);
+        assert_eq!(pick_keyframe(&plain, 100), None);
+        assert_eq!(pick_keyframe(&[], 100), None);
+    }
+    #[test]
+    fn a_seek_lands_on_a_real_key_frame() {
+        // The decoder can only enter on a key frame, so a jump has to answer
+        // one no matter where the target falls.
+        let dir = std::env::temp_dir().join(format!("zapfast-seek-{}", std::process::id()));
+        let Some(path) = sample_clip_seconds(&dir, 6) else {
+            return;
+        };
+        let file = std::fs::File::open(&path).expect("opens");
+        let size = file.metadata().expect("stats").len();
+        let mut mp4 = mp4::Mp4Reader::read_header(BufReader::new(file), size).expect("header");
+        let track = mp4
+            .tracks()
+            .values()
+            .find(|track| track.track_type().ok() == Some(mp4::TrackType::Video))
+            .expect("video track");
+        let (track_id, timescale) = (track.track_id(), u64::from(track.timescale().max(1)));
+        let total = mp4.duration();
+        assert!(!total.is_zero(), "the sample clip has a length");
+        for fraction in [0.05f32, 0.25, 0.5, 0.75, 0.95, 1.0] {
+            let at = total.mul_f32(fraction);
+            if at.is_zero() {
+                continue;
+            }
+            let start = first_sample_at(&mut mp4, track_id, timescale, at, total);
+            let sample = mp4
+                .read_sample(track_id, start)
+                .expect("reads")
+                .expect("a sample");
+            assert!(
+                sample.is_sync,
+                "a seek to {fraction} starts on sample {start}, a key frame"
+            );
+            let pts = stamp(sample.start_time, sample.rendering_offset, timescale);
+            assert!(
+                pts <= at,
+                "the key frame at {pts:?} sits at or before the target {at:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1471,15 +1531,31 @@ mod tests {
     }
     /// Makes a two-second H.264 video with a tone, or nothing without ffmpeg.
     fn sample_clip(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        sample_clip_seconds(dir, 2)
+    }
+    /// Makes a clip of that many seconds with a key frame every second, so a
+    /// seek has something to land on, or nothing without ffmpeg.
+    fn sample_clip_seconds(dir: &std::path::Path, secs: u32) -> Option<std::path::PathBuf> {
         std::fs::create_dir_all(dir).ok()?;
-        let path = dir.join("clip.mp4");
+        let path = dir.join(format!("clip-{secs}.mp4"));
         let made = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
-            .args(["-f", "lavfi", "-i", "color=c=blue:s=64x64:d=2:r=10"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("color=c=blue:s=64x64:d={secs}:r=10"),
+            ])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                &format!("sine=frequency=440:duration={secs}"),
+            ])
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             // WhatsApp sends baseline video, so the clip has no B-frames either.
             .args(["-profile:v", "baseline", "-bf", "0"])
+            .args(["-g", "10", "-keyint_min", "10", "-sc_threshold", "0"])
             .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
             .arg(&path)
             .status()

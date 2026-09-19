@@ -2,6 +2,19 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.30] - 2026-09-18
+
+### Fixed
+
+- A jump in a video starts on a key frame. It used to begin on a delta
+  frame whenever the search window held no key frame, which fed the decoder
+  pictures it could not reconstruct and lined up the timestamps after them
+  wrong, so a jump played as a stutter.
+- The player keeps one texture per video and updates it in place, instead of
+  allocating a texture for every decoded frame.
+- A sink opened for a video no longer prints rodio's drop notice on every
+  seek.
+
 ## [1.0.29] - 2026-09-18
 
 ### Fixed
