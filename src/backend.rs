@@ -354,6 +354,8 @@ pub enum Command {
         chat: ChatId,
         id: String,
         preview: Option<Vec<u8>>,
+        /// Real length in seconds, when the file told it.
+        seconds: Option<u32>,
     },
     /// Internal profile-picture result.
     AvatarFetched {

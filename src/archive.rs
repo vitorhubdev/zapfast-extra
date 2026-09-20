@@ -545,8 +545,8 @@ impl Archive {
         )?;
         let rows = statement.query_map([], |row| {
             Ok((
-                row.get(0)?,
-                row.get(1)?,
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
                 std::path::PathBuf::from(row.get::<_, String>(2)?),
             ))
         })?;
@@ -993,6 +993,77 @@ impl Archive {
         Ok(())
     }
 
+    /// Stores what analyzing a downloaded video learned: its real length
+    /// and a poster built from its own frames.
+    ///
+    /// The length fills in only while the message still carries none (or
+    /// a zero the phone sent); the poster always upgrades, because a
+    /// generated frame carries a bubble a 96 px phone thumbnail cannot.
+    pub fn set_video_meta(
+        &self,
+        chat: &str,
+        id: &str,
+        seconds: Option<u32>,
+        thumbnail: Option<&[u8]>,
+    ) -> Result<Option<Message>> {
+        let Some(mut message) = self.message(chat, id)? else {
+            return Ok(None);
+        };
+        let Content::Video {
+            seconds: stored, ..
+        } = &mut message.content
+        else {
+            return Ok(None);
+        };
+        if let Some(seconds) = seconds
+            && stored.is_none_or(|known| known == 0)
+        {
+            *stored = Some(seconds);
+        }
+        self.set_content(chat, id, &message.content, message.edited)?;
+        if let Some(thumbnail) = thumbnail {
+            self.connection.execute(
+                "UPDATE messages SET thumbnail = ?3 WHERE chat = ?1 AND id = ?2",
+                params![chat, id, thumbnail],
+            )?;
+            message.thumbnail = Some(thumbnail.to_vec());
+        }
+        Ok(Some(message))
+    }
+
+    /// Videos already on disk whose length is still unknown (or zero) or
+    /// whose poster never arrived: the backfill analyzes them in order.
+    pub fn videos_needing_meta(&self) -> Result<Vec<(String, String, std::path::PathBuf)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT chat, id, json_extract(content, '$.media.path') AS path
+             FROM messages
+             WHERE json_extract(content, '$.media.path') IS NOT NULL
+             AND (
+                 json_extract(content, '$.seconds') IS NULL
+                 OR json_extract(content, '$.seconds') = 0
+                 OR thumbnail IS NULL
+             )",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                std::path::PathBuf::from(row.get::<_, String>(2)?),
+            ))
+        })?;
+        // Only videos: other attachments share the media path column.
+        let mut videos = Vec::new();
+        for (chat, id, path) in rows.flatten() {
+            let is_video = self
+                .message(&chat, &id)?
+                .is_some_and(|message| matches!(message.content, Content::Video { .. }));
+            if is_video {
+                videos.push((chat, id, path));
+            }
+        }
+        Ok(videos)
+    }
+
     /// Every phone-sticker file the picker may still list.
     ///
     /// The cache sweep keeps these and may reclaim anything else in the
@@ -1379,6 +1450,133 @@ impl Archive {
 pub(crate) mod tests {
     use super::*;
     use crate::model::Content;
+    use crate::model::Media;
+
+    /// A downloaded video message: real file on disk, phone metadata.
+    fn video_message(
+        chat: &str,
+        id: &str,
+        seconds: Option<u32>,
+        path: &std::path::Path,
+    ) -> Message {
+        let mut message = message(chat, id, 10, false);
+        message.content = Content::Video {
+            caption: None,
+            media: Media {
+                mime: "video/mp4".into(),
+                size: 100,
+                width: Some(64),
+                height: Some(64),
+                path: Some(path.to_path_buf()),
+                state: Default::default(),
+            },
+            seconds,
+            gif: false,
+        };
+        message
+    }
+
+    #[test]
+    fn analyzed_video_meta_fills_length_and_upgrades_the_poster() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("clip.mp4");
+        std::fs::write(&file, b"bytes").unwrap();
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("chat", "Chat").expect("chat");
+        archive
+            .insert_message(&video_message("chat", "m1", None, &file), None)
+            .expect("insert");
+        let stored = archive
+            .set_video_meta("chat", "m1", Some(42), Some(b"poster"))
+            .expect("stores")
+            .expect("the message");
+        assert!(
+            matches!(
+                &stored.content,
+                Content::Video {
+                    seconds: Some(42),
+                    ..
+                }
+            ),
+            "an unknown length fills in"
+        );
+        assert_eq!(stored.thumbnail.as_deref(), Some(b"poster".as_slice()));
+        // A known length is never overwritten by a later analysis.
+        let stored = archive
+            .set_video_meta("chat", "m1", Some(7), Some(b"new"))
+            .expect("stores")
+            .expect("the message");
+        assert!(
+            matches!(
+                &stored.content,
+                Content::Video {
+                    seconds: Some(42),
+                    ..
+                }
+            ),
+            "a real length stays"
+        );
+        assert_eq!(stored.thumbnail.as_deref(), Some(b"new".as_slice()));
+        // Zero counts as unknown and fills in too.
+        archive
+            .insert_message(&video_message("chat", "m2", Some(0), &file), None)
+            .expect("insert");
+        let stored = archive
+            .set_video_meta("chat", "m2", Some(9), None)
+            .expect("stores")
+            .expect("the message");
+        assert!(
+            matches!(
+                &stored.content,
+                Content::Video {
+                    seconds: Some(9),
+                    ..
+                }
+            ),
+            "a zero length fills in"
+        );
+        assert!(stored.thumbnail.is_none(), "no poster means no poster");
+    }
+
+    #[test]
+    fn videos_needing_meta_lists_only_the_unknown_or_posterless() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("clip.mp4");
+        std::fs::write(&file, b"bytes").unwrap();
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("chat", "Chat").expect("chat");
+        // Unknown length, posterless, zero length: all need analysis.
+        for (id, seconds) in [("m1", None), ("m2", Some(0)), ("m3", Some(42))] {
+            archive
+                .insert_message(&video_message("chat", id, seconds, &file), None)
+                .expect("insert");
+        }
+        let mut needed: Vec<String> = archive
+            .videos_needing_meta()
+            .expect("lists")
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect();
+        needed.sort();
+        assert_eq!(
+            needed,
+            vec!["m1".to_owned(), "m2".to_owned(), "m3".to_owned()]
+        );
+        // m1 is complete now: length known and poster stored.
+        archive
+            .set_video_meta("chat", "m1", Some(42), Some(b"poster"))
+            .expect("stores");
+        let needed: Vec<String> = archive
+            .videos_needing_meta()
+            .expect("lists")
+            .into_iter()
+            .map(|(_, id, _)| id)
+            .collect();
+        assert!(
+            !needed.contains(&"m1".to_owned()),
+            "a complete video drops out"
+        );
+    }
     #[test]
     fn rekeying_moves_a_chat_from_its_privacy_id_to_its_number() {
         let archive = Archive::in_memory().expect("opens");

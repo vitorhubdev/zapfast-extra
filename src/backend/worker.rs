@@ -2837,9 +2837,18 @@ impl Worker {
                 self.fetch_missing_stickers();
                 self.emit_stickers();
             }
-            Command::VideoPreview { chat, id, preview } => {
-                if let Some(bytes) = preview {
-                    let _ = self.archive.set_thumbnail(&chat, &id, &bytes);
+            Command::VideoPreview {
+                chat,
+                id,
+                preview,
+                seconds,
+            } => {
+                // One analysis answers length and poster together; either
+                // may be missing while the other still applies.
+                if preview.is_some() || seconds.is_some() {
+                    let _ = self
+                        .archive
+                        .set_video_meta(&chat, &id, seconds, preview.as_deref());
                     self.emit_message(&chat, &id);
                 }
             }
@@ -3115,7 +3124,7 @@ impl Worker {
                     Ok(path) => {
                         let _ = self.archive.set_media_path(&chat, &id, path);
                         self.download_retries.remove(&(chat.clone(), id.clone()));
-                        self.preview_video(&chat, &id);
+                        self.analyze_video(&chat, &id);
                     }
                     Err(error) => {
                         let key = (chat.clone(), id.clone());
@@ -3894,15 +3903,15 @@ impl Worker {
         }
     }
 
-    /// Builds the poster of a downloaded video that arrived without one.
+    /// Learns a downloaded video's real length and a better poster.
     ///
-    /// Some videos carry no thumbnail from the phone. The first decoded
-    /// frame stands in, so the bubble and the viewer never show a bare file
-    /// row for a video that is already on disk.
-    fn preview_video(&mut self, chat: &str, id: &str) {
+    /// The phone's metadata and thumbnail stay on screen until this
+    /// answers. The poster is rebuilt even when one arrived, because a
+    /// 96 px phone thumbnail cannot carry a 440 px bubble; the length
+    /// fills in whenever the message arrived with none (or a zero).
+    fn analyze_video(&mut self, chat: &str, id: &str) {
         let ready = self.archive.message(chat, id).ok().flatten().filter(|row| {
             matches!(&row.content, Content::Video { gif: false, .. })
-                && row.thumbnail.is_none()
                 && row
                     .content
                     .media()
@@ -3916,11 +3925,50 @@ impl Worker {
             .media()
             .and_then(|media| media.path.clone())
             .expect("just checked");
+        if !path.is_file() {
+            return;
+        }
         let commands = self.commands.clone();
         let (chat, id) = (chat.to_owned(), id.to_owned());
         tokio::task::spawn_blocking(move || {
-            let preview = crate::video::preview(&path);
-            let _ = commands.send(Command::VideoPreview { chat, id, preview });
+            let analysis = crate::video::analyze(&path);
+            let _ = commands.send(Command::VideoPreview {
+                chat,
+                id,
+                preview: analysis.poster,
+                seconds: analysis.seconds,
+            });
+        });
+    }
+
+    /// Fills length and poster for videos downloaded before this version
+    /// learned to analyze them. One background task walks them in order,
+    /// so an archive full of videos never storms the disk; each answer
+    /// refreshes its own bubble without a new download.
+    fn backfill_video_meta(&mut self) {
+        let Ok(rows) = self.archive.videos_needing_meta() else {
+            return;
+        };
+        let rows: Vec<_> = rows
+            .into_iter()
+            .filter(|(_, _, path)| path.is_file())
+            .collect();
+        if rows.is_empty() {
+            return;
+        }
+        let commands = self.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            for (chat, id, path) in rows {
+                let analysis = crate::video::analyze(&path);
+                if analysis.poster.is_some() || analysis.seconds.is_some() {
+                    let _ = commands.send(Command::VideoPreview {
+                        chat,
+                        id,
+                        preview: analysis.poster,
+                        seconds: analysis.seconds,
+                    });
+                }
+            }
         });
     }
 
@@ -3962,6 +4010,9 @@ impl Worker {
             return;
         }
         self.cache_swept = true;
+        // Videos downloaded before analysis existed get their length and
+        // poster now, without a new download.
+        self.backfill_video_meta();
         let media = self.dirs.media_cache_dir();
         let keep: HashSet<String> = match self.archive.media_paths() {
             Ok(rows) => rows
@@ -5526,7 +5577,9 @@ fn classify(base: &wa::Message) -> Option<Content> {
                 video.width,
                 video.height,
             ),
-            seconds: video.seconds,
+            // Zero means the phone sent no length: keep it unknown so the
+            // bubble omits it until the downloaded file is analyzed.
+            seconds: video.seconds.filter(|seconds| *seconds > 0),
             gif: video.gif_playback.unwrap_or(false),
         });
     }

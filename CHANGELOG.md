@@ -2,6 +2,26 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.37] - 2026-09-20
+
+### Fixed
+
+- A jump reuses the open video instead of reopening the file: the still
+  stays on screen, the clock holds the target until live frames arrive,
+  and picture and sound resume together. Jumps on a paused video stay
+  paused and paint without needing the mouse, and only the newest of
+  rapid jumps survives.
+- The soundtrack opens beside the jump instead of on the interface
+  thread, and older decodes and extractions stand down as soon as a newer
+  jump retires them.
+- A jump opens behind its target even across long gaps between key
+  frames, never on a key frame ahead where the frames to show could never
+  decode.
+- A downloaded video reports its real length and a poster built from its
+  own frames, skipping black openings. Zero stays unknown, so the bubble
+  omits the length instead of showing a misleading zero, and videos
+  downloaded before this version are analyzed without a new download.
+
 ## [1.0.36] - 2026-09-20
 
 ### Fixed

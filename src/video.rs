@@ -260,12 +260,145 @@ impl rodio::Source for MemSamples {
         Some(self.total)
     }
 }
-/// The first frame of a video as small RGBA bytes, for posters.
+/// What one background pass over a downloaded video learns: its real
+/// length and a poster worth showing. The phone's metadata and thumbnail
+/// stay on screen until this answers.
+pub struct VideoAnalysis {
+    pub seconds: Option<u32>,
+    pub poster: Option<Vec<u8>>,
+}
+
+/// Reads a downloaded video's length and builds a poster from its own
+/// frames. Zero stays unknown: the bubble omits the length instead of
+/// showing a misleading zero.
+pub fn analyze(path: &Path) -> VideoAnalysis {
+    let seconds = probe(path)
+        .or_else(|_| probe_ffmpeg(path))
+        .ok()
+        .map(|clip| clip.duration.as_secs() as u32)
+        .filter(|seconds| *seconds > 0);
+    let poster = best_frame(path, PLAY_WIDTH)
+        .or_else(|| ffmpeg_poster(path))
+        .and_then(encode_poster);
+    VideoAnalysis { seconds, poster }
+}
+
+/// The first usable picture of a video, for posters.
 ///
-/// Videos that arrive without the phone's thumbnail get this instead, so the
-/// bubble and the viewer never show a bare file row for bytes on disk.
-pub fn preview(path: &Path) -> Option<Vec<u8>> {
-    let image = first_frame(path, 320).or_else(|| ffmpeg_poster(path))?;
+/// A black opening or a transition is skipped in favour of the frames
+/// right after it; what cannot be read keeps the phone's thumbnail.
+fn best_frame(path: &Path, width: u32) -> Option<image::RgbaImage> {
+    let (mut first, mut bright) = (None, None);
+    decode_frames(path, width, 60, &mut |image| {
+        if first.is_none() {
+            first = Some(image.clone());
+        }
+        if bright.is_none() && mean_luma(&image) > 10.0 {
+            bright = Some(image.clone());
+        }
+        bright.is_some()
+    });
+    bright.or(first)
+}
+
+/// Mean brightness of a frame, from black (0) to white (255).
+fn mean_luma(image: &image::RgbaImage) -> f32 {
+    if image.as_raw().is_empty() {
+        return 0.0;
+    }
+    let (mut sum, mut count) = (0u64, 0u64);
+    for pixel in image.pixels().step_by(7) {
+        let [red, green, blue, _] = pixel.0;
+        sum += u64::from(red) + u64::from(green) + u64::from(blue);
+        count += 1;
+    }
+    if count == 0 {
+        return 0.0;
+    }
+    sum as f32 / (3.0 * count as f32)
+}
+
+/// Decodes up to `limit` pictures from the start, scaled to a width,
+/// stopping early when the visitor has seen enough.
+fn decode_frames(
+    path: &Path,
+    width: u32,
+    limit: u32,
+    visit: &mut dyn FnMut(image::RgbaImage) -> bool,
+) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
+        return;
+    };
+    let Ok(mut mp4) = mp4::Mp4Reader::read_header(BufReader::new(file), size) else {
+        return;
+    };
+    let Some(track) = mp4
+        .tracks()
+        .values()
+        .find(|track| track.track_type().ok() == Some(mp4::TrackType::Video))
+    else {
+        return;
+    };
+    // Fragmented files list their samples per fragment; the header count stays empty.
+    let (track_id, count) = (
+        track.track_id(),
+        mp4.sample_count(track.track_id()).unwrap_or(0),
+    );
+    let (Ok(sps), Ok(pps)) = (
+        track.sequence_parameter_set().map(|bytes| bytes.to_vec()),
+        track.picture_parameter_set().map(|bytes| bytes.to_vec()),
+    ) else {
+        return;
+    };
+    let Ok(mut decoder) = openh264::decoder::Decoder::new() else {
+        return;
+    };
+    let mut parameters = Vec::new();
+    push_annex_b(&mut parameters, &sps);
+    push_annex_b(&mut parameters, &pps);
+    let _ = decoder.decode(&parameters);
+    for sample_id in 1..=count.min(limit) {
+        let Ok(Some(sample)) = mp4.read_sample(track_id, sample_id) else {
+            continue;
+        };
+        let mut annex_b = Vec::with_capacity(sample.bytes.len() + 16);
+        avcc_to_annex_b(&mut annex_b, &sample.bytes);
+        let Ok(Some(yuv)) = decoder.decode(&annex_b) else {
+            continue;
+        };
+        use openh264::formats::YUVSource;
+        let (w, h) = yuv.dimensions();
+        if w == 0 || h == 0 {
+            continue;
+        }
+        let mut rgba = vec![0u8; w * h * 4];
+        yuv.write_rgba8(&mut rgba);
+        let Some(image) = image::RgbaImage::from_raw(w as u32, h as u32, rgba) else {
+            continue;
+        };
+        let out_width = (w as u32).min(width).max(2);
+        let out_height = ((h as u64 * u64::from(out_width) / w as u64) as u32).max(2);
+        let image = if out_width == w as u32 {
+            image
+        } else {
+            image::imageops::resize(
+                &image,
+                out_width,
+                out_height,
+                image::imageops::FilterType::Triangle,
+            )
+        };
+        if visit(image) {
+            break;
+        }
+    }
+}
+
+/// Encodes a poster frame as JPEG bytes for the archive.
+fn encode_poster(image: image::RgbaImage) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
     image::DynamicImage::ImageRgba8(image)
         .write_to(
@@ -314,60 +447,6 @@ fn ffmpeg_poster(path: &Path) -> Option<image::RgbaImage> {
         )
     })
 }
-/// Decodes until the first picture comes out, scaled to a width.
-fn first_frame(path: &Path, width: u32) -> Option<image::RgbaImage> {
-    let file = std::fs::File::open(path).ok()?;
-    let size = file.metadata().ok()?.len();
-    let mut mp4 = mp4::Mp4Reader::read_header(BufReader::new(file), size).ok()?;
-    let track = mp4
-        .tracks()
-        .values()
-        .find(|track| track.track_type().ok() == Some(mp4::TrackType::Video))?;
-    // Fragmented files list their samples per fragment; the header count stays empty.
-    let (track_id, count) = (
-        track.track_id(),
-        mp4.sample_count(track.track_id()).unwrap_or(0),
-    );
-    let sps = track.sequence_parameter_set().ok()?.to_vec();
-    let pps = track.picture_parameter_set().ok()?.to_vec();
-    let mut decoder = openh264::decoder::Decoder::new().ok()?;
-    let mut parameters = Vec::new();
-    push_annex_b(&mut parameters, &sps);
-    push_annex_b(&mut parameters, &pps);
-    let _ = decoder.decode(&parameters);
-    for sample_id in 1..=count {
-        let sample = mp4.read_sample(track_id, sample_id).ok()??;
-        let mut annex_b = Vec::with_capacity(sample.bytes.len() + 16);
-        avcc_to_annex_b(&mut annex_b, &sample.bytes);
-        if let Some(yuv) = decoder.decode(&annex_b).ok().flatten() {
-            use openh264::formats::YUVSource;
-            let (w, h) = yuv.dimensions();
-            if w == 0 || h == 0 {
-                continue;
-            }
-            let mut rgba = vec![0u8; w * h * 4];
-            yuv.write_rgba8(&mut rgba);
-            let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
-            let out_width = (w as u32).min(width).max(2);
-            let out_height = ((h as u64 * u64::from(out_width) / w as u64) as u32).max(2);
-            return Some(if out_width == w as u32 {
-                image
-            } else {
-                image::imageops::resize(
-                    &image,
-                    out_width,
-                    out_height,
-                    image::imageops::FilterType::Triangle,
-                )
-            });
-        }
-        if sample_id > 120 {
-            break;
-        }
-    }
-    None
-}
-
 struct Active {
     path: PathBuf,
     clip: Clip,
@@ -378,6 +457,9 @@ struct Active {
     pcm: Option<Arc<Vec<f32>>>,
     /// A soundtrack still being decoded in the background.
     audio_rx: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    /// A soundtrack opening in the background after a jump: streaming
+    /// sound first, a full extraction when seeking defeats it.
+    audio_task: Option<(u64, std::sync::mpsc::Receiver<SeekAudio>)>,
     playing: bool,
     /// Position when playback last (re)started; the sink or the wall clock
     /// counts from there.
@@ -535,17 +617,57 @@ impl Player {
             attach_cached(active, volume, muted, target);
             return Ok(());
         }
-        // A jump on a paused video stays paused; opening always plays.
-        let paused = self.active.as_ref().is_some_and(|active| !active.playing);
-        self.open(path, target)?;
-        if paused && let Some(active) = self.active.as_mut() {
-            active.base = target.min(active.clip.duration);
-            if let Some((_, sink)) = &active.audio {
-                active.anchor = sink.get_pos();
-                sink.pause();
-            }
-            active.playing = false;
-        }
+        // Without cached sound the jump retargets in place: the headers
+        // stay read, the still stays on screen, and the clock holds the
+        // target until live frames arrive. Reopening here would reread
+        // everything on the interface thread and restart picture and
+        // sound apart.
+        let active = self.active.as_mut().expect("same path checked");
+        let duration = active.clip.duration;
+        let target = target.min(duration);
+        // A new pass over the same counter stands down the old decode,
+        // the old extraction and the old soundtrack task together: only
+        // the newest jump may answer.
+        active.generation.fetch_add(1, Ordering::SeqCst);
+        let current = active.generation.load(Ordering::SeqCst);
+        let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
+        active.frames = rx;
+        active.buffered.clear();
+        // Frames from the retired generation never come back.
+        active.held = None;
+        active.decode_done = false;
+        active.finished = false;
+        active.seeking = !target.is_zero();
+        active.base = target;
+        active.anchor = Duration::ZERO;
+        active.started = Instant::now();
+        // The old soundtrack belongs to the old position.
+        active.audio = None;
+        active.audio_rx = None;
+        active.audio_task = None;
+        let (generation, file, clip) = (
+            active.generation.clone(),
+            active.path.clone(),
+            active.clip.clone(),
+        );
+        spawn_decode(
+            file.clone(),
+            target,
+            duration,
+            clip.ffmpeg,
+            clip.width,
+            clip.height,
+            generation.clone(),
+            tx,
+        );
+        let (atx, arx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("video-seek-audio".into())
+            .spawn(move || {
+                let _ = atx.send(open_seek_audio(&file, target, &generation, current));
+            })
+            .ok();
+        active.audio_task = Some((current, arx));
         Ok(())
     }
 
@@ -583,8 +705,11 @@ impl Player {
             },
         };
         let at = at.min(clip.duration);
+        // The counter exists before the soundtrack does, so a jump that
+        // lands while it still opens retires this extraction as well.
+        let generation = Arc::new(AtomicU64::new(1));
         let mut audio_rx = None;
-        let (audio, at) = match audio_at(path, at) {
+        let (audio, at) = match audio_at(path, at, &generation, 1) {
             Audio::Sound(audio) => (Some(audio), at),
             Audio::Extracting(rx) => {
                 audio_rx = Some(rx);
@@ -596,7 +721,6 @@ impl Player {
         // live frames arrive; opening at zero plays straight away.
         let seeking = !at.is_zero();
         let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
-        let generation = Arc::new(AtomicU64::new(1));
         spawn_decode(
             path.to_path_buf(),
             at,
@@ -617,6 +741,7 @@ impl Player {
             audio,
             pcm: None,
             audio_rx,
+            audio_task: None,
             playing: true,
             base: at,
             anchor: Duration::ZERO,
@@ -705,6 +830,41 @@ impl Player {
                 }
             }
         }
+        // A jump's soundtrack opens beside it. Only the newest jump may
+        // answer; an older task's delivery dies with its generation.
+        if active.audio.is_none() && active.audio_rx.is_none() {
+            let mut outcome = None;
+            if let Some((current, rx)) = active.audio_task.as_ref() {
+                let current = *current;
+                if let Ok(answer) = rx.try_recv() {
+                    active.audio_task = None;
+                    if current == active.generation.load(Ordering::SeqCst) {
+                        outcome = Some(answer);
+                    }
+                }
+            }
+            match outcome {
+                Some(SeekAudio::Stream((device, sink))) => {
+                    sink.set_volume(if muted { 0.0 } else { volume });
+                    let at = active.position();
+                    active.audio = Some((device, sink));
+                    active.base = at;
+                    active.anchor = Duration::ZERO;
+                    active.started = Instant::now();
+                    if !active.playing {
+                        if let Some((_, sink)) = &active.audio {
+                            sink.pause();
+                        }
+                    } else if let Some((_, sink)) = &active.audio {
+                        sink.play();
+                    }
+                }
+                Some(SeekAudio::Extracting(rx)) => {
+                    active.audio_rx = Some(rx);
+                }
+                Some(SeekAudio::Silent) | None => {}
+            }
+        }
         // The held arrival goes first: it never went back to the channel.
         if let Some(frame) = active.held.take() {
             active.place_frame(frame);
@@ -763,12 +923,20 @@ impl Player {
             {
                 Some(pts) => {
                     active.seeking = false;
+                    // Live picture and clock resume together from the
+                    // target: without this the sound would start ahead by
+                    // however long the jump took to decode.
+                    active.started = Instant::now();
+                    if let Some((_, sink)) = &active.audio {
+                        active.anchor = sink.get_pos();
+                    }
                     show_frame(active, ctx, path, pts, position, total)
                 }
                 None => {
-                    if active.playing {
-                        ctx.request_repaint_after(Duration::from_millis(100));
-                    }
+                    // Work is in flight whether paused or playing: the
+                    // window must wake when the jump lands, with no mouse
+                    // needed.
+                    ctx.request_repaint_after(Duration::from_millis(100));
                     match active.buffered.front().map(|frame| frame.pts) {
                         Some(pts) => show_frame(active, ctx, path, pts, position, total),
                         None if active.decode_done => {
@@ -856,7 +1024,10 @@ fn show_frame(
 
 impl Active {
     fn position(&self) -> Duration {
-        if !self.playing {
+        // Paused or still catching a jump, the clock holds its base: the
+        // picture and the sound resume together once live frames arrive,
+        // instead of the sound running ahead of a picture still decoding.
+        if !self.playing || self.seeking {
             return self.base;
         }
         match &self.audio {
@@ -962,8 +1133,18 @@ enum Audio {
     /// No soundtrack to play; the wall clock drives the picture.
     Silent,
 }
+/// What a jump's background soundtrack task answers. Only the newest jump
+/// may apply it; older tasks die with their generation.
+enum SeekAudio {
+    /// Streaming sound opened at the target, still paused.
+    Stream((rodio::MixerDeviceSink, rodio::Player)),
+    /// A full extraction on its way; it joins at the live position.
+    Extracting(std::sync::mpsc::Receiver<Vec<f32>>),
+    /// No soundtrack to play; the wall clock drives the picture.
+    Silent,
+}
 /// The soundtrack from a position, or why it starts elsewhere.
-fn audio_at(path: &Path, at: Duration) -> Audio {
+fn audio_at(path: &Path, at: Duration, generation: &Arc<AtomicU64>, current: u64) -> Audio {
     use rodio::Source;
     let Some(file) = std::fs::File::open(path).ok() else {
         return Audio::Silent;
@@ -978,7 +1159,7 @@ fn audio_at(path: &Path, at: Duration) -> Audio {
                 "soundtrack not streaming from {}: {error:?}; extracting",
                 path.display()
             );
-            return extract_audio(path);
+            return extract_audio(path, generation.clone(), current);
         }
     };
     if !at.is_zero() && decoder.try_seek(at).is_err() {
@@ -986,7 +1167,7 @@ fn audio_at(path: &Path, at: Duration) -> Audio {
         // its target and the soundtrack joins from a background extraction
         // instead of silently restarting the clip from zero.
         log::warn!("soundtrack cannot seek in {}; extracting", path.display());
-        return extract_audio(path);
+        return extract_audio(path, generation.clone(), current);
     }
     // The player opens a fresh sink on every seek, so rodio's drop notice
     // would print on each one; the sink is dropped on purpose here.
@@ -999,19 +1180,92 @@ fn audio_at(path: &Path, at: Duration) -> Audio {
     sink.pause();
     Audio::Sound((device, sink))
 }
+/// Opens streaming sound at a jump target off the interface thread. Only
+/// the newest jump may apply the answer; anything older is refused before
+/// it can move the clock.
+fn open_seek_audio(
+    path: &Path,
+    at: Duration,
+    generation: &Arc<AtomicU64>,
+    current: u64,
+) -> SeekAudio {
+    use rodio::Source;
+    let alive = || generation.load(Ordering::SeqCst) == current;
+    let Some(file) = std::fs::File::open(path).ok() else {
+        return SeekAudio::Silent;
+    };
+    let mut decoder = match rodio::Decoder::new(BufReader::new(file)) {
+        Ok(decoder) => decoder,
+        Err(error) => {
+            log::warn!(
+                "soundtrack not streaming from {}: {error:?}; extracting",
+                path.display()
+            );
+            return SeekAudio::Extracting(extract_rx(path, generation.clone(), current));
+        }
+    };
+    if !at.is_zero() && decoder.try_seek(at).is_err() {
+        log::warn!("soundtrack cannot seek in {}; extracting", path.display());
+        return SeekAudio::Extracting(extract_rx(path, generation.clone(), current));
+    }
+    let Some(mut device) = rodio::DeviceSinkBuilder::open_default_sink().ok() else {
+        return SeekAudio::Silent;
+    };
+    device.log_on_drop(false);
+    let sink = rodio::Player::connect_new(device.mixer());
+    sink.append(decoder);
+    sink.pause();
+    if !alive() {
+        return SeekAudio::Silent;
+    }
+    SeekAudio::Stream((device, sink))
+}
 /// Starts a background extraction of the whole soundtrack, or silence.
-fn extract_audio(path: &Path) -> Audio {
+/// The thread stands down as soon as a newer jump retires it, instead of
+/// decoding a file nobody is watching anymore.
+fn extract_rx(
+    path: &Path,
+    generation: Arc<AtomicU64>,
+    current: u64,
+) -> std::sync::mpsc::Receiver<Vec<f32>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let path = path.to_path_buf();
     let _ = std::thread::Builder::new()
         .name("video-audio".into())
         .spawn(move || {
+            let alive = || generation.load(Ordering::SeqCst) == current;
             // In-process first so sound works without any external binary;
             // ffmpeg stays only as a last resort for exotic codecs.
-            if let Some(pcm) = symphonia_pcm(&path).or_else(|| ffmpeg_pcm(&path))
+            if let Some(pcm) = symphonia_pcm(&path, &alive).or_else(|| ffmpeg_pcm(&path, &alive))
                 && !pcm.is_empty()
+                && alive()
             {
                 let _ = tx.send(pcm);
+            } else if !alive() {
+                log::debug!("soundtrack extraction retired for {}", path.display());
+            } else {
+                log::warn!("soundtrack not decodable from {}", path.display());
+            }
+        });
+    rx
+}
+/// Starts a background extraction of the whole soundtrack, or silence.
+fn extract_audio(path: &Path, generation: Arc<AtomicU64>, current: u64) -> Audio {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = path.to_path_buf();
+    let _ = std::thread::Builder::new()
+        .name("video-audio".into())
+        .spawn(move || {
+            let alive = || generation.load(Ordering::SeqCst) == current;
+            // In-process first so sound works without any external binary;
+            // ffmpeg stays only as a last resort for exotic codecs.
+            if let Some(pcm) = symphonia_pcm(&path, &alive).or_else(|| ffmpeg_pcm(&path, &alive))
+                && !pcm.is_empty()
+                && alive()
+            {
+                let _ = tx.send(pcm);
+            } else if !alive() {
+                log::debug!("soundtrack extraction retired for {}", path.display());
             } else {
                 log::warn!("soundtrack not decodable from {}", path.display());
             }
@@ -1047,7 +1301,8 @@ fn quiet(command: &mut std::process::Command) -> &mut std::process::Command {
 /// any external binary. Resamples to mono 48 kHz with a linear pass and
 /// caps at five minutes for chat videos. Returns `None` when the file has
 /// no decodable audio track.
-fn symphonia_pcm(path: &Path) -> Option<Vec<f32>> {
+/// The thread stands down as soon as a newer jump retires it.
+fn symphonia_pcm(path: &Path, alive: &dyn Fn() -> bool) -> Option<Vec<f32>> {
     let file = std::fs::File::open(path).ok()?;
     let source = symphonia::core::io::MediaSourceStream::new(
         Box::new(file) as Box<dyn symphonia::core::io::MediaSource>,
@@ -1093,6 +1348,9 @@ fn symphonia_pcm(path: &Path) -> Option<Vec<f32>> {
     let mut mono = Vec::new();
     let mut capped = false;
     loop {
+        if !alive() {
+            return None;
+        }
         if mono.len() >= cap {
             capped = true;
             break;
@@ -1165,7 +1423,7 @@ fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     }
     output
 }
-fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
+fn ffmpeg_pcm(path: &Path, alive: &dyn Fn() -> bool) -> Option<Vec<f32>> {
     use std::io::Read;
     let mut launch = std::process::Command::new("ffmpeg");
     let mut child = quiet(&mut launch)
@@ -1195,6 +1453,11 @@ fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 32_768];
     loop {
+        if !alive() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
         if pcm.len() >= cap {
             break;
         }
@@ -1446,7 +1709,7 @@ fn decode(
 const SEEK_WINDOW: u32 = 400;
 /// The 1-based key frame a seek should start from, in a table of start time
 /// and key-frame flag pairs in time order: the last one at or before the
-/// target, or the first one after it. `None` when the table holds none.
+/// target. `None` when the table holds none at or before it.
 ///
 /// A decode has to begin on a key frame: starting on a delta frame feeds the
 /// decoder pictures it cannot reconstruct, and the timestamps after it line
@@ -1460,9 +1723,10 @@ fn pick_keyframe(table: &[(u64, bool)], target_units: u64) -> Option<u32> {
         if entry.0 <= target_units {
             before = Some(index as u32 + 1);
         } else {
-            // Past the target already: the closest key frame ahead wins when
-            // none sits behind it.
-            return before.or(Some(index as u32 + 1));
+            // Past the target already, and time order means nothing later
+            // can sit behind it: widen the search instead of opening ahead
+            // of the target, where the frames to show could never decode.
+            return before;
         }
     }
     before
@@ -1753,6 +2017,7 @@ mod tests {
                 audio: None,
                 pcm: None,
                 audio_rx: None,
+                audio_task: None,
                 playing: true,
                 base: Duration::ZERO,
                 anchor: Duration::ZERO,
@@ -1877,14 +2142,31 @@ mod tests {
         assert_eq!(pick_keyframe(&table, 90), Some(1));
         // Past the end, the last key frame opens.
         assert_eq!(pick_keyframe(&table, 10_000), Some(4));
-        // A target before the first key frame opens on that one, never on a
-        // delta frame the decoder could not reconstruct.
+        // A target before the first key frame answers nothing, so the
+        // search widens instead of opening ahead of the target, where the
+        // frames to show could never decode.
         let late = vec![(99, false), (132, true), (165, false)];
-        assert_eq!(pick_keyframe(&late, 0), Some(2));
+        assert_eq!(pick_keyframe(&late, 0), None);
         // With no key frame at all there is nothing to open on.
         let plain = vec![(0, false), (33, false)];
         assert_eq!(pick_keyframe(&plain, 100), None);
         assert_eq!(pick_keyframe(&[], 100), None);
+    }
+    #[test]
+    fn a_wide_gap_still_opens_behind_the_target() {
+        // A long interval between key frames must not open ahead: with a
+        // key frame every six seconds, a jump to fifteen seconds starts
+        // from twelve, never from eighteen.
+        let mut table = Vec::new();
+        for secs in [0u64, 6, 12, 18] {
+            table.push((secs * 1000, true));
+            table.push((secs * 1000 + 100, false));
+        }
+        assert_eq!(pick_keyframe(&table, 15_000), Some(5));
+        assert_eq!(pick_keyframe(&table, 12_000), Some(5));
+        // Nothing behind the target widens the search instead of taking
+        // the key frame ahead.
+        assert_eq!(pick_keyframe(&table[6..], 15_000), None);
     }
     #[test]
     fn a_seek_lands_on_a_real_key_frame() {
@@ -1929,6 +2211,176 @@ mod tests {
     }
 
     #[test]
+    fn a_long_gap_opens_behind_the_target() {
+        // Key frames six seconds apart: jumps to 7, 13, 15 and 19 seconds
+        // must all start behind their target, never on the key frame ahead.
+        let dir = std::env::temp_dir().join(format!("zapfast-longgap-{}", std::process::id()));
+        let Some(path) = sample_clip_gop(&dir, 20, 60) else {
+            return;
+        };
+        let file = std::fs::File::open(&path).expect("opens");
+        let size = file.metadata().expect("stats").len();
+        let mut mp4 = mp4::Mp4Reader::read_header(BufReader::new(file), size).expect("header");
+        let track = mp4
+            .tracks()
+            .values()
+            .find(|track| track.track_type().ok() == Some(mp4::TrackType::Video))
+            .expect("video track");
+        let (track_id, timescale) = (track.track_id(), u64::from(track.timescale().max(1)));
+        let total = mp4.duration();
+        assert!(
+            total >= Duration::from_secs(19),
+            "twenty seconds of clip: {total:?}"
+        );
+        for at in [7, 13, 15, 19].map(Duration::from_secs) {
+            let start = first_sample_at(&mut mp4, track_id, timescale, at, total);
+            let sample = mp4
+                .read_sample(track_id, start)
+                .expect("reads")
+                .expect("a sample");
+            assert!(sample.is_sync, "a jump to {at:?} opens on a key frame");
+            let pts = stamp(sample.start_time, sample.rendering_offset, timescale);
+            assert!(
+                pts <= at,
+                "the key frame at {pts:?} sits behind the target {at:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Drives one open clip until the viewer shows a frame, or nothing
+    /// past the deadline.
+    fn drive_until(
+        player: &mut Player,
+        ctx: &egui::Context,
+        path: &std::path::Path,
+        deadline: std::time::Instant,
+        mut done: impl FnMut(Duration, bool) -> bool,
+    ) -> (Duration, bool) {
+        loop {
+            let (position, playing) = match player.poll(ctx, path) {
+                State::Showing {
+                    position, playing, ..
+                } => (position, playing),
+                State::Loading => (Duration::ZERO, true),
+                State::Unsupported(why) => panic!("the sample clip plays: {why}"),
+            };
+            if done(position, playing) {
+                return (position, playing);
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the jump lands: {position:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_jump_lands_and_stays_in_sync() {
+        // A twenty-second clip with a tone, played for real: jump to
+        // fifteen seconds while playing, then to five while paused. The
+        // picture must arrive at the target and stay with the sound.
+        let dir = std::env::temp_dir().join(format!("zapfast-jump-{}", std::process::id()));
+        let Some(path) = sample_clip_seconds(&dir, 20) else {
+            return;
+        };
+        let clip = probe(&path).expect("the header reads");
+        let total = clip.duration;
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut stop = || {};
+        player.toggle(&path, &mut stop).expect("opens");
+        // Playing jump to three quarters: the picture lands near fifteen
+        // seconds and keeps playing.
+        player.seek(&path, 0.75).expect("jumps");
+        let target = total.mul_f32(0.75);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let (position, playing) = drive_until(&mut player, &ctx, &path, deadline, |position, _| {
+            position >= target.saturating_sub(Duration::from_secs(2))
+        });
+        assert!(playing, "a playing jump keeps playing");
+        assert!(
+            position <= target + Duration::from_secs(5),
+            "the picture lands near its target: {position:?} for {target:?}"
+        );
+        // Paused jump to one quarter: the frame shows on its own, still
+        // paused, with no mouse needed.
+        player.toggle(&path, &mut stop).expect("pauses");
+        player.seek(&path, 0.25).expect("jumps paused");
+        let target = total.mul_f32(0.25);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let (position, playing) = drive_until(&mut player, &ctx, &path, deadline, |position, _| {
+            position >= target.saturating_sub(Duration::from_millis(500))
+        });
+        assert!(!playing, "a paused jump stays paused");
+        assert!(
+            (position.as_secs_f32() - target.as_secs_f32()).abs() < 1.5,
+            "the paused frame is the target: {position:?} for {target:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rapid_jumps_keep_only_the_newest_target() {
+        // Three jumps with no paint between them: the retired decodes and
+        // extractions die, and playback settles at the last target.
+        let dir = std::env::temp_dir().join(format!("zapfast-rapid-{}", std::process::id()));
+        let Some(path) = sample_clip_seconds(&dir, 20) else {
+            return;
+        };
+        let clip = probe(&path).expect("the header reads");
+        let total = clip.duration;
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut stop = || {};
+        player.toggle(&path, &mut stop).expect("opens");
+        player.seek(&path, 0.9).expect("first");
+        player.seek(&path, 0.1).expect("second");
+        player.seek(&path, 0.8).expect("third");
+        let target = total.mul_f32(0.8);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let (position, _) = drive_until(&mut player, &ctx, &path, deadline, |position, _| {
+            position >= target.saturating_sub(Duration::from_secs(2))
+        });
+        assert!(
+            position <= target + Duration::from_secs(5),
+            "only the newest jump survives: {position:?} for {target:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn analyze_reports_length_and_a_real_poster() {
+        // A two-second clip: the analysis answers about two seconds and a
+        // JPEG poster, both decoded from the file itself.
+        let dir = std::env::temp_dir().join(format!("zapfast-analyze-{}", std::process::id()));
+        let Some(path) = sample_clip_seconds(&dir, 2) else {
+            return;
+        };
+        let analysis = analyze(&path);
+        assert!(
+            analysis
+                .seconds
+                .is_some_and(|seconds| (1..=3).contains(&seconds)),
+            "about two seconds: {:?}",
+            analysis.seconds
+        );
+        let poster = analysis.poster.expect("a poster");
+        assert!(
+            poster.len() > 2 && poster[0] == 0xFF && poster[1] == 0xD8,
+            "a JPEG poster, {} bytes",
+            poster.len()
+        );
+        // A file cut to nothing stays unknown instead of answering zero.
+        std::fs::write(&path, b"not a video").expect("truncates");
+        let analysis = analyze(&path);
+        assert!(analysis.seconds.is_none(), "no length is no answer");
+        assert!(analysis.poster.is_none(), "no frames is no poster");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn seek_fractions_stay_inside_the_clip() {
         let total = Duration::from_secs(64);
         assert_eq!(total.mul_f32(0.0), Duration::ZERO);
@@ -1954,7 +2406,7 @@ mod tests {
         let Some(path) = sample_clip(&dir) else {
             return;
         };
-        let pcm = symphonia_pcm(&path).expect("AAC decodes in-process");
+        let pcm = symphonia_pcm(&path, &|| true).expect("AAC decodes in-process");
         assert!(pcm.len() > PCM_RATE as usize, "about two seconds of sound");
         assert!(
             pcm.iter().any(|sample| sample.abs() > 0.01),
@@ -1969,8 +2421,14 @@ mod tests {
     /// Makes a clip of that many seconds with a key frame every second, so a
     /// seek has something to land on, or nothing without ffmpeg.
     fn sample_clip_seconds(dir: &std::path::Path, secs: u32) -> Option<std::path::PathBuf> {
+        sample_clip_gop(dir, secs, 10)
+    }
+    /// Makes a clip with a key frame every `gop` frames (ten frames per
+    /// second), or nothing without ffmpeg.
+    fn sample_clip_gop(dir: &std::path::Path, secs: u32, gop: u32) -> Option<std::path::PathBuf> {
         std::fs::create_dir_all(dir).ok()?;
-        let path = dir.join(format!("clip-{secs}.mp4"));
+        let path = dir.join(format!("clip-{secs}-{gop}.mp4"));
+        let gop = gop.to_string();
         let made = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
             .args([
@@ -1988,7 +2446,7 @@ mod tests {
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             // WhatsApp sends baseline video, so the clip has no B-frames either.
             .args(["-profile:v", "baseline", "-bf", "0"])
-            .args(["-g", "10", "-keyint_min", "10", "-sc_threshold", "0"])
+            .args(["-g", &gop, "-keyint_min", &gop, "-sc_threshold", "0"])
             .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
             .arg(&path)
             .status()
@@ -2082,9 +2540,10 @@ mod tests {
             assert_eq!(clip.ffmpeg, expect_ffmpeg, "{name} picks its engine");
             assert!(clip.has_audio, "{name} carries sound");
             // Streaming or background extraction: every layout must sound.
+            let generation = Arc::new(AtomicU64::new(1));
             assert!(
                 matches!(
-                    audio_at(&path, Duration::ZERO),
+                    audio_at(&path, Duration::ZERO, &generation, 1),
                     Audio::Sound(_) | Audio::Extracting(_)
                 ),
                 "{name} sounds"

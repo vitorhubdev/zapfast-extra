@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::model::{Action, ViewerKind};
 use crate::theme::{self, Icon, Palette};
 
+use super::conversation::thumb_revision;
 use super::widgets;
 
 /// Space the fitted picture leaves around itself.
@@ -193,11 +194,14 @@ fn video_poster(
 }
 /// The loader URI of a poster's bytes, registering them a single time.
 fn poster_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
+    // The revision pins the bytes: an upgraded poster registers under a
+    // new address instead of losing to the first image this viewer saw.
     let uri = format!(
-        "bytes://poster-{}-{id}",
+        "bytes://poster-{}-{id}-{}",
         chat.chars()
             .filter(char::is_ascii_alphanumeric)
-            .collect::<String>()
+            .collect::<String>(),
+        thumb_revision(bytes)
     );
     let seen = ctx.data_mut(|data| {
         let mut known = data

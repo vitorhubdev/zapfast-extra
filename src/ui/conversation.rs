@@ -3146,13 +3146,27 @@ fn preview_card(
 #[derive(Clone, Default)]
 struct Thumbnails(Arc<Mutex<HashSet<String>>>);
 
+/// Short hash of thumbnail bytes, so an upgraded poster registers under a
+/// new loader address instead of losing to the first image ever seen.
+pub(crate) fn thumb_revision(bytes: &[u8]) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut revision = DefaultHasher::new();
+    bytes.len().hash(&mut revision);
+    bytes.hash(&mut revision);
+    revision.finish()
+}
+
 fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
+    // The revision pins the bytes: when analysis upgrades a poster, the
+    // new bytes register under a new address instead of losing to the
+    // first image this context ever saw for the message.
     let uri = format!(
-        "bytes://thumb-{}-{}",
+        "bytes://thumb-{}-{}-{}",
         chat.chars()
             .filter(char::is_ascii_alphanumeric)
             .collect::<String>(),
-        id
+        id,
+        thumb_revision(bytes)
     );
     let known: Thumbnails = ctx.data_mut(|data| {
         data.get_temp_mut_or_default::<Thumbnails>(egui::Id::new("thumbnails"))
@@ -3631,6 +3645,13 @@ fn picture(
 }
 
 /// Draws a video poster and opens the downloaded video in the default player.
+/// Zero means the phone sent no length: omit it instead of showing a
+/// misleading zero; the analyzed file fills it in without a download.
+fn display_seconds(seconds: Option<u32>) -> Option<u32> {
+    seconds.filter(|seconds| *seconds > 0)
+}
+
+/// Draws a video poster and opens the downloaded video in the default player.
 #[allow(clippy::too_many_arguments)]
 fn video(
     ui: &mut egui::Ui,
@@ -3642,6 +3663,7 @@ fn video(
     width: f32,
     actions: &mut Vec<Action>,
 ) -> f32 {
+    let seconds = display_seconds(seconds);
     let palette = view.palette;
     let Some(thumbnail) = message.thumbnail.as_deref() else {
         let title = if gif { "GIF" } else { "Video" };
@@ -4248,6 +4270,27 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_length_is_omitted_never_shown_as_zero() {
+        // The phone sends zero when it has no length: the bubble shows
+        // nothing until analysis of the downloaded file fills it in.
+        assert_eq!(display_seconds(None), None);
+        assert_eq!(display_seconds(Some(0)), None);
+        assert_eq!(display_seconds(Some(42)), Some(42));
+    }
+
+    #[test]
+    fn an_upgraded_poster_registers_under_a_new_address() {
+        // The loader keeps the first image per address, so the revision
+        // has to move when the bytes do, or the old poster would stick.
+        let ctx = egui::Context::default();
+        let first = thumbnail_uri(&ctx, "chat", "m1", &[1, 2, 3]);
+        let same = thumbnail_uri(&ctx, "chat", "m1", &[1, 2, 3]);
+        let upgraded = thumbnail_uri(&ctx, "chat", "m1", &[4, 5, 6]);
+        assert_eq!(first, same, "same bytes keep their address");
+        assert_ne!(first, upgraded, "new bytes get a new address");
+    }
 
     #[test]
     fn the_flash_starts_when_its_message_is_drawn_and_fades_out() {
