@@ -97,8 +97,34 @@ enum Storage {
     /// Head frames in RAM, the tail paged from disk by frame index.
     Spool {
         head: Vec<ColorImage>,
-        file: PathBuf,
+        file: SpoolFile,
     },
+}
+
+/// A spool file that deletes itself. Sources own their tails through this
+/// type, so eviction, replacement, pruning and shutdown all clean up with
+/// no call site remembering to.
+struct SpoolFile {
+    path: PathBuf,
+}
+
+impl AsRef<Path> for SpoolFile {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for SpoolFile {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for SpoolFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 struct Playing {
@@ -163,6 +189,7 @@ fn entry_touched(entry: &Entry) -> Option<Instant> {
 }
 
 /// Loads one display frame by index, from RAM or from the spool file.
+#[cfg(test)]
 fn load_frame(source: &AnimSource, index: usize) -> Option<ColorImage> {
     match &source.storage {
         Storage::Ram(images) => images.get(index).cloned(),
@@ -178,7 +205,10 @@ fn load_frame(source: &AnimSource, index: usize) -> Option<ColorImage> {
                 .ok()?;
             let mut pixels = vec![0u8; frame_bytes];
             input.read_exact(&mut pixels).ok()?;
-            Some(ColorImage::from_rgba_unmultiplied(
+            // Pixels are stored premultiplied (ColorImage::as_raw), so they
+            // must come back the same way: unmultiplied would darken every
+            // soft edge twice.
+            Some(ColorImage::from_rgba_premultiplied(
                 [source.width, source.height],
                 &pixels,
             ))
@@ -201,6 +231,16 @@ fn frame_at(starts: &[Duration], position: Duration) -> usize {
 
 static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+fn spool_file_name() -> PathBuf {
+    let id = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = std::ffi::OsString::from("zapfast-anim-");
+    name.push(std::process::id().to_string());
+    name.push("-");
+    name.push(id.to_string());
+    name.push(".bin");
+    PathBuf::from(name)
+}
+
 fn spool_path() -> PathBuf {
     let id = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!("zapfast-anim-{}-{id}.bin", std::process::id()))
@@ -213,8 +253,11 @@ struct SpillWriter {
 
 /// Opens the disk overflow for a decoded animation. Crash leftovers share
 /// the OS temporary directory with the audio spool and die with it.
-fn open_spill() -> Option<SpillWriter> {
-    let path = spool_path();
+fn open_spill(parent: Option<&Path>) -> Option<SpillWriter> {
+    let path = match parent {
+        Some(dir) => dir.join(spool_file_name()),
+        None => spool_path(),
+    };
     let file = BufWriter::new(File::create(&path).ok()?);
     Some(SpillWriter { file, path })
 }
@@ -229,6 +272,12 @@ struct BudgetSink {
     height: usize,
     spill: Option<SpillWriter>,
     warned: bool,
+    /// Sealed: no more frames accepted, the recorded prefix plays as is.
+    sealed: bool,
+    /// A spilled write failed: the on-disk tail cannot be trusted.
+    failed: bool,
+    /// Where spill files go; tests point it at a dead end to fail opens.
+    spill_parent: Option<PathBuf>,
 }
 
 impl BudgetSink {
@@ -241,16 +290,27 @@ impl BudgetSink {
             height: 0,
             spill: None,
             warned: false,
+            sealed: false,
+            failed: false,
+            spill_parent: None,
         }
     }
 
-    fn push(&mut self, image: ColorImage, delay: Duration) {
+    /// Files one display frame, spilling past the RAM budget to disk.
+    /// False means stop feeding: sealed (frame cap, unopenable spill) or
+    /// failed (a spilled write broke the on-disk tail). Either way the
+    /// recorded prefix stays aligned; only failure aborts the decode.
+    fn push(&mut self, image: ColorImage, delay: Duration) -> bool {
+        if self.sealed || self.failed {
+            return false;
+        }
         if self.delays.len() >= MAX_SOURCE_FRAMES {
             if !self.warned {
                 self.warned = true;
                 log::warn!("animation capped at {MAX_SOURCE_FRAMES} frames");
             }
-            return;
+            self.sealed = true;
+            return false;
         }
         if self.head.is_empty() {
             self.width = image.size[0];
@@ -258,17 +318,21 @@ impl BudgetSink {
         }
         let cost = image.size[0] * image.size[1] * 4;
         if self.spill.is_none() && !self.head.is_empty() && self.spent + cost > MAX_ANIM_BYTES {
-            self.spill = open_spill();
+            match open_spill(self.spill_parent.as_deref()) {
+                Some(spill) => self.spill = Some(spill),
+                // No spill, no tail: the recorded head plays as is.
+                None => log::warn!("animation spool unavailable, keeping the head"),
+            }
+            if self.spill.is_none() {
+                self.sealed = true;
+                return false;
+            }
         }
         match self.spill.as_mut() {
             Some(spill) => {
                 if spill.file.write_all(image.as_raw()).is_err() {
-                    // A broken spool must not eat the frame: fall back to RAM.
-                    let path = spill.path.clone();
-                    self.spill = None;
-                    let _ = std::fs::remove_file(path);
-                    self.spent += cost;
-                    self.head.push(image);
+                    self.failed = true;
+                    return false;
                 }
             }
             None => {
@@ -277,11 +341,21 @@ impl BudgetSink {
             }
         }
         self.delays.push(delay);
+        true
     }
 
-    fn finish(self) -> Option<AnimSource> {
+    fn finish(mut self) -> Option<AnimSource> {
+        if self.failed {
+            // A spilled write broke the on-disk tail: nothing recorded
+            // past it can be trusted, so the attempt is abandoned whole.
+            if let Some(spill) = self.spill.take() {
+                drop(spill.file);
+                let _ = std::fs::remove_file(spill.path);
+            }
+            return None;
+        }
         if self.delays.is_empty() {
-            if let Some(spill) = self.spill {
+            if let Some(spill) = self.spill.take() {
                 drop(spill.file);
                 let _ = std::fs::remove_file(spill.path);
             }
@@ -293,17 +367,22 @@ impl BudgetSink {
             starts.push(total);
             total += *delay;
         }
-        let storage = match self.spill {
+        let storage = match self.spill.take() {
             Some(mut spill) => {
                 // Flush before the player starts seeking through it.
-                let _ = spill.file.flush();
+                // A short tail aborts instead of shipping half a spool.
+                if spill.file.flush().is_err() {
+                    drop(spill.file);
+                    let _ = std::fs::remove_file(spill.path);
+                    return None;
+                }
                 drop(spill.file);
                 Storage::Spool {
-                    head: self.head,
-                    file: spill.path,
+                    head: std::mem::take(&mut self.head),
+                    file: SpoolFile { path: spill.path },
                 }
             }
-            None => Storage::Ram(self.head),
+            None => Storage::Ram(std::mem::take(&mut self.head)),
         };
         Some(AnimSource {
             starts,
@@ -312,6 +391,18 @@ impl BudgetSink {
             height: self.height,
             storage,
         })
+    }
+}
+
+impl Drop for BudgetSink {
+    fn drop(&mut self) {
+        // An abandoned decode (app closing mid-spill, a dropped delivery)
+        // must not leave its partial file behind. Close first: Windows
+        // cannot delete an open file.
+        if let Some(spill) = self.spill.take() {
+            drop(spill.file);
+            let _ = std::fs::remove_file(spill.path);
+        }
     }
 }
 
@@ -381,6 +472,171 @@ fn pick_victim(
     best.or(fallback).map(|(path, _)| path.clone())
 }
 
+/// One spooled frame requested by the interface thread. The tail index
+/// counts from the spool start, not from the animation start.
+struct FrameJob {
+    file: PathBuf,
+    width: usize,
+    height: usize,
+    tail: usize,
+}
+
+#[derive(Clone)]
+struct FrameReady {
+    file: PathBuf,
+    tail: usize,
+    image: Option<ColorImage>,
+}
+
+struct PrefetchWorker {
+    jobs: std::sync::mpsc::Sender<FrameJob>,
+    // The queue lock is held only for non-blocking drains.
+    done: Mutex<std::sync::mpsc::Receiver<FrameReady>>,
+}
+
+static PREFETCH_WORKER: std::sync::OnceLock<PrefetchWorker> = std::sync::OnceLock::new();
+
+/// The single background pager for spooled tails. One thread serves every
+/// viewer; results are keyed by file and index, so no per-viewer routing
+/// is needed. A job reads one frame: even a stalled disk only delays its
+/// own tiny read, never the interface.
+fn prefetch_worker() -> &'static PrefetchWorker {
+    PREFETCH_WORKER.get_or_init(|| {
+        let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<FrameJob>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<FrameReady>();
+        std::thread::Builder::new()
+            .name("anim-prefetch".into())
+            .spawn(move || {
+                while let Ok(job) = jobs_rx.recv() {
+                    let image = read_spool_frame(&job.file, job.width, job.height, job.tail);
+                    let _ = done_tx.send(FrameReady {
+                        file: job.file,
+                        tail: job.tail,
+                        image,
+                    });
+                }
+            })
+            .expect("animation prefetch thread spawns");
+        PrefetchWorker {
+            jobs: jobs_tx,
+            done: Mutex::new(done_rx),
+        }
+    })
+}
+
+/// Reads one spooled tail frame straight from disk.
+fn read_spool_frame(file: &Path, width: usize, height: usize, tail: usize) -> Option<ColorImage> {
+    let frame_bytes = width * height * 4;
+    let mut input = BufReader::new(File::open(file).ok()?);
+    input
+        .seek(SeekFrom::Start(tail as u64 * frame_bytes as u64))
+        .ok()?;
+    let mut pixels = vec![0u8; frame_bytes];
+    input.read_exact(&mut pixels).ok()?;
+    // Same premultiplied roundtrip as the synchronous path below.
+    Some(ColorImage::from_rgba_premultiplied(
+        [width, height],
+        &pixels,
+    ))
+}
+
+fn pending_id() -> egui::Id {
+    egui::Id::new("anim-prefetch-pending")
+}
+
+fn stash_id() -> egui::Id {
+    egui::Id::new("anim-prefetch-stash")
+}
+
+/// What a spooled lookup found: ready, permanently missing, or still queued.
+enum TakeReady {
+    Ready(ColorImage),
+    Missing,
+    Pending,
+}
+
+/// Takes one spooled frame without blocking: completed prefetches, the
+/// stash of other animations results, or a fresh queue slot. Corrupt tails
+/// report Missing once instead of spinning the window forever.
+fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
+    let mut outcome: Option<TakeReady> = None;
+    ctx.data_mut(|data| {
+        let stash = data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id());
+        if stash.len() > 256 {
+            stash.clear();
+        }
+        if let Some(pos) = stash
+            .iter()
+            .position(|ready| ready.file.as_path() == file && ready.tail == tail)
+        {
+            let ready = stash.remove(pos);
+            let pending =
+                data.get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
+            pending.remove(&(file.to_path_buf(), tail));
+            outcome = Some(match ready.image {
+                Some(image) => TakeReady::Ready(image),
+                None => TakeReady::Missing,
+            });
+            return;
+        }
+        let worker = prefetch_worker();
+        let done = worker
+            .done
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        while let Ok(ready) = done.try_recv() {
+            if ready.file.as_path() == file && ready.tail == tail {
+                let pending = data
+                    .get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
+                pending.remove(&(file.to_path_buf(), tail));
+                outcome = Some(match ready.image {
+                    Some(image) => TakeReady::Ready(image),
+                    None => TakeReady::Missing,
+                });
+            } else if data
+                .get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
+                .len()
+                <= 256
+            {
+                data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
+                    .push(ready);
+            }
+        }
+    });
+    outcome.unwrap_or(TakeReady::Pending)
+}
+
+/// Queues one tail frame for background loading, once at a time. Entries
+/// older than two seconds requeue: their job either landed elsewhere or
+/// died with a retired viewer, and a duplicate read is harmless.
+fn enqueue_prefetch(ctx: &egui::Context, file: &Path, width: usize, height: usize, tail: usize) {
+    let key = (file.to_path_buf(), tail);
+    let mut send = false;
+    ctx.data_mut(|data| {
+        let pending =
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
+        pending.retain(|_, at| at.elapsed() < Duration::from_secs(2));
+        if pending.len() > 128 {
+            pending.clear();
+        }
+        if pending.contains_key(&key) {
+            return;
+        }
+        pending.insert(key.clone(), Instant::now());
+        send = true;
+    });
+    if send {
+        // The worker only exits with the process; a failed send would mean
+        // it died, which its panic-free loop cannot do.
+        let _ = prefetch_worker().jobs.send(FrameJob {
+            file: key.0,
+            width,
+            height,
+            tail: key.1,
+        });
+    }
+}
+
 impl AnimSource {
     /// How long one frame shows: the next start, or the loop end.
     #[cfg(test)]
@@ -390,24 +646,6 @@ impl AnimSource {
             .copied()
             .unwrap_or(self.total)
             .saturating_sub(self.starts.get(index).copied().unwrap_or(Duration::ZERO))
-    }
-}
-
-/// Spool file behind an entry, if it pages frames from disk.
-fn spool_of(entry: &Entry) -> Option<PathBuf> {
-    match entry {
-        Entry::Ready(playing) => match &playing.source.storage {
-            Storage::Spool { file, .. } => Some(file.clone()),
-            Storage::Ram(_) => None,
-        },
-        Entry::Decoding(_) | Entry::Failed(_) => None,
-    }
-}
-
-/// Deletes the spool file behind a retired entry, if any.
-fn forget_spool(entry: &Entry) {
-    if let Some(file) = spool_of(entry) {
-        let _ = std::fs::remove_file(file);
     }
 }
 
@@ -449,14 +687,61 @@ fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, posi
     for _ in 0..plan.drop {
         playing.window.pop_front();
     }
+    let mut spent = 0;
     for index in plan.load {
-        let Some(image) = load_frame(&playing.source, index) else {
+        if spent >= UPLOAD_PER_TICK {
+            ctx.request_repaint_after(Duration::from_millis(16));
             break;
-        };
-        let name = format!("{}#{index}", path.display());
-        playing
-            .window
-            .push_back((index, ctx.load_texture(name, image, TextureOptions::LINEAR)));
+        }
+        match materialize(ctx, &playing.source, index) {
+            Material::Ready(image) => {
+                let name = format!("{}#{index}", path.display());
+                playing
+                    .window
+                    .push_back((index, ctx.load_texture(name, image, TextureOptions::LINEAR)));
+                spent += 1;
+            }
+            // A corrupt tail leaves a hole and pages on: one bad frame must
+            // not wedge the whole window.
+            Material::Missing => {}
+            // Still on its way: wait for the painter instead of spinning.
+            Material::Pending => {
+                ctx.request_repaint_after(Duration::from_millis(16));
+                break;
+            }
+        }
+    }
+}
+
+/// What one planned index gave: pixels, a hole, or patience.
+enum Material {
+    Ready(ColorImage),
+    Missing,
+    Pending,
+}
+
+/// Materializes one frame for upload. RAM heads copy inline; spooled tails
+/// arrive on the background pager, so a busy disk never blocks the tick.
+fn materialize(ctx: &egui::Context, source: &AnimSource, index: usize) -> Material {
+    match &source.storage {
+        Storage::Ram(images) => match images.get(index).cloned() {
+            Some(image) => Material::Ready(image),
+            None => Material::Missing,
+        },
+        Storage::Spool { head, file } => {
+            if let Some(image) = head.get(index).cloned() {
+                return Material::Ready(image);
+            }
+            let tail = index - head.len();
+            match take_ready(ctx, file, tail) {
+                TakeReady::Ready(image) => Material::Ready(image),
+                TakeReady::Missing => Material::Missing,
+                TakeReady::Pending => {
+                    enqueue_prefetch(ctx, file, source.width, source.height, tail);
+                    Material::Pending
+                }
+            }
+        }
     }
 }
 
@@ -539,29 +824,16 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             }),
             _ => Entry::Failed(Instant::now()),
         };
-        // Replacing an entry must not leak its spool file.
-        if let Some(old) = entries.insert(arrived_path, entry) {
-            forget_spool(&old);
-        }
+        // Replacing an entry drops the old one, and its spool with it.
+        entries.insert(arrived_path, entry);
     }
     // Remove idle and least-recently-used animations.
     let now = Instant::now();
     note_visible(ctx, path, now);
-    // Snapshot spool files first: pruning drops the entries that own them.
-    let spools: Vec<(PathBuf, PathBuf)> = entries
-        .iter()
-        .filter_map(|(entry_path, entry)| Some((entry_path.clone(), spool_of(entry)?)))
-        .collect();
     entries.retain(|_, entry| match entry {
         Entry::Ready(playing) => now.duration_since(playing.last_drawn) < IDLE,
         Entry::Failed(at) | Entry::Decoding(at) => now.duration_since(*at) < RETRY_AFTER,
     });
-    // What pruning took off the map takes its spool file with it.
-    for (entry_path, spool) in spools {
-        if !entries.contains_key(&entry_path) {
-            let _ = std::fs::remove_file(spool);
-        }
-    }
     let mut resident: usize = entries.values().map(entry_bytes).sum();
     while resident > MAX_RESIDENT_BYTES {
         let candidates: Vec<(PathBuf, Instant)> = entries
@@ -574,9 +846,8 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             break;
         };
         let freed = entries.get(&victim).map(entry_bytes).unwrap_or(0);
-        if let Some(entry) = entries.remove(&victim) {
-            forget_spool(&entry);
-        }
+        // Dropping the victim deletes its spool file with it.
+        let _ = entries.remove(&victim);
         resident = resident.saturating_sub(freed);
     }
     match entries.get_mut(path) {
@@ -696,7 +967,11 @@ fn decode_image(path: &Path, extension: &str) -> Option<Decoded> {
         let (numerator, denominator) = frame.delay().numer_denom_ms();
         let delay = Duration::from_millis(u64::from(numerator / denominator.max(1)).max(20));
         let image = frame.into_buffer();
-        sink.push(to_color_image(&image), delay);
+        // Sealed, capped or failed: stop decoding instead of processing
+        // frames that will never be stored.
+        if !sink.push(to_color_image(&image), delay) {
+            break;
+        }
     }
     sink.finish().map(|source| Decoded { source })
 }
@@ -713,7 +988,9 @@ fn decode_webp(path: &Path) -> Option<Decoded> {
         let image = image::RgbaImage::from_raw(width, height, frame.data().to_vec())?;
         let delay = (i64::from(frame.timestamp()) - previous).max(20) as u64;
         previous = i64::from(frame.timestamp());
-        sink.push(to_color_image(&image), Duration::from_millis(delay));
+        if !sink.push(to_color_image(&image), Duration::from_millis(delay)) {
+            break;
+        }
     }
     // Single-frame files use the static-image path.
     sink.finish()
@@ -782,16 +1059,20 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
         avcc_to_annex_b(&mut annex_b, &sample.bytes);
         if let Ok(Some(yuv)) = decoder.decode(&annex_b) {
             let delay = delays.pop_front().unwrap_or(delay);
-            if let Some((image, delay)) = frame_of(&yuv, delay) {
-                sink.push(image, delay);
+            if let Some((image, delay)) = frame_of(&yuv, delay)
+                && !sink.push(image, delay)
+            {
+                break;
             }
         }
     }
     if let Ok(rest) = decoder.flush_remaining() {
         for yuv in &rest {
             let delay = delays.pop_front().unwrap_or(Duration::from_millis(66));
-            if let Some((image, delay)) = frame_of(yuv, delay) {
-                sink.push(image, delay);
+            if let Some((image, delay)) = frame_of(yuv, delay)
+                && !sink.push(image, delay)
+            {
+                break;
             }
         }
     }
@@ -903,10 +1184,12 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
         if stdout.read_exact(&mut buffer).is_err() {
             break;
         }
-        sink.push(
+        if !sink.push(
             ColorImage::from_rgba_unmultiplied([out_width as usize, out_height as usize], &buffer),
             delay,
-        );
+        ) {
+            break;
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -1183,7 +1466,7 @@ mod tests {
         let Storage::Spool { file, .. } = &decoded.source.storage else {
             panic!("a 50 MB animation belongs on disk, not in RAM");
         };
-        assert!(file.is_file(), "the spool file backs the tail");
+        assert!(file.path.is_file(), "the spool file backs the tail");
         // The tail reads back with its shade: frame 199 wears 199.
         let last = decoded.image(199).expect("last frame");
         assert_eq!(last.size, [160, 400]);
@@ -1275,7 +1558,7 @@ mod tests {
                     "big enough to spill"
                 );
                 if let Storage::Spool { file, .. } = &source.storage {
-                    spool_files.push(file.clone());
+                    spool_files.push(file.path.clone());
                 }
                 entries.insert(
                     PathBuf::from(name),
@@ -1289,13 +1572,13 @@ mod tests {
                 );
             }
         }
-        // Alternate ticks on both, the way a chat with two stickers paints.
-        for round in 0..6 {
+        // Alternate ticks on both in real time, the way a chat with two
+        // stickers paints. Sleeping between rounds advances the playheads
+        // on the wall clock, so windows page forward for real.
+        for _ in 0..6 {
             for name in paths {
-                let at = round as f64 * 2.0 + if name == paths[0] { 0.0 } else { 0.05 };
                 let mut output = ctx.run_ui(
                     egui::RawInput {
-                        time: Some(at),
                         screen_rect: Some(egui::Rect::from_min_size(
                             egui::Pos2::ZERO,
                             egui::vec2(400.0, 400.0),
@@ -1312,6 +1595,7 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
+            std::thread::sleep(Duration::from_millis(100));
         }
         let cache = super::cache(&ctx);
         let entries = cache.0.lock().unwrap();
@@ -1321,6 +1605,11 @@ mod tests {
                     assert!(
                         playing.window.len() <= 2 * UPLOAD_PER_TICK,
                         "window stays small"
+                    );
+                    assert!(!playing.window.is_empty(), "pages paint through the worker");
+                    assert!(
+                        playing.last_position > Duration::ZERO,
+                        "playheads advance on the wall clock"
                     );
                 }
                 None => panic!("{name} must stay Ready, got missing"),
@@ -1359,6 +1648,183 @@ mod tests {
         });
         assert_eq!(entry_bytes(&entry), 800);
         assert!(entry_touched(&entry).is_some());
+    }
+
+    #[test]
+    fn spooled_frames_keep_their_transparency() {
+        // Premultiplied bytes must roundtrip without darkening soft edges,
+        // in memory and through a real spool file.
+        let pixels = vec![
+            egui::Color32::from_rgba_unmultiplied(200, 100, 50, 128),
+            egui::Color32::from_rgba_unmultiplied(10, 20, 30, 0),
+            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 255),
+            egui::Color32::from_rgba_unmultiplied(0, 0, 0, 77),
+        ];
+        let image = ColorImage::new([2, 2], pixels.clone());
+        let back = ColorImage::from_rgba_premultiplied([2, 2], image.as_raw());
+        assert_eq!(back.pixels, pixels);
+        let dir = tempfile::tempdir().expect("dir");
+        let file = dir.path().join("spool.bin");
+        std::fs::write(&file, image.as_raw()).expect("writes");
+        let source = AnimSource {
+            starts: vec![Duration::ZERO],
+            total: Duration::from_millis(50),
+            width: 2,
+            height: 2,
+            storage: Storage::Spool {
+                head: Vec::new(),
+                file: SpoolFile { path: file.clone() },
+            },
+        };
+        assert_eq!(load_frame(&source, 0).expect("frame").pixels, pixels);
+    }
+
+    #[test]
+    fn the_frame_cap_seals_instead_of_skewing() {
+        // Past 4096 frames the sink stops recording: the sealed prefix
+        // stays aligned, every recorded index loads.
+        let mut sink = BudgetSink::new();
+        let image = ColorImage::new([4, 4], vec![egui::Color32::BLACK; 16]);
+        let mut accepted = 0;
+        for _ in 0..MAX_SOURCE_FRAMES + 100 {
+            if sink.push(image.clone(), Duration::from_millis(50)) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, MAX_SOURCE_FRAMES);
+        let source = sink.finish().expect("sealed prefix plays");
+        assert_eq!(source.frame_count(), MAX_SOURCE_FRAMES);
+        assert!(load_frame(&source, MAX_SOURCE_FRAMES - 1).is_some());
+    }
+
+    #[test]
+    fn an_unopenable_spool_seals_the_head() {
+        // Nowhere to spill: the RAM head plays as is, aligned and whole.
+        let mut sink = BudgetSink::new();
+        sink.spill_parent = Some(PathBuf::from("/nonexistent-dir-xyz-123"));
+        let image = ColorImage::new([320, 320], vec![egui::Color32::BLACK; 320 * 320]);
+        let mut accepted = 0;
+        for _ in 0..50 {
+            if sink.push(image.clone(), Duration::from_millis(50)) {
+                accepted += 1;
+            }
+        }
+        assert!(
+            accepted > 0 && accepted < 50,
+            "seals at the budget: {accepted}"
+        );
+        let source = sink.finish().expect("head plays");
+        assert_eq!(source.frame_count(), accepted);
+        assert!(matches!(source.storage, Storage::Ram(_)));
+        for index in 0..accepted {
+            assert!(load_frame(&source, index).is_some(), "index {index} loads");
+        }
+    }
+
+    #[test]
+    fn a_failed_spool_write_aborts_the_decode() {
+        // Forty good frames spill, then the disk breaks: the attempt is
+        // abandoned whole instead of skewing every later index.
+        let dir = tempfile::tempdir().expect("dir");
+        let mut sink = BudgetSink::new();
+        let image = ColorImage::new([320, 320], vec![egui::Color32::BLACK; 320 * 320]);
+        for _ in 0..45 {
+            assert!(sink.push(image.clone(), Duration::from_millis(50)));
+        }
+        let spilled = sink.spill.as_ref().expect("spilling by now").path.clone();
+        assert!(spilled.is_file(), "spool exists mid-decode");
+        // Break the disk under it with a read-only handle.
+        let broken = dir.path().join("broken.bin");
+        std::fs::write(&broken, b"x").expect("writes");
+        let mut permissions = std::fs::metadata(&broken).expect("meta").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&broken, permissions).expect("readonly");
+        let read_only = File::open(&broken).expect("opens read-only");
+        sink.spill.as_mut().expect("spill").file = BufWriter::new(read_only);
+        assert!(!sink.push(image.clone(), Duration::from_millis(50)));
+        assert!(sink.finish().is_none(), "half a spool never ships");
+        assert!(!spilled.exists(), "the partial spool is deleted");
+    }
+
+    #[test]
+    fn dropping_a_source_deletes_its_spool() {
+        // RAII: eviction, replacement, pruning and shutdown clean up with
+        // no call site remembering to.
+        let mut sink = BudgetSink::new();
+        let image = ColorImage::new([320, 320], vec![egui::Color32::BLACK; 320 * 320]);
+        for _ in 0..50 {
+            let _ = sink.push(image.clone(), Duration::from_millis(50));
+        }
+        let source = sink.finish().expect("source");
+        let spilled = match &source.storage {
+            Storage::Spool { file, .. } => file.path.clone(),
+            Storage::Ram(_) => panic!("50 full frames must spill"),
+        };
+        assert!(spilled.is_file());
+        drop(source);
+        assert!(!spilled.exists(), "dropping deletes the spool");
+    }
+
+    #[test]
+    fn abandoning_a_decode_deletes_its_partial_spool() {
+        let mut sink = BudgetSink::new();
+        let image = ColorImage::new([320, 320], vec![egui::Color32::BLACK; 320 * 320]);
+        for _ in 0..50 {
+            let _ = sink.push(image.clone(), Duration::from_millis(50));
+        }
+        let spilled = sink.spill.as_ref().expect("spilling").path.clone();
+        assert!(spilled.is_file());
+        drop(sink);
+        assert!(!spilled.exists(), "abandoned partial spool is deleted");
+    }
+
+    #[test]
+    fn spooled_frames_arrive_without_blocking_the_interface() {
+        // A spool-backed source plus the real worker: the first tick only
+        // queues, a later tick paints, and the interface thread never reads.
+        let mut sink = BudgetSink::new();
+        for index in 0..60 {
+            let shade = (index % 251) as u8;
+            let image = ColorImage::new(
+                [320, 320],
+                vec![egui::Color32::from_rgb(shade, shade, shade); 320 * 320],
+            );
+            let _ = sink.push(image, Duration::from_millis(50));
+        }
+        let source = sink.finish().expect("source");
+        assert!(matches!(source.storage, Storage::Spool { .. }));
+        let spool_path = match &source.storage {
+            Storage::Spool { file, .. } => file.path.clone(),
+            Storage::Ram(_) => unreachable!(),
+        };
+        let ctx = egui::Context::default();
+        let path = Path::new("prefetch.gif");
+        let mut playing = Playing {
+            source,
+            window: VecDeque::new(),
+            last_position: Duration::ZERO,
+            started: Instant::now(),
+            last_drawn: Instant::now(),
+        };
+        // The RAM head paints on the first tick; the spooled tail arrives
+        // through the worker on later ticks.
+        maintain_window(&ctx, path, &mut playing, Duration::from_millis(100));
+        assert_eq!(playing.window[0].0, 2, "lands on the playhead frame");
+        assert!(playing.window.len() <= UPLOAD_PER_TICK);
+        assert!(spool_path.exists(), "the tail lives on disk");
+        // Deep into the spooled tail: ticks queue, the worker delivers,
+        // later ticks paint without reading on this thread.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
+            if playing.window.iter().any(|(index, _)| *index >= 40) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "tail frames arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        drop(playing);
+        assert!(!spool_path.exists(), "test source cleans its spool");
     }
 
     #[test]

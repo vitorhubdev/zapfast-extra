@@ -2,6 +2,21 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.34] - 2026-09-20
+
+### Fixed
+
+- Spooled animation frames keep their transparency: pixels roundtrip
+  premultiplied instead of darkening soft edges twice.
+- A failed spool write aborts the decode instead of skewing later frames,
+  a failed final flush ships nothing, and decoding stops at the
+  4096-frame cap instead of processing frames that will never be stored.
+  The cap covers minutes of sticker; past it the head plays with a warning.
+- Spool files delete themselves when their animation is evicted, replaced,
+  pruned, abandoned mid-decode or left behind at shutdown.
+- Spooled tails page in on a background thread, so a busy disk never blocks
+  the interface; corrupt tails leave a hole and page on instead of wedging.
+
 ## [1.0.33] - 2026-09-20
 
 ### Fixed
