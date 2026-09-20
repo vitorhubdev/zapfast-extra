@@ -457,7 +457,19 @@ impl Player {
             } else {
                 active.finished = false;
                 if active.base >= active.clip.duration {
+                    // Replaying from the end always starts playing: a
+                    // finished clip holds no paused position worth keeping,
+                    // and a bare seek would preserve the pause.
                     self.seek(path, 0.0)?;
+                    if let Some(active) = self.active.as_mut()
+                        && active.path == path
+                    {
+                        active.started = Instant::now();
+                        active.playing = true;
+                        if let Some((_, sink)) = &active.audio {
+                            sink.play();
+                        }
+                    }
                     return Ok(());
                 }
                 // Sound cached while paused joins from where it stopped.
@@ -688,28 +700,24 @@ impl Player {
         }
         loop {
             match active.frames.try_recv() {
-                Ok(frame) => {
-                    if active.buffered.len() >= BUFFER_FRAMES {
-                        // The decoder runs ahead of the picture. Shed frames
-                        // already behind playback first; when the buffer is
-                        // full of future frames the newcomer waits its turn
-                        // instead of jumping the picture forward.
-                        let position = active.position();
-                        while active.buffered.len() >= BUFFER_FRAMES
-                            && active.buffered.len() > 1
-                            && active
-                                .buffered
-                                .front()
-                                .is_some_and(|first| first.pts + KEEP_BEHIND < position)
-                        {
-                            active.buffered.pop_front();
-                        }
-                        if active.buffered.len() >= BUFFER_FRAMES {
-                            continue;
-                        }
+                Ok(frame) => match buffer_room(
+                    active.buffered.len(),
+                    active.buffered.front().map(|frame| frame.pts),
+                    active.position(),
+                ) {
+                    // Room, or room made by shedding a frame already behind
+                    // playback while the decoder runs ahead.
+                    BufferRoom::Push => active.buffered.push_back(frame),
+                    BufferRoom::EvictThenPush => {
+                        active.buffered.pop_front();
+                        active.buffered.push_back(frame);
                     }
-                    active.buffered.push_back(frame);
-                }
+                    // Full of future frames: leave the rest queued in the
+                    // channel and let the decoder wait on it instead of
+                    // dropping the future. Late frames are also shed after
+                    // the drain, freeing room over the next ticks.
+                    BufferRoom::Hold => break,
+                },
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     active.decode_done = true;
                     break;
@@ -892,6 +900,26 @@ fn choose_pts(
         }
     }
     None
+}
+
+/// What a full frame buffer does with one more arrival. The buffer only
+/// sheds frames already behind playback, so a buffer full of future frames
+/// holds the arrival back (it stays queued, the decoder waits) instead of
+/// dropping the future and freezing or jumping the picture later.
+enum BufferRoom {
+    Push,
+    EvictThenPush,
+    Hold,
+}
+
+fn buffer_room(len: usize, front: Option<Duration>, position: Duration) -> BufferRoom {
+    if len < BUFFER_FRAMES {
+        return BufferRoom::Push;
+    }
+    if len > 1 && front.is_some_and(|pts| pts + KEEP_BEHIND < position) {
+        return BufferRoom::EvictThenPush;
+    }
+    BufferRoom::Hold
 }
 
 /// How soon the viewer needs another frame.
@@ -1120,24 +1148,44 @@ fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     output
 }
 fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
-    let mut pcm = std::process::Command::new("ffmpeg");
-    let output = quiet(&mut pcm)
+    use std::io::Read;
+    let mut launch = std::process::Command::new("ffmpeg");
+    let mut child = quiet(&mut launch)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-vn", "-ar", "48000", "-ac", "1", "-f", "f32le", "pipe:1"])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    if !output.status.success() || output.stdout.len() < 4 {
-        return None;
-    }
-    let mut pcm = Vec::with_capacity(output.stdout.len() / 4);
-    for chunk in output.stdout.as_chunks::<4>().0 {
-        pcm.push(f32::from_le_bytes(*chunk));
-        if pcm.len() >= PCM_RATE as usize * PCM_CAP_SECS as usize {
+    let mut stdout = child.stdout.take()?;
+    // Streamed, so a long file never sits whole in RAM: past the cap the
+    // helper is stopped instead of decoding the tail for nothing.
+    let cap = PCM_RATE as usize * PCM_CAP_SECS as usize;
+    let mut pcm = Vec::new();
+    let mut chunk = [0u8; 32_768];
+    loop {
+        if pcm.len() >= cap {
             break;
         }
+        let read = stdout.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        for bytes in chunk[..read / 4 * 4].as_chunks::<4>().0 {
+            pcm.push(f32::from_le_bytes(*bytes));
+            if pcm.len() >= cap {
+                break;
+            }
+        }
     }
-    Some(pcm)
+    let _ = child.kill();
+    let status = child.wait().ok()?;
+    if !status.success() && pcm.is_empty() {
+        return None;
+    }
+    (!pcm.is_empty()).then_some(pcm)
 }
 /// Plays cached samples from a position on a fresh output, if any.
 fn attach_cached(active: &mut Active, volume: f32, muted: bool, from: Duration) {
@@ -1607,6 +1655,65 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_full_buffer_of_future_frames_holds_instead_of_dropping() {
+        assert!(matches!(
+            buffer_room(10, None, Duration::ZERO),
+            BufferRoom::Push
+        ));
+        assert!(matches!(
+            buffer_room(BUFFER_FRAMES - 1, None, Duration::ZERO),
+            BufferRoom::Push
+        ));
+        // Full of future frames: hold, so the queued frames survive and
+        // the decoder waits on its channel.
+        assert!(matches!(
+            buffer_room(BUFFER_FRAMES, Some(Duration::from_secs(5)), Duration::ZERO),
+            BufferRoom::Hold
+        ));
+        // A frame well behind playback makes room for the arrival.
+        assert!(matches!(
+            buffer_room(BUFFER_FRAMES, Some(Duration::ZERO), Duration::from_secs(5)),
+            BufferRoom::EvictThenPush
+        ));
+    }
+
+    #[test]
+    fn replaying_a_finished_video_starts_playing() {
+        let dir = std::env::temp_dir().join(format!("zapfast-replay-{}", std::process::id()));
+        let Some(path) = sample_clip(&dir) else {
+            return;
+        };
+        let mut player = Player::default();
+        let mut stop = || {};
+        player.toggle(&path, &mut stop).expect("opens");
+        assert!(
+            player.active.as_ref().is_some_and(|active| active.playing),
+            "opening plays"
+        );
+        let total = player
+            .active
+            .as_ref()
+            .map(|active| active.clip.duration)
+            .expect("clip");
+        // Watch it to the end: base reaches the length, playback stops.
+        {
+            let active = player.active.as_mut().expect("open");
+            active.base = total;
+            active.finished = true;
+            active.playing = false;
+        }
+        player.toggle(&path, &mut stop).expect("replays");
+        let active = player.active.as_ref().expect("still open");
+        assert!(
+            active.playing,
+            "one click replays instead of parking at zero"
+        );
+        assert!(active.base < total, "back at the start");
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

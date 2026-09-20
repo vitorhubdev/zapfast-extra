@@ -5,8 +5,18 @@ use egui::{Key, Modifiers};
 use crate::app::App;
 use crate::model::{Action, Dialog, Page};
 
+/// Whether a viewer slider holds the keyboard, so the arrows adjust it.
+fn viewer_control_focused(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<bool>(crate::ui::viewer::control_focus_id())
+            .unwrap_or(false)
+    })
+}
+
 /// Keys the media viewer owns: browsing, zooming, and closing.
 fn viewer_keys(app: &mut App, ctx: &egui::Context) {
+    // A focused progress or volume slider owns the arrows; browsing yields.
+    let slider_focused = viewer_control_focused(ctx);
     const STEP: f32 = 1.3;
     let pdf = app
         .viewer
@@ -43,10 +53,13 @@ fn viewer_keys(app: &mut App, ctx: &egui::Context) {
                 key(Modifiers::NONE, Key::R, Action::ViewerRotate);
             }
         } else {
-            key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
-            key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
-            key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
-            key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+            // A focused slider adjusts itself with the arrows instead.
+            if !slider_focused {
+                key(Modifiers::NONE, Key::ArrowRight, Action::ViewerStep(1));
+                key(Modifiers::NONE, Key::ArrowLeft, Action::ViewerStep(-1));
+                key(Modifiers::NONE, Key::ArrowDown, Action::ViewerStep(1));
+                key(Modifiers::NONE, Key::ArrowUp, Action::ViewerStep(-1));
+            }
         }
         if video {
             key(Modifiers::NONE, Key::Space, Action::VideoToggle);
@@ -232,6 +245,65 @@ pub fn label(keys: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arrows_yield_to_a_focused_slider() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        let item = |message: &str, path: &str| crate::model::ViewerItem {
+            message: message.to_owned(),
+            path: std::path::PathBuf::from(path),
+            kind: crate::model::ViewerKind::Video,
+        };
+        app.viewer = Some(crate::model::Viewer {
+            chat: "chat".to_owned(),
+            items: vec![item("a", "a.mp4"), item("b", "b.mp4")],
+            index: 0,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+            pdf_page: 0,
+            pdf_pages: 0,
+            pdf_rotate: 0,
+        });
+        let ctx = egui::Context::default();
+        fn press(app: &mut App, ctx: &egui::Context) {
+            app.actions.clear();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key {
+                        key: Key::ArrowRight,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    }],
+                    ..Default::default()
+                },
+                |ui| handle(app, ui.ctx()),
+            );
+            output.textures_delta.clear();
+        }
+        press(&mut app, &ctx);
+        assert!(
+            app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ViewerStep(1))),
+            "arrows browse with no control focused"
+        );
+        // A focused progress slider keeps the arrows for itself.
+        ctx.data_mut(|data| data.insert_temp(crate::ui::viewer::control_focus_id(), true));
+        press(&mut app, &ctx);
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ViewerStep(_))),
+            "the file on screen stays put while a slider is focused"
+        );
+    }
 
     fn escape(app: &mut App, ctx: &egui::Context) {
         let mut output = ctx.run_ui(

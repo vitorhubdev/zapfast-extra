@@ -16,13 +16,18 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 
 /// Maximum frame width uploaded to the GPU.
 const MAX_WIDTH: u32 = 320;
-/// Maximum decoded bytes kept per animation (RGBA8). A long sticker plays to
-/// its end instead of looping a truncated head; the byte cap bounds memory
-/// instead of an arbitrary frame count.
-const MAX_ANIM_BYTES: usize = 48 * 1024 * 1024;
+/// Maximum decoded bytes kept per animation (RGBA8, at display size). A long
+/// sticker plays to its end instead of looping a truncated head; the byte
+/// cap bounds memory instead of an arbitrary frame count. Sixty-four
+/// megabytes hold more than 150 full-width frames, so the old count limit
+/// never cuts first.
+const MAX_ANIM_BYTES: usize = 64 * 1024 * 1024;
 /// Textures uploaded per interface tick. A long animation spreads its first
 /// paint over several frames instead of stalling the scroll once.
-const UPLOAD_PER_TICK: usize = 24;
+/// Kept small on purpose: the budget applies per visible animation and tick,
+/// so several stickers on screen multiply it. A shared per-tick budget is
+/// future work once upload pressure is measured.
+const UPLOAD_PER_TICK: usize = 12;
 /// Time an unseen animation remains decoded.
 const IDLE: Duration = Duration::from_secs(20);
 /// Time a failed or stuck decode is remembered before trying again.
@@ -33,8 +38,10 @@ const IDLE: Duration = Duration::from_secs(20);
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Maximum concurrent decoders.
 const MAX_DECODERS: usize = 2;
-/// Global texture-frame budget. Least-recently-used animations are removed first.
-const MAX_RESIDENT_FRAMES: usize = 450;
+/// Global decoded-image budget in bytes. Least-recently-used animations go
+/// first, preparing ones included, so the set stays bounded even while
+/// several uploads are still queued.
+const MAX_RESIDENT_BYTES: usize = 96 * 1024 * 1024;
 
 static DECODING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -74,9 +81,50 @@ struct UploadState {
     touched: Instant,
 }
 
-/// Decoded bytes of one frame (RGBA8).
-fn frame_bytes(width: u32, height: u32) -> usize {
-    width as usize * height as usize * 4
+/// Decoded bytes of one display frame (RGBA8).
+fn image_bytes(image: &ColorImage) -> usize {
+    image.size[0] * image.size[1] * 4
+}
+
+/// GPU bytes of one uploaded frame (RGBA8).
+fn texture_bytes(texture: &TextureHandle) -> usize {
+    let [width, height] = texture.size();
+    width * height * 4
+}
+
+/// Decoded bytes one cache entry holds: ready textures plus everything
+/// still queued for upload. Decoding entries count zero here; at most two
+/// decode at once, and their in-flight frames join the budget on delivery.
+fn entry_bytes(entry: &Entry) -> usize {
+    match entry {
+        Entry::Ready(playing) => playing
+            .frames
+            .iter()
+            .map(|(texture, _)| texture_bytes(texture))
+            .sum(),
+        Entry::Uploading(upload) => {
+            upload
+                .done
+                .iter()
+                .map(|(texture, _)| texture_bytes(texture))
+                .sum::<usize>()
+                + upload
+                    .queue
+                    .iter()
+                    .map(|(image, _)| image_bytes(image))
+                    .sum::<usize>()
+        }
+        Entry::Decoding(_) | Entry::Failed(_) => 0,
+    }
+}
+
+/// When an entry was last seen on screen, for least-recently-used eviction.
+fn entry_touched(entry: &Entry) -> Option<Instant> {
+    match entry {
+        Entry::Ready(playing) => Some(playing.last_drawn),
+        Entry::Uploading(upload) => Some(upload.touched),
+        Entry::Decoding(_) | Entry::Failed(_) => None,
+    }
 }
 
 #[derive(Clone, Default)]
@@ -155,29 +203,26 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
         Entry::Uploading(upload) => now.duration_since(upload.touched) < IDLE,
         Entry::Failed(at) | Entry::Decoding(at) => now.duration_since(*at) < RETRY_AFTER,
     });
-    let mut resident: usize = entries
-        .values()
-        .map(|entry| match entry {
-            Entry::Ready(playing) => playing.frames.len(),
-            Entry::Uploading(upload) => upload.done.len() + upload.queue.len(),
-            _ => 0,
-        })
-        .sum();
-    while resident > MAX_RESIDENT_FRAMES {
+    let mut resident: usize = entries.values().map(entry_bytes).sum();
+    while resident > MAX_RESIDENT_BYTES {
         let victim = entries
             .iter()
-            .filter_map(|(entry_path, entry)| match entry {
-                Entry::Ready(playing) if entry_path.as_path() != path => {
-                    Some((entry_path.clone(), playing.last_drawn, playing.frames.len()))
+            .filter_map(|(entry_path, entry)| {
+                if entry_path.as_path() == path {
+                    return None;
                 }
-                _ => None,
+                Some((
+                    entry_path.clone(),
+                    entry_touched(entry)?,
+                    entry_bytes(entry),
+                ))
             })
-            .min_by_key(|(_, last_drawn, _)| *last_drawn);
-        let Some((victim, _, count)) = victim else {
+            .min_by_key(|(_, touched, _)| *touched);
+        let Some((victim, _, freed)) = victim else {
             break;
         };
         entries.remove(&victim);
-        resident -= count;
+        resident = resident.saturating_sub(freed);
     }
     // Uploads land a few textures per tick, so a long animation spreads its
     // first paint over several frames instead of stalling the scroll once.
@@ -332,8 +377,10 @@ fn decode_image(path: &Path, extension: &str) -> Option<Decoded> {
         let (numerator, denominator) = frame.delay().numer_denom_ms();
         let delay = Duration::from_millis(u64::from(numerator / denominator.max(1)).max(20));
         let image = frame.into_buffer();
-        spent += frame_bytes(image.width(), image.height());
-        decoded.push((to_color_image(&image), delay));
+        // The budget prices display pixels: a 512-wide sticker shows at 320.
+        let shown = to_color_image(&image);
+        spent += shown.size[0] * shown.size[1] * 4;
+        decoded.push((shown, delay));
         if spent >= MAX_ANIM_BYTES {
             break;
         }
@@ -349,14 +396,15 @@ fn decode_webp(path: &Path) -> Option<Decoded> {
     let (width, height) = decoder.dimensions();
     let mut decoded = Vec::new();
     let mut previous = 0i64;
-    let cost = frame_bytes(width, height);
     let mut spent = 0usize;
     for frame in decoder.into_iter() {
         let image = image::RgbaImage::from_raw(width, height, frame.data().to_vec())?;
         let delay = (i64::from(frame.timestamp()) - previous).max(20) as u64;
         previous = i64::from(frame.timestamp());
-        decoded.push((to_color_image(&image), Duration::from_millis(delay)));
-        spent += cost;
+        // The budget prices display pixels, not the encoded canvas.
+        let shown = to_color_image(&image);
+        spent += shown.size[0] * shown.size[1] * 4;
+        decoded.push((shown, Duration::from_millis(delay)));
         if spent >= MAX_ANIM_BYTES {
             break;
         }
@@ -747,6 +795,45 @@ mod tests {
         let decoded = decode(&path).expect("decodes");
         assert_eq!(decoded.frames.len(), 200);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_feature_length_webp_keeps_every_frame() {
+        // Past the old 150-frame cut: 160 canvas frames must all survive,
+        // priced at display size instead of the encoded canvas.
+        use webp_animation::prelude::*;
+        let side = 48u32;
+        let mut encoder = Encoder::new((side, side)).expect("encoder");
+        for index in 0..160i32 {
+            let shade = (index % 251) as u8;
+            let frame = vec![shade; (side * side * 4) as usize];
+            encoder.add_frame(&frame, index * 50).expect("frame");
+        }
+        let webp = encoder.finalize(160 * 50).expect("finalizes");
+        let dir = std::env::temp_dir().join(format!("zapfast-long-webp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("long.webp");
+        std::fs::write(&path, &webp).expect("writes");
+        let decoded = decode(&path).expect("decodes");
+        assert_eq!(decoded.frames.len(), 160);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_resident_budget_counts_display_bytes() {
+        let image = ColorImage::new([10, 20], vec![egui::Color32::BLACK; 200]);
+        assert_eq!(image_bytes(&image), 800);
+        let mut queue = VecDeque::new();
+        queue.push_back((image, Duration::from_millis(50)));
+        let entry = Entry::Uploading(UploadState {
+            queue,
+            done: Vec::new(),
+            next_index: 0,
+            total: Duration::from_millis(50),
+            touched: Instant::now(),
+        });
+        assert_eq!(entry_bytes(&entry), 800);
+        assert!(entry_touched(&entry).is_some());
     }
 
     #[test]

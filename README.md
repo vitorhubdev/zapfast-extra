@@ -95,8 +95,10 @@ without embedding a browser engine.
   (click the picture, or Space), a bar that jumps to the exact second with
   the keyframe still on screen while it catches up, a mute button with a
   level slider and the M key, and the true length on screen. A video shows
-  the sender's poster until its first frame decodes. The soundtrack plays
-  from the app itself, with no other program needed. A codec the player
+  the sender's poster until its first frame decodes. Arrow keys step
+  between files, or adjust the progress and volume sliders while one of
+  them has focus. The soundtrack plays from the app itself, with no other
+  program needed. A codec the player
   cannot read (HEVC from an iPhone, say) says which one it is and opens in
   the default desktop app instead. Other documents open
   in their default desktop apps, and a PDF opens in the viewer built into this

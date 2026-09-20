@@ -123,6 +123,10 @@ struct Loaded {
     total: Duration,
     /// Start position of the queued audio after seeking.
     base: Duration,
+    /// Output time when the base was established. Speeds only price output
+    /// after their own instant, so switching mid-clip rebases here instead
+    /// of repricing the stretch already heard.
+    base_sink: Duration,
     paused: bool,
     done: bool,
     /// Original file, to decode again after the data was released.
@@ -271,6 +275,19 @@ impl Player {
     /// clip that is playing at the moment it is made, from where it is.
     pub fn set_speed(&mut self, message: &str, speed: f32) {
         let speed = snap_speed(speed);
+        // Rebase the marker first: the new speed only prices output after
+        // this instant, so switching mid-clip neither jumps ahead nor rewinds.
+        if let Some(loaded) = self.loaded.as_mut()
+            && loaded.message == message
+            && !loaded.done
+            && let Some((_, sink)) = &self.output
+        {
+            let total = loaded.total;
+            let old = self.speeds.get(message).copied().unwrap_or(1.0);
+            loaded.base =
+                speed_position(loaded.base, sink.get_pos(), loaded.base_sink, old, total);
+            loaded.base_sink = sink.get_pos();
+        }
         self.speeds.insert(message.to_owned(), speed);
         let playing = self
             .loaded
@@ -367,7 +384,9 @@ impl Player {
                 let position = self
                     .output
                     .as_ref()
-                    .map(|(_, sink)| scaled_position(loaded.base, sink.get_pos(), speed, total))
+                    .map(|(_, sink)| {
+                        speed_position(loaded.base, sink.get_pos(), loaded.base_sink, speed, total)
+                    })
                     .unwrap_or(loaded.base)
                     .min(total);
                 Status {
@@ -444,6 +463,7 @@ impl Player {
                 clip,
                 total,
                 base: Duration::ZERO,
+                base_sink: Duration::ZERO,
                 paused: false,
                 done: false,
                 path,
@@ -596,6 +616,8 @@ impl Player {
             return Ok(());
         };
         loaded.base = base;
+        // A fresh source resets the output clock, so the anchor restarts too.
+        loaded.base_sink = Duration::ZERO;
         loaded.paused = false;
         loaded.done = false;
         Ok(())
@@ -606,11 +628,17 @@ fn clip_length(samples: usize) -> Duration {
     Duration::from_secs_f64(samples as f64 / f64::from(voice::RATE))
 }
 
-/// Media position from output time. Rodio reports wall-clock output, so at
-/// 1.5x or 2x the marker has to scale the output or it lags a full speed
-/// factor behind, showing half the clip when the voice already ended.
-fn scaled_position(base: Duration, output: Duration, speed: f32, total: Duration) -> Duration {
-    (base + output.mul_f32(speed.max(0.0))).min(total)
+/// Media position from output time. Rodio reports wall-clock output, so the
+/// speed scales only the output after the anchor: the stretch already heard
+/// at an older speed keeps its price, and switching mid-clip never jumps.
+fn speed_position(
+    base: Duration,
+    output: Duration,
+    anchor: Duration,
+    speed: f32,
+    total: Duration,
+) -> Duration {
+    (base + output.saturating_sub(anchor).mul_f32(speed.max(0.0))).min(total)
 }
 
 /// Decodes a file for playback. OGG/Opus voice notes decode in memory;
@@ -1100,24 +1128,81 @@ mod tests {
         let total = Duration::from_secs(12);
         // Six output seconds at 2x cover the whole twelve-second clip.
         assert_eq!(
-            scaled_position(Duration::ZERO, Duration::from_secs(6), 2.0, total),
+            speed_position(
+                Duration::ZERO,
+                Duration::from_secs(6),
+                Duration::ZERO,
+                2.0,
+                total
+            ),
             total
         );
         // Four output seconds at 1.5x land six seconds into the clip.
         assert_eq!(
-            scaled_position(Duration::ZERO, Duration::from_secs(4), 1.5, total),
+            speed_position(
+                Duration::ZERO,
+                Duration::from_secs(4),
+                Duration::ZERO,
+                1.5,
+                total
+            ),
             Duration::from_secs(6)
         );
         // Normal speed reports the output unchanged, and the marker never
         // runs past the end of the clip.
         assert_eq!(
-            scaled_position(Duration::ZERO, Duration::from_secs(3), 1.0, total),
+            speed_position(
+                Duration::ZERO,
+                Duration::from_secs(3),
+                Duration::ZERO,
+                1.0,
+                total
+            ),
             Duration::from_secs(3)
         );
         assert_eq!(
-            scaled_position(Duration::from_secs(10), Duration::from_secs(4), 2.0, total),
+            speed_position(
+                Duration::from_secs(10),
+                Duration::from_secs(4),
+                Duration::ZERO,
+                2.0,
+                total
+            ),
             total
         );
+    }
+
+    #[test]
+    fn switching_speed_mid_clip_never_jumps() {
+        let total = Duration::from_secs(30);
+        // Ten output seconds at 1x: the marker sits at ten seconds.
+        let at_switch = speed_position(
+            Duration::ZERO,
+            Duration::from_secs(10),
+            Duration::ZERO,
+            1.0,
+            total,
+        );
+        assert_eq!(at_switch, Duration::from_secs(10));
+        // Five more output seconds at 2x add ten heard seconds: twenty in
+        // all, not thirty. The old code repriced the first stretch too.
+        let faster = speed_position(
+            at_switch,
+            Duration::from_secs(15),
+            Duration::from_secs(10),
+            2.0,
+            total,
+        );
+        assert_eq!(faster, Duration::from_secs(20));
+        // Slowing back to 1x continues from twenty without rewinding.
+        let slower = speed_position(
+            faster,
+            Duration::from_secs(18),
+            Duration::from_secs(15),
+            1.0,
+            total,
+        );
+        assert_eq!(slower, Duration::from_secs(23));
     }
 
     #[test]

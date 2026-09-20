@@ -2,6 +2,32 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.32] - 2026-09-20
+
+### Fixed
+
+- A fast decoder no longer loses future video frames. When the frame
+  buffer fills, the player stops draining and lets the decoder wait on
+  its channel instead of dropping what the picture has not reached, so
+  pausing no longer risks a frozen picture over continuing sound.
+- Switching voice speed mid-clip rebases the progress marker onto the
+  switch instant. Walking 1x, 2x, 1.5x and back stays continuous instead
+  of jumping ahead or rewinding what was already heard.
+- Replaying a finished video starts playing with one click instead of
+  parking paused at zero.
+- The animation budget prices display pixels: a 512-wide sticker shows at
+  320, so the 64 MB cap always holds more than 150 full-width frames. The
+  shared resident budget counts bytes too, preparing uploads included, and
+  each visible animation uploads fewer textures per tick.
+- Arrow keys step between files, or adjust the progress and volume sliders
+  while one of them is focused.
+- A broken picture really retries: once its thirty-second cooldown passes,
+  the cached error is dropped and the file is read again, and the viewer
+  wakes up for the retry. A file fixed on disk recovers on its own.
+- Soundtrack extraction through ffmpeg streams with the cap applied live:
+  a long file no longer sits whole in RAM, and the helper stops past the
+  cap instead of decoding the tail for nothing.
+
 ## [1.0.31] - 2026-09-20
 
 ### Fixed

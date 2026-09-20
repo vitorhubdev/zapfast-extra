@@ -51,6 +51,8 @@ fn video_view(
         // Opening a video starts it, with sound, like the phone does.
         app.actions.push(Action::VideoToggle);
     }
+    // Fresh frame: no control holds the arrows until the bar says so below.
+    ctx.data_mut(|data| data.insert_temp(control_focus_id(), false));
     let palette = app.palette;
     app.video
         .set_output(app.settings.video_volume, app.settings.video_muted);
@@ -341,6 +343,11 @@ fn video_bar(
             if loud.drag_stopped() {
                 actions.push(Action::SettingsChanged);
             }
+            // A focused slider owns the arrow keys: flag it so media
+            // browsing yields until focus moves on.
+            if slider.has_focus() || loud.has_focus() {
+                ui.data_mut(|data| data.insert_temp(control_focus_id(), true));
+            }
             if theme::soft_button(ui, &palette, Some(Icon::Download), "Save a copy", false)
                 .clicked()
             {
@@ -433,6 +440,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         video_view(app, ctx, screen, &path, index, count);
         return;
     }
+    // Fresh frame: pictures and PDFs own no sliders, so nothing holds arrows.
+    ctx.data_mut(|data| data.insert_temp(control_focus_id(), false));
     // A rendered PDF page arrives as raw pixels; the texture is made here,
     // on the thread that owns the graphics context.
     if kind == ViewerKind::Pdf {
@@ -662,8 +671,16 @@ fn image_surface(_ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec
     let uri = crate::util::image_uri(path);
     // A permanently broken file stays failed for a while instead of burning
     // a decode on every frame; the cooldown retries quietly on its own.
-    if image_cooling_down(ctx, &uri) {
+    if let Some(left) = image_cooling_down(ctx, &uri) {
+        // Wake up when the cooldown ends so the retry actually runs.
+        ctx.request_repaint_after(left.max(Duration::from_millis(500)));
         return Surface::Failed;
+    }
+    // The cooldown expired, if there ever was one: drop the loader cached
+    // error once and read the file again, so a file fixed on disk recovers
+    // without restarting the app.
+    if clear_image_failure(ctx, &uri) {
+        ctx.forget_image(&uri);
     }
     match egui::Image::new(&uri).load_for_size(ctx, size) {
         Ok(egui::load::TexturePoll::Ready { texture }) => Surface::Ready {
@@ -682,22 +699,51 @@ fn image_surface(_ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec
 /// How long a broken picture waits before the viewer tries it again.
 const IMAGE_RETRY_AFTER: Duration = Duration::from_secs(30);
 
-/// Whether this picture broke recently and should stay failed for now.
-fn image_cooling_down(ctx: &egui::Context, uri: &str) -> bool {
-    let id = egui::Id::new("viewer-image-failures");
+/// How long until this picture may be tried again, if it broke recently.
+fn image_cooling_down(ctx: &egui::Context, uri: &str) -> Option<Duration> {
     ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(id)
-            .get(uri)
-            .is_some_and(|at| at.elapsed() < IMAGE_RETRY_AFTER)
+        let failures = data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(
+            image_failures_id(),
+        );
+        cooldown_left(failures, uri, Instant::now())
     })
+}
+
+/// How long until a broken picture may be tried again: the remaining
+/// cooldown, or nothing when it never broke or the wait already passed.
+fn cooldown_left(
+    failures: &std::collections::HashMap<String, Instant>,
+    uri: &str,
+    now: Instant,
+) -> Option<Duration> {
+    failures
+        .get(uri)
+        .and_then(|at| IMAGE_RETRY_AFTER.checked_sub(now.duration_since(*at)))
+}
+
+/// Forgets one recorded failure; true when there was one to forget.
+fn clear_image_failure(ctx: &egui::Context, uri: &str) -> bool {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(
+            image_failures_id(),
+        )
+        .remove(uri)
+        .is_some()
+    })
+}
+
+/// Where broken pictures and their failure instants live.
+fn image_failures_id() -> egui::Id {
+    egui::Id::new("viewer-image-failures")
 }
 
 /// Remembers a broken picture so the next frames skip it for a while.
 fn remember_image_failure(ctx: &egui::Context, uri: &str) {
-    let id = egui::Id::new("viewer-image-failures");
     ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(id)
-            .insert(uri.to_owned(), Instant::now());
+        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(
+            image_failures_id(),
+        )
+        .insert(uri.to_owned(), Instant::now());
     });
 }
 
@@ -711,6 +757,12 @@ struct PageField {
 /// being typed in.
 pub fn page_field_id() -> egui::Id {
     egui::Id::new("viewer-page-field")
+}
+
+/// The id of the flag a focused viewer control sets, so the arrow keys
+/// adjust it instead of browsing media.
+pub fn control_focus_id() -> egui::Id {
+    egui::Id::new("viewer-control-focus")
 }
 
 /// The page number as a field the reader can type in.
@@ -1105,5 +1157,18 @@ mod tests {
         assert_eq!(seek_fraction(total, total), 1.0);
         assert_eq!(seek_fraction(Duration::from_secs(99), total), 1.0);
         assert_eq!(seek_fraction(Duration::from_secs(1), Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn a_fixed_picture_gets_a_real_retry() {
+        let mut failures = std::collections::HashMap::new();
+        let now = Instant::now();
+        assert_eq!(cooldown_left(&failures, "x", now), None);
+        failures.insert("x".to_owned(), now - Duration::from_secs(10));
+        let left = cooldown_left(&failures, "x", now).expect("still cooling");
+        assert!(left <= Duration::from_secs(20) && !left.is_zero());
+        // After thirty seconds the wait has passed: retry for real.
+        failures.insert("x".to_owned(), now - Duration::from_secs(31));
+        assert_eq!(cooldown_left(&failures, "x", now), None);
     }
 }
