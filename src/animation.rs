@@ -109,6 +109,15 @@ struct SpoolFile {
     path: PathBuf,
 }
 
+impl SpoolFile {
+    /// Takes ownership of a freshly written spool file and registers the
+    /// epoch every frame request for it will carry.
+    fn new(path: PathBuf) -> Self {
+        register_spool(&path);
+        Self { path }
+    }
+}
+
 impl AsRef<Path> for SpoolFile {
     fn as_ref(&self) -> &Path {
         &self.path
@@ -125,6 +134,10 @@ impl std::ops::Deref for SpoolFile {
 impl Drop for SpoolFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+        // Retirement is the cancellation: requests queued or delivered
+        // under the old epoch are dropped instead of being read, and the
+        // registry stops holding the path.
+        retire_spool(&self.path);
     }
 }
 
@@ -392,7 +405,7 @@ impl BudgetSink {
                 drop(spill.file);
                 Storage::Spool {
                     head: std::mem::take(&mut self.head),
-                    file: SpoolFile { path: spill.path },
+                    file: SpoolFile::new(spill.path),
                 }
             }
             None => Storage::Ram(std::mem::take(&mut self.head)),
@@ -512,8 +525,21 @@ struct FrameJob {
 struct FrameReady {
     file: PathBuf,
     tail: usize,
-    image: Option<ColorImage>,
+    read: SpoolRead,
     epoch: u64,
+}
+
+/// What one pager read found. `Missing` is a single index the window pages
+/// past; `Dead` means the tail itself is unusable, so the animation fails
+/// over instead of freezing on its last picture.
+#[derive(Clone)]
+enum SpoolRead {
+    /// Pixels of the requested tail index.
+    Frame(ColorImage),
+    /// The index cannot be read; leave a hole and continue.
+    Missing,
+    /// The file is gone or shorter than the requested frame.
+    Dead,
 }
 
 struct PrefetchWorker {
@@ -531,11 +557,30 @@ const MAX_QUEUED_JOBS: usize = 64;
 /// cannot turn results into an uncounted cache.
 const MAX_QUEUED_RESULTS: usize = 64;
 
+/// Epochs come from one counter, never from a per-path tally: a retired
+/// path leaves the registry, and a fresh epoch can never repeat an old
+/// one, so a request from a discarded animation can never be mistaken
+/// for a live one.
+static SPOOL_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 static SPOOL_GEN: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Current window epoch of a spool file. Bumped when its window rebases,
-/// so queued and delivered frames from the old epoch die on sight.
+fn next_epoch() -> u64 {
+    SPOOL_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+}
+
+/// Registers a live spool file under a fresh epoch.
+fn register_spool(file: &Path) {
+    let epoch = next_epoch();
+    SPOOL_GEN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(file.to_path_buf(), epoch);
+}
+
+/// Current epoch of a spool file, or zero once it has been retired.
+/// Requests queued before retirement carry a real epoch and die on sight.
 fn current_gen(file: &Path) -> u64 {
     SPOOL_GEN
         .lock()
@@ -548,12 +593,36 @@ fn current_gen(file: &Path) -> u64 {
 /// Redates a spool file, killing its queued and delivered frames. Old
 /// requests requeue under the new epoch on the next tick.
 fn bump_gen(file: &Path) {
+    let epoch = next_epoch();
     SPOOL_GEN
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .entry(file.to_path_buf())
-        .and_modify(|epoch| *epoch += 1)
-        .or_insert(1);
+        .insert(file.to_path_buf(), epoch);
+}
+
+/// Retires a discarded spool: its entry is freed and every request still
+/// carrying its epoch is refused.
+fn retire_spool(file: &Path) {
+    SPOOL_GEN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .remove(file);
+}
+
+/// Whether a queued request belongs to a live window. The pager asks this
+/// before reading and again before delivering.
+fn job_is_stale(job: &FrameJob) -> bool {
+    job.epoch != current_gen(&job.file)
+}
+
+/// Whether the registry still holds a path, so a session that cycles
+/// through stickers can be shown to forget each one it drops.
+#[cfg(test)]
+fn spool_registered(file: &Path) -> bool {
+    SPOOL_GEN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .contains_key(file)
 }
 
 /// The single background pager for spooled tails. One thread serves every
@@ -569,12 +638,12 @@ fn prefetch_worker() -> &'static PrefetchWorker {
             .spawn(move || {
                 while let Ok(job) = jobs_rx.recv() {
                     // Canceled while queued: skip the read and the delivery.
-                    if job.epoch != current_gen(&job.file) {
+                    if job_is_stale(&job) {
                         continue;
                     }
-                    let image = read_spool_frame(&job.file, job.width, job.height, job.tail);
+                    let read = read_spool_frame(&job.file, job.width, job.height, job.tail);
                     // Canceled while reading: the requester moved on.
-                    if job.epoch != current_gen(&job.file) {
+                    if job_is_stale(&job) {
                         continue;
                     }
                     // Bounded delivery: a full queue drops the result and
@@ -582,7 +651,7 @@ fn prefetch_worker() -> &'static PrefetchWorker {
                     let _ = done_tx.try_send(FrameReady {
                         file: job.file,
                         tail: job.tail,
-                        image,
+                        read,
                         epoch: job.epoch,
                     });
                 }
@@ -595,17 +664,33 @@ fn prefetch_worker() -> &'static PrefetchWorker {
     })
 }
 
-/// Reads one spooled tail frame straight from disk.
-fn read_spool_frame(file: &Path, width: usize, height: usize, tail: usize) -> Option<ColorImage> {
+/// Reads one spooled tail frame straight from disk, on the pager thread.
+/// The file's length decides the verdict: a tail that is gone, or shorter
+/// than the requested frame, is unusable as a whole (a truncated file keeps
+/// existing, so asking again would only repeat the same failure), while a
+/// frame that is long enough but will not read is a hole to page past.
+fn read_spool_frame(file: &Path, width: usize, height: usize, tail: usize) -> SpoolRead {
     let frame_bytes = width * height * 4;
-    let mut input = BufReader::new(File::open(file).ok()?);
-    input
-        .seek(SeekFrom::Start(tail as u64 * frame_bytes as u64))
-        .ok()?;
+    let Ok(handle) = File::open(file) else {
+        return SpoolRead::Dead;
+    };
+    let Ok(metadata) = handle.metadata() else {
+        return SpoolRead::Dead;
+    };
+    let start = tail as u64 * frame_bytes as u64;
+    if metadata.len() < start + frame_bytes as u64 {
+        return SpoolRead::Dead;
+    }
+    let mut input = BufReader::new(handle);
+    if input.seek(SeekFrom::Start(start)).is_err() {
+        return SpoolRead::Dead;
+    }
     let mut pixels = vec![0u8; frame_bytes];
-    input.read_exact(&mut pixels).ok()?;
+    if input.read_exact(&mut pixels).is_err() {
+        return SpoolRead::Missing;
+    }
     // Same premultiplied roundtrip as the synchronous path below.
-    Some(ColorImage::from_rgba_premultiplied(
+    SpoolRead::Frame(ColorImage::from_rgba_premultiplied(
         [width, height],
         &pixels,
     ))
@@ -623,7 +708,18 @@ fn stash_id() -> egui::Id {
 enum TakeReady {
     Ready(ColorImage),
     Missing,
+    /// The tail cannot be read at all; the animation must fail over.
+    Dead,
     Pending,
+}
+
+/// Turns one pager verdict into the window's answer.
+fn take_outcome(read: SpoolRead) -> TakeReady {
+    match read {
+        SpoolRead::Frame(image) => TakeReady::Ready(image),
+        SpoolRead::Missing => TakeReady::Missing,
+        SpoolRead::Dead => TakeReady::Dead,
+    }
 }
 
 /// Takes one spooled frame without blocking: completed prefetches, the
@@ -647,10 +743,7 @@ fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
             let pending = data
                 .get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id());
             pending.remove(&(file.to_path_buf(), tail, epoch));
-            outcome = Some(match ready.image {
-                Some(image) => TakeReady::Ready(image),
-                None => TakeReady::Missing,
-            });
+            outcome = Some(take_outcome(ready.read));
             return;
         }
         let worker = prefetch_worker();
@@ -673,10 +766,7 @@ fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
                         pending_id(),
                     );
                 pending.remove(&(file.to_path_buf(), tail, epoch));
-                outcome = Some(match ready.image {
-                    Some(image) => TakeReady::Ready(image),
-                    None => TakeReady::Missing,
-                });
+                outcome = Some(take_outcome(ready.read));
             } else if data
                 .get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
                 .len()
@@ -702,7 +792,11 @@ fn enqueue_prefetch(ctx: &egui::Context, file: &Path, width: usize, height: usiz
     ctx.data_mut(|data| {
         let pending =
             data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id());
-        pending.retain(|_, at| at.elapsed() < Duration::from_secs(2));
+        // Expired entries requeue; entries whose spool was retired drop
+        // outright, so the table never keeps a discarded animation alive.
+        pending.retain(|(path, _, epoch), at| {
+            at.elapsed() < Duration::from_secs(2) && current_gen(path) == *epoch
+        });
         if pending.len() > 128 {
             pending.clear();
         }
@@ -769,6 +863,11 @@ fn visible_recently(ctx: &egui::Context, path: &Path) -> bool {
 /// Pages the texture window forward: drops what fell behind, materializes a
 /// few frames ahead. A loop wrap rebases the window instead of mixing cycles.
 fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, position: Duration) {
+    // Already known unusable: the caller fails over, and nothing here may
+    // queue one more read for a tail that is gone.
+    if playing.dead.is_some() {
+        return;
+    }
     let spool_file: Option<PathBuf> = match &playing.source.storage {
         Storage::Spool { file, .. } => Some(file.path.clone()),
         Storage::Ram(_) => None,
@@ -849,6 +948,12 @@ fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, posi
             Material::Missing => {
                 playing.missing.insert(index);
             }
+            // The tail is gone or short: stop paging and fail over
+            // instead of painting a frozen picture forever.
+            Material::Dead => {
+                playing.dead = Some(Instant::now());
+                break;
+            }
             // Still on its way: wait for the painter instead of spinning.
             Material::Pending => {
                 ctx.request_repaint_after(Duration::from_millis(16));
@@ -856,23 +961,23 @@ fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, posi
             }
         }
     }
-    // The spool file is gone mid-play: fail over instead of freezing on
-    // the last picture. The entry retries from the original file after
-    // its cooldown, which rebuilds a fresh spool.
+    // Nothing usable is left at or after the playhead and the pin ran off
+    // the end of the source: the rest of the tail is unreadable, so the
+    // animation fails over rather than repainting a still for every frame
+    // it will never load.
     if playing.dead.is_none()
-        && !playing.missing.is_empty()
-        && spool_file
-            .as_deref()
-            .is_some_and(|file| std::fs::metadata(file).is_err())
+        && playing.missing.contains(&need)
+        && playing.request.is_some_and(|pin| pin >= count)
     {
         playing.dead = Some(Instant::now());
     }
 }
 
-/// What one planned index gave: pixels, a hole, or patience.
+/// What one planned index gave: pixels, a hole, a dead source, or patience.
 enum Material {
     Ready(ColorImage),
     Missing,
+    Dead,
     Pending,
 }
 
@@ -892,6 +997,7 @@ fn materialize(ctx: &egui::Context, source: &AnimSource, index: usize) -> Materi
             match take_ready(ctx, file, tail) {
                 TakeReady::Ready(image) => Material::Ready(image),
                 TakeReady::Missing => Material::Missing,
+                TakeReady::Dead => Material::Dead,
                 TakeReady::Pending => {
                     enqueue_prefetch(ctx, file, source.width, source.height, tail);
                     Material::Pending
@@ -1021,12 +1127,30 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             if playing.dead.is_some() {
                 let at = playing.dead.unwrap_or(now);
                 entries.insert(path.to_path_buf(), Entry::Failed(at));
+                // Wake the window when the cooldown ends: the retry must
+                // not wait for the reader to move the mouse.
+                ctx.request_repaint_after(RETRY_AFTER);
                 return Frame::Unavailable;
             }
             match window_frame(playing, position) {
                 Some((texture, until_next)) => {
                     if playing.source.frame_count() > 1 {
-                        ctx.request_repaint_after(until_next.max(Duration::from_millis(10)));
+                        // Wake at the playhead's own next boundary: when a
+                        // still shows because that frame is a hole, the
+                        // window must not spin at ten-millisecond repaints.
+                        let need = frame_at(&playing.source.starts, position);
+                        let playhead_until = playing
+                            .source
+                            .starts
+                            .get(need + 1)
+                            .copied()
+                            .unwrap_or(total)
+                            .saturating_sub(position);
+                        ctx.request_repaint_after(
+                            playhead_until
+                                .max(until_next)
+                                .max(Duration::from_millis(10)),
+                        );
                     }
                     Frame::Ready(texture)
                 }
@@ -1038,7 +1162,13 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             }
         }
         Some(Entry::Decoding(_)) => Frame::Pending,
-        Some(Entry::Failed(_)) => Frame::Unavailable,
+        Some(Entry::Failed(at)) => {
+            // A failed sticker retries itself: wake when its cooldown
+            // ends, so recovery needs no user movement on screen.
+            let remaining = RETRY_AFTER.saturating_sub(at.elapsed());
+            ctx.request_repaint_after(remaining.max(Duration::from_millis(50)));
+            Frame::Unavailable
+        }
         None => {
             if DECODING.load(std::sync::atomic::Ordering::Acquire) >= MAX_DECODERS {
                 // Retry shortly when all decoder slots are busy.
@@ -1368,6 +1498,34 @@ mod tests {
     /// tests would steal each other deliveries, so worker-touching tests
     /// hold this lock for their whole body and run one at a time.
     static WORKER_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A spooled source of `count` full-size frames: 320 by 320 pixels
+    /// push past the RAM budget, so the tail really lives on disk.
+    fn spooled_source(count: usize) -> AnimSource {
+        let mut sink = BudgetSink::new();
+        for index in 0..count {
+            let shade = (index % 251) as u8;
+            let image = ColorImage::new(
+                [320, 320],
+                vec![egui::Color32::from_rgb(shade, shade, shade); 320 * 320],
+            );
+            let _ = sink.push(image, Duration::from_millis(50));
+        }
+        let source = sink.finish().expect("source");
+        assert!(
+            matches!(source.storage, Storage::Spool { .. }),
+            "the tail spills to disk"
+        );
+        source
+    }
+
+    /// How many reads the interface is still waiting on.
+    fn pending_len(ctx: &egui::Context) -> usize {
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
+                .len()
+        })
+    }
 
     #[test]
     fn clipped_animation_does_not_decode_or_schedule_frames() {
@@ -1935,7 +2093,7 @@ mod tests {
             height: 2,
             storage: Storage::Spool {
                 head: Vec::new(),
-                file: SpoolFile { path: file.clone() },
+                file: SpoolFile::new(file.clone()),
             },
         };
         assert_eq!(load_frame(&source, 0).expect("frame").pixels, pixels);
@@ -2041,18 +2199,22 @@ mod tests {
     }
 
     #[test]
-    fn queues_shed_instead_of_blocking_and_stale_epochs_die() {
-        // A slow disk must never wedge a paint: hundreds of requests
-        // return at once, the pending table stays small, and a rebased
-        // window never surfaces frames from its old epoch.
+    fn queues_shed_instead_of_blocking_and_stashes_stay_bounded() {
+        // Real spool reads behind the queue: hundreds of requests return
+        // at once, the pending table stays small, and what the pager
+        // delivers for indexes nobody waits on is still capped.
         let _serial = WORKER_SERIAL
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        let source = spooled_source(60);
+        let file = match &source.storage {
+            Storage::Spool { file, .. } => file.path.clone(),
+            Storage::Ram(_) => unreachable!(),
+        };
         let ctx = egui::Context::default();
-        let file = Path::new("shed-queue.bin");
         let started = Instant::now();
         for tail in 0..500 {
-            enqueue_prefetch(&ctx, file, 320, 320, tail);
+            enqueue_prefetch(&ctx, &file, 320, 320, tail);
         }
         assert!(
             started.elapsed() < Duration::from_secs(2),
@@ -2062,30 +2224,77 @@ mod tests {
             data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
                 .len()
         });
-        assert!(pending <= 160, "pending stays bounded");
-        // Rebase the window, then plant a frame from the old epoch: the
-        // lookup must not surface it.
-        bump_gen(file);
+        assert!(pending <= 160, "pending stays bounded: {pending}");
+        // Let the pager work through real reads, then drain one index:
+        // whatever it stashed while nobody looked must stay capped.
+        std::thread::sleep(Duration::from_millis(250));
+        let _ = take_ready(&ctx, &file, 499);
+        let stash = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
+                .len()
+        });
+        assert!(stash <= MAX_QUEUED_RESULTS, "stash stays bounded: {stash}");
+        drop(source);
+    }
+
+    #[test]
+    fn a_discarded_animation_cancels_its_reads_and_frees_its_registry() {
+        // A request carries the epoch of the window it serves: once the
+        // animation is dropped (evicted, replaced, pruned, shut down) the
+        // pager must neither read nor deliver it, and the registry must
+        // stop holding the path.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let source = spooled_source(60);
+        let (file, epoch) = match &source.storage {
+            Storage::Spool { file, .. } => (file.path.clone(), current_gen(file)),
+            Storage::Ram(_) => unreachable!(),
+        };
+        assert!(spool_registered(&file), "a live spool is registered");
+        let ctx = egui::Context::default();
+        enqueue_prefetch(&ctx, &file, 320, 320, 0);
+        let job = FrameJob {
+            file: file.clone(),
+            width: 320,
+            height: 320,
+            tail: 0,
+            epoch,
+        };
+        assert!(!job_is_stale(&job), "a live spool serves its queued reads");
+        drop(source);
+        assert!(!file.exists(), "dropping the animation deletes its spool");
+        assert!(
+            job_is_stale(&job),
+            "a discarded animation cancels its queued reads"
+        );
+        assert_eq!(current_gen(&file), 0, "a retired spool has no epoch");
+        assert!(
+            !spool_registered(&file),
+            "a session that drops animations does not grow the registry"
+        );
+        // A delivery from before the discard must not surface either, in
+        // the stash or in the channel the pager writes to.
         ctx.data_mut(|data| {
             data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
                 .push(FrameReady {
-                    file: file.to_path_buf(),
+                    file: file.clone(),
                     tail: 0,
-                    image: None,
-                    epoch: 0,
+                    read: SpoolRead::Missing,
+                    epoch,
                 });
         });
         assert!(
-            matches!(take_ready(&ctx, file, 0), TakeReady::Pending),
-            "a stale epoch never reports its frames"
+            matches!(take_ready(&ctx, &file, 0), TakeReady::Pending),
+            "a discarded spool never reports frames"
         );
     }
 
     #[test]
-    fn an_unreadable_tail_leaves_holes_instead_of_looping() {
-        // Sixty spooled frames; the tail file dies mid-play. The window
-        // records holes, never re-requests them, and fails over instead
-        // of freezing on its last picture with endless rereads.
+    fn a_vanished_tail_fails_over_instead_of_freezing() {
+        // Sixty spooled frames; the tail file dies mid-play. The pager
+        // reports the unusable source, the window fails over, and nothing
+        // is reread: no frozen picture, no endless requests.
         let _serial = WORKER_SERIAL
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -2119,19 +2328,22 @@ mod tests {
         maintain_window(&ctx, path, &mut playing, Duration::from_millis(100));
         assert!(!playing.window.is_empty(), "the head paints first");
         std::fs::remove_file(&spool_path).expect("tail dies");
-        // Page the dead tail: ticks queue, the worker reports the holes,
-        // the window records them instead of looping.
+        // Page the dead tail: ticks queue, the pager answers with the
+        // verdict, and the window fails over.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
-            if !playing.missing.is_empty() {
+            if playing.dead.is_some() {
                 break;
             }
-            assert!(Instant::now() < deadline, "holes are reported");
+            assert!(Instant::now() < deadline, "the dead tail is reported");
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(playing.dead.is_some(), "a dead spool fails over");
-        // Holed frames are never re-requested: more ticks add no work.
+        assert!(
+            playing.missing.is_empty(),
+            "a vanished tail is dead, not a hole to skip"
+        );
+        // A dead tail is never re-requested: more ticks add no work.
         let pending = ctx.data_mut(|data| {
             data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
                 .len()
@@ -2144,6 +2356,202 @@ mod tests {
                 .len()
         });
         assert!(later <= pending, "holed frames are never re-requested");
+    }
+
+    #[test]
+    fn a_truncated_tail_fails_over_while_the_file_still_exists() {
+        // The spool keeps existing but loses its second half, so a check
+        // for the file's presence would happily paint the same still for
+        // every later frame. The pager's length check calls the tail dead
+        // and the window fails over without asking the disk again.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let source = spooled_source(60);
+        let spool_path = match &source.storage {
+            Storage::Spool { file, .. } => file.path.clone(),
+            Storage::Ram(_) => unreachable!(),
+        };
+        let full = std::fs::metadata(&spool_path).expect("meta").len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&spool_path)
+            .expect("opens")
+            .set_len(full / 2)
+            .expect("truncates");
+        assert!(spool_path.is_file(), "the file is still there, just short");
+        let ctx = egui::Context::default();
+        let path = Path::new("cut-tail.gif");
+        let mut playing = Playing {
+            source,
+            window: VecDeque::new(),
+            last_position: Duration::ZERO,
+            started: Instant::now(),
+            last_drawn: Instant::now(),
+            missing: HashSet::new(),
+            dead: None,
+            request: None,
+        };
+        maintain_window(&ctx, path, &mut playing, Duration::from_millis(100));
+        assert!(!playing.window.is_empty(), "the head paints first");
+        // Deep into the cut half: the pager refuses the index outright.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2800));
+            if playing.dead.is_some() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the short tail is reported");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            playing.missing.is_empty(),
+            "a short file is dead, not a hole to page past"
+        );
+        let asked = pending_len(&ctx);
+        for _ in 0..3 {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2800));
+        }
+        assert_eq!(pending_len(&ctx), asked, "the dead tail is never re-asked");
+    }
+
+    #[test]
+    fn a_holed_frame_pages_on_until_the_source_runs_out() {
+        // One frame the pager cannot read is a hole: the window skips it
+        // and keeps playing. A hole that runs from the playhead to the end
+        // of the source is not a hole anymore, it is a dead tail.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let source = spooled_source(60);
+        let (spool_path, head) = match &source.storage {
+            Storage::Spool { file, head, .. } => (file.path.clone(), head.len()),
+            Storage::Ram(_) => unreachable!(),
+        };
+        let ctx = egui::Context::default();
+        // The pager's verdict for frame 50, planted before the window asks.
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
+                .push(FrameReady {
+                    file: spool_path.clone(),
+                    tail: 50 - head,
+                    read: SpoolRead::Missing,
+                    epoch: current_gen(&spool_path),
+                });
+        });
+        let path = Path::new("holed.gif");
+        let mut playing = Playing {
+            source,
+            window: VecDeque::new(),
+            // The playhead starts where the first tick looks, so the window
+            // pages instead of rebasing on a gap it never had.
+            last_position: Duration::from_millis(2500),
+            started: Instant::now(),
+            last_drawn: Instant::now(),
+            missing: HashSet::new(),
+            dead: None,
+            request: None,
+        };
+        maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
+        assert!(playing.missing.contains(&50), "the hole is recorded");
+        assert!(playing.dead.is_none(), "one hole does not kill the tail");
+        // The window pages past it: frames after the hole still arrive.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
+            if playing.window.iter().any(|(index, _)| *index > 50) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "frames after the hole arrive");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(playing.dead.is_none(), "a holed tail keeps playing");
+        // A hole from the playhead to the last frame leaves nothing usable.
+        playing.missing.extend(56..60);
+        maintain_window(&ctx, path, &mut playing, Duration::from_millis(2800));
+        assert!(
+            playing.dead.is_some(),
+            "a tail with nothing left fails over"
+        );
+    }
+
+    #[test]
+    fn the_pager_decides_whether_a_tail_is_dead_or_holed() {
+        // Only the pager touches the disk, and it answers with a verdict:
+        // pixels, a single unreadable index, or a tail that is not there.
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("tail.bin");
+        let frame_bytes = 2 * 2 * 4;
+        std::fs::write(&path, vec![7u8; frame_bytes * 3]).expect("writes");
+        assert!(matches!(
+            read_spool_frame(&path, 2, 2, 0),
+            SpoolRead::Frame(_)
+        ));
+        assert!(matches!(
+            read_spool_frame(&path, 2, 2, 2),
+            SpoolRead::Frame(_)
+        ));
+        // A frame short: that index and everything past it is unusable.
+        std::fs::write(&path, vec![7u8; frame_bytes * 2]).expect("writes");
+        assert!(matches!(read_spool_frame(&path, 2, 2, 2), SpoolRead::Dead));
+        assert!(matches!(
+            read_spool_frame(&path, 2, 2, 0),
+            SpoolRead::Frame(_)
+        ));
+        // Gone entirely.
+        std::fs::remove_file(&path).expect("removes");
+        assert!(matches!(read_spool_frame(&path, 2, 2, 0), SpoolRead::Dead));
+    }
+
+    #[test]
+    fn a_failed_sticker_wakes_the_window_for_its_retry() {
+        // The cooldown is only worth having if the window comes back for
+        // it: a failed sticker on screen schedules its own retry.
+        let ctx = egui::Context::default();
+        let path = Path::new("retry-me.webp");
+        {
+            let cache = super::cache(&ctx);
+            cache
+                .0
+                .lock()
+                .unwrap()
+                .insert(path.to_path_buf(), super::Entry::Failed(Instant::now()));
+        }
+        // A brand new context repaints immediately for its first couple of
+        // passes, so the requested delay is read once those are behind it.
+        let mut delay = Duration::ZERO;
+        for index in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(1.0 + index as f64),
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(200.0, 200.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let rect =
+                        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(50.0, 50.0));
+                    assert!(matches!(
+                        super::frame(ui, path, rect),
+                        super::Frame::Unavailable
+                    ));
+                },
+            );
+            delay = output.viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+            output.textures_delta.clear();
+        }
+        assert!(
+            delay > Duration::from_secs(1) && delay <= RETRY_AFTER,
+            "the retry is scheduled for the end of the cooldown: {delay:?}"
+        );
+        let cache = super::cache(&ctx);
+        let entries = cache.0.lock().unwrap();
+        assert!(
+            matches!(entries.get(path), Some(super::Entry::Failed(_))),
+            "the cooldown is honoured instead of decoding again at once"
+        );
     }
 
     #[test]

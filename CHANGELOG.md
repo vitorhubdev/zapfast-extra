@@ -2,6 +2,24 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.36] - 2026-09-20
+
+### Fixed
+
+- Discarding an animation cancels its queued reads: each spool request
+  carries the window's epoch, retiring the file refuses every request from
+  the old one, and the registry forgets the path, so a session that cycles
+  through stickers does not accumulate entries.
+- A failed sticker schedules its own retry: the window wakes when the
+  cooldown ends instead of waiting for the reader to move something.
+- A truncated temporary file is recognised as unusable even though it still
+  exists, so the animation fails over with a controlled retry instead of
+  painting a frozen picture with pointless fast repaints.
+- The pager, not the interface, decides whether one index is unreadable or
+  a tail is gone: no disk query runs on the interface thread, and a still
+  shown while a frame is missing repaints at the next frame boundary
+  rather than every ten milliseconds.
+
 ## [1.0.35] - 2026-09-20
 
 ### Fixed
