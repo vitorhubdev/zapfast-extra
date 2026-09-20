@@ -2,6 +2,20 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.35] - 2026-09-20
+
+### Fixed
+
+- Spooled animation queues stay bounded and cancel cleanly: at most 64
+  queued reads and 64 delivered frames, requests that never block a paint,
+  and a per-spool epoch that drops work for rebased windows on sight.
+- An unreadable tail leaves recorded holes instead of asking forever, and
+  a spool file that vanishes mid-play fails over with a controlled retry
+  instead of freezing on its last picture.
+- A window left behind jumps straight to the playhead and holds its
+  request until the frame lands, so coming back to a sticker paints the
+  current moment instead of paging stale frames or stalling empty.
+
 ## [1.0.34] - 2026-09-20
 
 ### Fixed

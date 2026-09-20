@@ -374,9 +374,11 @@ mod tests {
         );
         output.textures_delta.clear();
         assert!(focused.get(), "Tab focuses the real slider");
-        ctx.data_mut(|data| data.insert_temp(crate::ui::viewer::control_focus_id(), true));
-        // Arrows now adjust the slider: no media step.
+        // Pass three: the slider is drawn again under the same id, so it
+        // keeps its real focus, and the flag follows the live widget state
+        // exactly like the viewer bar raises it. Nothing is hand-set.
         app.actions.clear();
+        let arrowed = std::cell::Cell::new(false);
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(screen),
@@ -389,9 +391,24 @@ mod tests {
                 }],
                 ..Default::default()
             },
-            |ui| handle(&mut app, ui.ctx()),
+            |ui| {
+                ui.push_id("probe", |ui| {
+                    let mut value = 0.5;
+                    let response = ui.add(egui::Slider::new(&mut value, 0.0..=1.0));
+                    // Production wiring, in miniature: a focused control
+                    // owns the arrows until focus moves on.
+                    if response.has_focus() {
+                        ui.data_mut(|data| {
+                            data.insert_temp(crate::ui::viewer::control_focus_id(), true)
+                        });
+                    }
+                    arrowed.set(response.has_focus());
+                });
+                handle(&mut app, ui.ctx());
+            },
         );
         output.textures_delta.clear();
+        assert!(arrowed.get(), "the slider is still really focused");
         assert!(
             !app.actions
                 .iter()

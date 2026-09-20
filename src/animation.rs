@@ -5,6 +5,7 @@
 //! from memory.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -136,12 +137,24 @@ struct Playing {
     last_position: Duration,
     started: Instant,
     last_drawn: Instant,
+    /// Frames that proved unreadable. Skipped without re-requesting, so a
+    /// rotten tail leaves holes instead of wedging the window in a loop.
+    missing: HashSet<usize>,
+    /// When the spool file vanished mid-play. The entry fails over with
+    /// a controlled retry instead of freezing on its last picture.
+    dead: Option<Instant>,
+    /// The frame the pager must land next. Pinned until it arrives: with
+    /// an empty window the playhead moves every tick, and re-aiming at it
+    /// each time would stash every delivery one step behind, forever.
+    request: Option<usize>,
 }
 
 enum Entry {
     Decoding(Instant),
     Failed(Instant),
-    Ready(Playing),
+    // Boxed: a playing animation holds its decoded source plus the
+    // upload window, hundreds of bytes the small variants must not pay.
+    Ready(Box<Playing>),
 }
 
 /// Decoded bytes of one display frame (RGBA8).
@@ -420,6 +433,8 @@ fn window_plan(
     total: Duration,
     resident: &[usize],
     position: Duration,
+    missing: &HashSet<usize>,
+    pinned: Option<usize>,
 ) -> WindowPlan {
     let count = starts.len();
     let frame_end = |index: usize| starts.get(index + 1).copied().unwrap_or(total);
@@ -432,13 +447,23 @@ fn window_plan(
         }
     }
     let mut load = Vec::new();
-    let mut next = resident
-        .last()
-        .copied()
-        .map(|last| last + 1)
-        .unwrap_or_else(|| frame_at(starts, position));
+    // A pinned request repeats until its frame lands: re-aiming at a
+    // moving playhead every tick would stash each delivery one step
+    // behind and the window would never fill. Without a pin, a window
+    // left behind jumps to the playhead instead of paging stale frames
+    // one tick at a time; the kept picture stays as a still until the
+    // needed frame lands.
+    let need = frame_at(starts, position);
+    let mut next = pinned.unwrap_or_else(|| {
+        resident
+            .last()
+            .copied()
+            .map(|last| last + 1)
+            .unwrap_or(need)
+            .max(need)
+    });
     while load.len() < UPLOAD_PER_TICK && next < count && starts[next] <= position + PREFETCH {
-        if !resident.contains(&next) {
+        if !resident.contains(&next) && !missing.contains(&next) {
             load.push(next);
         }
         next += 1;
@@ -479,6 +504,8 @@ struct FrameJob {
     width: usize,
     height: usize,
     tail: usize,
+    /// Window epoch of the requester; a wrap redates the file and kills these.
+    epoch: u64,
 }
 
 #[derive(Clone)]
@@ -486,15 +513,48 @@ struct FrameReady {
     file: PathBuf,
     tail: usize,
     image: Option<ColorImage>,
+    epoch: u64,
 }
 
 struct PrefetchWorker {
-    jobs: std::sync::mpsc::Sender<FrameJob>,
+    jobs: std::sync::mpsc::SyncSender<FrameJob>,
     // The queue lock is held only for non-blocking drains.
     done: Mutex<std::sync::mpsc::Receiver<FrameReady>>,
 }
 
 static PREFETCH_WORKER: std::sync::OnceLock<PrefetchWorker> = std::sync::OnceLock::new();
+
+/// Jobs waiting for the pager. Sixty tiny descriptors at most; anything
+/// past that waits for the next tick instead of piling up.
+const MAX_QUEUED_JOBS: usize = 64;
+/// Delivered frames waiting for pickup. Bounded so an abandoned viewer
+/// cannot turn results into an uncounted cache.
+const MAX_QUEUED_RESULTS: usize = 64;
+
+static SPOOL_GEN: std::sync::LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Current window epoch of a spool file. Bumped when its window rebases,
+/// so queued and delivered frames from the old epoch die on sight.
+fn current_gen(file: &Path) -> u64 {
+    SPOOL_GEN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(file)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Redates a spool file, killing its queued and delivered frames. Old
+/// requests requeue under the new epoch on the next tick.
+fn bump_gen(file: &Path) {
+    SPOOL_GEN
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry(file.to_path_buf())
+        .and_modify(|epoch| *epoch += 1)
+        .or_insert(1);
+}
 
 /// The single background pager for spooled tails. One thread serves every
 /// viewer; results are keyed by file and index, so no per-viewer routing
@@ -502,17 +562,28 @@ static PREFETCH_WORKER: std::sync::OnceLock<PrefetchWorker> = std::sync::OnceLoc
 /// own tiny read, never the interface.
 fn prefetch_worker() -> &'static PrefetchWorker {
     PREFETCH_WORKER.get_or_init(|| {
-        let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<FrameJob>();
-        let (done_tx, done_rx) = std::sync::mpsc::channel::<FrameReady>();
+        let (jobs_tx, jobs_rx) = std::sync::mpsc::sync_channel::<FrameJob>(MAX_QUEUED_JOBS);
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<FrameReady>(MAX_QUEUED_RESULTS);
         std::thread::Builder::new()
             .name("anim-prefetch".into())
             .spawn(move || {
                 while let Ok(job) = jobs_rx.recv() {
+                    // Canceled while queued: skip the read and the delivery.
+                    if job.epoch != current_gen(&job.file) {
+                        continue;
+                    }
                     let image = read_spool_frame(&job.file, job.width, job.height, job.tail);
-                    let _ = done_tx.send(FrameReady {
+                    // Canceled while reading: the requester moved on.
+                    if job.epoch != current_gen(&job.file) {
+                        continue;
+                    }
+                    // Bounded delivery: a full queue drops the result and
+                    // the requester requeues on its next tick.
+                    let _ = done_tx.try_send(FrameReady {
                         file: job.file,
                         tail: job.tail,
                         image,
+                        epoch: job.epoch,
                     });
                 }
             })
@@ -559,20 +630,23 @@ enum TakeReady {
 /// stash of other animations results, or a fresh queue slot. Corrupt tails
 /// report Missing once instead of spinning the window forever.
 fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
+    let epoch = current_gen(file);
     let mut outcome: Option<TakeReady> = None;
     ctx.data_mut(|data| {
         let stash = data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id());
-        if stash.len() > 256 {
-            stash.clear();
+        // Stale epochs die on sight: a rebased window requeues under its
+        // new epoch instead of painting frames it already skipped past.
+        stash.retain(|ready| ready.epoch == current_gen(&ready.file));
+        if stash.len() > MAX_QUEUED_RESULTS {
+            stash.drain(..stash.len() - MAX_QUEUED_RESULTS);
         }
-        if let Some(pos) = stash
-            .iter()
-            .position(|ready| ready.file.as_path() == file && ready.tail == tail)
-        {
+        if let Some(pos) = stash.iter().position(|ready| {
+            ready.file.as_path() == file && ready.tail == tail && ready.epoch == epoch
+        }) {
             let ready = stash.remove(pos);
-            let pending =
-                data.get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
-            pending.remove(&(file.to_path_buf(), tail));
+            let pending = data
+                .get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id());
+            pending.remove(&(file.to_path_buf(), tail, epoch));
             outcome = Some(match ready.image {
                 Some(image) => TakeReady::Ready(image),
                 None => TakeReady::Missing,
@@ -585,10 +659,20 @@ fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         while let Ok(ready) = done.try_recv() {
-            if ready.file.as_path() == file && ready.tail == tail {
+            if ready.epoch != current_gen(&ready.file) {
                 let pending = data
-                    .get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
-                pending.remove(&(file.to_path_buf(), tail));
+                    .get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(
+                        pending_id(),
+                    );
+                pending.remove(&(ready.file.clone(), ready.tail, ready.epoch));
+                continue;
+            }
+            if ready.file.as_path() == file && ready.tail == tail && ready.epoch == epoch {
+                let pending = data
+                    .get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(
+                        pending_id(),
+                    );
+                pending.remove(&(file.to_path_buf(), tail, epoch));
                 outcome = Some(match ready.image {
                     Some(image) => TakeReady::Ready(image),
                     None => TakeReady::Missing,
@@ -596,7 +680,7 @@ fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
             } else if data
                 .get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
                 .len()
-                <= 256
+                < MAX_QUEUED_RESULTS
             {
                 data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
                     .push(ready);
@@ -606,15 +690,18 @@ fn take_ready(ctx: &egui::Context, file: &Path, tail: usize) -> TakeReady {
     outcome.unwrap_or(TakeReady::Pending)
 }
 
-/// Queues one tail frame for background loading, once at a time. Entries
-/// older than two seconds requeue: their job either landed elsewhere or
-/// died with a retired viewer, and a duplicate read is harmless.
+/// Queues one tail frame for background loading, once at a time, without
+/// ever blocking the interface. Entries older than two seconds requeue:
+/// their job either landed elsewhere or died with a retired viewer, and
+/// a duplicate read is harmless. A full job queue sheds the request and
+/// the next tick retries, so a slow disk never wedges the paint.
 fn enqueue_prefetch(ctx: &egui::Context, file: &Path, width: usize, height: usize, tail: usize) {
-    let key = (file.to_path_buf(), tail);
+    let epoch = current_gen(file);
+    let key = (file.to_path_buf(), tail, epoch);
     let mut send = false;
     ctx.data_mut(|data| {
         let pending =
-            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize), Instant>>(pending_id());
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id());
         pending.retain(|_, at| at.elapsed() < Duration::from_secs(2));
         if pending.len() > 128 {
             pending.clear();
@@ -626,14 +713,23 @@ fn enqueue_prefetch(ctx: &egui::Context, file: &Path, width: usize, height: usiz
         send = true;
     });
     if send {
-        // The worker only exits with the process; a failed send would mean
-        // it died, which its panic-free loop cannot do.
-        let _ = prefetch_worker().jobs.send(FrameJob {
-            file: key.0,
+        let job = FrameJob {
+            file: key.0.clone(),
             width,
             height,
             tail: key.1,
-        });
+            epoch,
+        };
+        // Never block a paint on a slow pager: a full queue drops the
+        // request and frees its pending slot for the next tick.
+        if prefetch_worker().jobs.try_send(job).is_err() {
+            ctx.data_mut(|data| {
+                data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(
+                    pending_id(),
+                )
+                .remove(&key);
+            });
+        }
     }
 }
 
@@ -673,16 +769,62 @@ fn visible_recently(ctx: &egui::Context, path: &Path) -> bool {
 /// Pages the texture window forward: drops what fell behind, materializes a
 /// few frames ahead. A loop wrap rebases the window instead of mixing cycles.
 fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, position: Duration) {
+    let spool_file: Option<PathBuf> = match &playing.source.storage {
+        Storage::Spool { file, .. } => Some(file.path.clone()),
+        Storage::Ram(_) => None,
+    };
     if position < playing.last_position {
         playing.window.clear();
+        playing.request = None;
+        // A wrap redates the spool: queued reads for the old cycle die
+        // on sight and requeue under the new epoch on the next tick.
+        if let Some(file) = spool_file.as_deref() {
+            bump_gen(file);
+        }
+    } else if let Some(file) = spool_file.as_deref() {
+        // Back after a while with an old window: redate once so queued
+        // stale reads die and requeue at the playhead. Only the gap
+        // tick redates; later ticks leave the epoch alone, or nothing
+        // they queue would ever survive to deliver.
+        if position - playing.last_position > WINDOW_KEEP {
+            playing.request = None;
+            bump_gen(file);
+        }
     }
     playing.last_position = position;
     let resident: Vec<usize> = playing.window.iter().map(|(index, _)| *index).collect();
+    let count = playing.source.starts.len();
+    let need = frame_at(&playing.source.starts, position);
+    let candidate = resident
+        .last()
+        .copied()
+        .map(|last| last + 1)
+        .unwrap_or(need)
+        .max(need);
+    // Pin the request stream: with an empty or lagging window the
+    // playhead moves every tick, and re-aiming at it each time would
+    // stash every delivery one step behind, forever. The pin repeats
+    // until its frame lands, then advances; holes are hopped, never
+    // re-asked. A window that reached the pin moves on; a rebased one
+    // starts over above.
+    let mut req = match playing.request {
+        Some(r) if r >= count => candidate,
+        Some(r) if playing.missing.contains(&r) => r,
+        Some(r) if resident.iter().any(|&i| i >= r) => candidate,
+        Some(r) => r,
+        None => candidate,
+    };
+    while req < count && playing.missing.contains(&req) {
+        req += 1;
+    }
+    playing.request = Some(req);
     let plan = window_plan(
         &playing.source.starts,
         playing.source.total,
         &resident,
         position,
+        &playing.missing,
+        Some(req),
     );
     for _ in 0..plan.drop {
         playing.window.pop_front();
@@ -701,15 +843,29 @@ fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, posi
                     .push_back((index, ctx.load_texture(name, image, TextureOptions::LINEAR)));
                 spent += 1;
             }
-            // A corrupt tail leaves a hole and pages on: one bad frame must
-            // not wedge the whole window.
-            Material::Missing => {}
+            // A corrupt tail leaves a recorded hole and pages on: one bad
+            // frame must not wedge the whole window, and the same index
+            // is never requested twice.
+            Material::Missing => {
+                playing.missing.insert(index);
+            }
             // Still on its way: wait for the painter instead of spinning.
             Material::Pending => {
                 ctx.request_repaint_after(Duration::from_millis(16));
                 break;
             }
         }
+    }
+    // The spool file is gone mid-play: fail over instead of freezing on
+    // the last picture. The entry retries from the original file after
+    // its cooldown, which rebuilds a fresh spool.
+    if playing.dead.is_none()
+        && !playing.missing.is_empty()
+        && spool_file
+            .as_deref()
+            .is_some_and(|file| std::fs::metadata(file).is_err())
+    {
+        playing.dead = Some(Instant::now());
     }
 }
 
@@ -815,13 +971,16 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
     let mut entries = cache.0.lock().unwrap_or_else(|p| p.into_inner());
     for (arrived_path, decoded) in arrived {
         let entry = match decoded {
-            Some(decoded) if decoded.source.frame_count() > 0 => Entry::Ready(Playing {
+            Some(decoded) if decoded.source.frame_count() > 0 => Entry::Ready(Box::new(Playing {
                 source: decoded.source,
                 window: VecDeque::new(),
                 last_position: Duration::ZERO,
                 started: Instant::now(),
                 last_drawn: Instant::now(),
-            }),
+                missing: HashSet::new(),
+                dead: None,
+                request: None,
+            })),
             _ => Entry::Failed(Instant::now()),
         };
         // Replacing an entry drops the old one, and its spool with it.
@@ -857,6 +1016,13 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             let total = playing.source.total;
             let position = Duration::from_nanos((elapsed.as_nanos() % total.as_nanos()) as u64);
             maintain_window(ctx, path, playing, position);
+            // The spool died mid-play: show the poster and retry from the
+            // original file after the cooldown, which rebuilds the spool.
+            if playing.dead.is_some() {
+                let at = playing.dead.unwrap_or(now);
+                entries.insert(path.to_path_buf(), Entry::Failed(at));
+                return Frame::Unavailable;
+            }
             match window_frame(playing, position) {
                 Some((texture, until_next)) => {
                     if playing.source.frame_count() > 1 {
@@ -1198,6 +1364,11 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
 
 #[cfg(test)]
 mod tests {
+    /// The pager is one global thread with per-viewer stashes: parallel
+    /// tests would steal each other deliveries, so worker-touching tests
+    /// hold this lock for their whole body and run one at a time.
+    static WORKER_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn clipped_animation_does_not_decode_or_schedule_frames() {
         let ctx = egui::Context::default();
@@ -1485,18 +1656,76 @@ mod tests {
         let starts: Vec<Duration> = (0..10).map(|i| Duration::from_millis(i * 100)).collect();
         let total = Duration::from_millis(1000);
         // An empty window loads forward from the playhead, bounded by prefetch.
-        let plan = window_plan(&starts, total, &[], Duration::from_millis(250));
+        let empty: HashSet<usize> = HashSet::new();
+        let plan = window_plan(
+            &starts,
+            total,
+            &[],
+            Duration::from_millis(250),
+            &empty,
+            None,
+        );
         assert_eq!(plan.drop, 0);
         assert_eq!(plan.load, vec![2, 3, 4, 5, 6, 7]);
-        // A longer run sheds what fell behind and extends ahead, twelve
-        // textures per tick at most.
+        // A longer run sheds what fell behind and jumps to the playhead
+        // instead of paging the stale run: twelve textures per tick max.
         let long: Vec<Duration> = (0..100).map(|i| Duration::from_millis(i * 100)).collect();
         let long_total = Duration::from_millis(10_000);
         let resident: Vec<usize> = (0..10).collect();
-        let plan = window_plan(&long, long_total, &resident, Duration::from_millis(3000));
+        let plan = window_plan(
+            &long,
+            long_total,
+            &resident,
+            Duration::from_millis(3000),
+            &empty,
+            None,
+        );
         assert_eq!(plan.drop, 9, "only the current picture is sacred");
-        assert_eq!(plan.load.len(), UPLOAD_PER_TICK);
-        assert_eq!(plan.load[0], 10);
+        assert_eq!(plan.load[0], 30, "a stale window jumps to the playhead");
+    }
+
+    #[test]
+    fn a_stale_window_jumps_to_the_playhead() {
+        // A viewer away for seconds comes back with an old window: the
+        // first request serves the playhead, not the stale sequence, and
+        // a known hole is skipped without asking twice.
+        let starts: Vec<Duration> = (0..100).map(|i| Duration::from_millis(i * 100)).collect();
+        let total = Duration::from_millis(10_000);
+        let resident: Vec<usize> = (0..10).collect();
+        let empty: HashSet<usize> = HashSet::new();
+        let plan = window_plan(
+            &starts,
+            total,
+            &resident,
+            Duration::from_millis(3000),
+            &empty,
+            None,
+        );
+        assert_eq!(plan.load[0], 30, "serves the playhead first");
+        assert!(!plan.load.contains(&6), "never pages the stale run");
+        let mut missing: HashSet<usize> = HashSet::new();
+        missing.insert(30);
+        let plan = window_plan(
+            &starts,
+            total,
+            &resident,
+            Duration::from_millis(3000),
+            &missing,
+            None,
+        );
+        assert_eq!(plan.load[0], 31, "a holed frame is skipped once");
+        // A pinned request repeats even as the playhead moves on: the
+        // pager lands the still first instead of chasing the playhead
+        // and stashing every delivery one step behind.
+        let plan = window_plan(
+            &starts,
+            total,
+            &[],
+            Duration::from_millis(3200),
+            &empty,
+            Some(30),
+        );
+        assert_eq!(plan.load[0], 30, "a pin repeats until its frame lands");
     }
 
     #[test]
@@ -1536,6 +1765,9 @@ mod tests {
         // Two 200-frame animations page from disk; both stay Ready across
         // ticks while visible, with small texture windows and no
         // decode-evict-decode cycle.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let ctx = egui::Context::default();
         let paths = ["thrash-a.gif", "thrash-b.gif"];
         let mut spool_files = Vec::new();
@@ -1562,20 +1794,26 @@ mod tests {
                 }
                 entries.insert(
                     PathBuf::from(name),
-                    Entry::Ready(Playing {
+                    Entry::Ready(Box::new(Playing {
                         source,
                         window: VecDeque::new(),
                         last_position: Duration::ZERO,
-                        started: Instant::now(),
+                        // Four seconds in: both playheads sit in their
+                        // spooled tails together from the first round, so
+                        // the ticks prove two animations paging at once.
+                        started: Instant::now() - Duration::from_secs(4),
                         last_drawn: Instant::now(),
-                    }),
+                        missing: HashSet::new(),
+                        dead: None,
+                        request: None,
+                    })),
                 );
             }
         }
-        // Alternate ticks on both in real time, the way a chat with two
-        // stickers paints. Sleeping between rounds advances the playheads
-        // on the wall clock, so windows page forward for real.
-        for _ in 0..6 {
+        // Alternate ticks on both, the way a chat with two stickers
+        // paints, until both windows hold deep tail frames from disk.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
             for name in paths {
                 let mut output = ctx.run_ui(
                     egui::RawInput {
@@ -1595,6 +1833,23 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
+            {
+                let cache = super::cache(&ctx);
+                let entries = cache.0.lock().unwrap();
+                let tailed = paths.iter().all(|name| match entries.get(Path::new(name)) {
+                    Some(Entry::Ready(playing)) => {
+                        playing.window.iter().any(|(index, _)| *index >= 100)
+                    }
+                    _ => false,
+                });
+                if tailed {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "both tails page from disk at once"
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
         let cache = super::cache(&ctx);
@@ -1607,6 +1862,10 @@ mod tests {
                         "window stays small"
                     );
                     assert!(!playing.window.is_empty(), "pages paint through the worker");
+                    assert!(
+                        playing.window.iter().any(|(index, _)| *index >= 100),
+                        "reaches its spooled tail"
+                    );
                     assert!(
                         playing.last_position > Duration::ZERO,
                         "playheads advance on the wall clock"
@@ -1639,13 +1898,16 @@ mod tests {
             height: 20,
             storage: Storage::Ram(vec![image]),
         };
-        let entry = Entry::Ready(Playing {
+        let entry = Entry::Ready(Box::new(Playing {
             source,
             window: VecDeque::new(),
             last_position: Duration::ZERO,
             started: Instant::now(),
             last_drawn: Instant::now(),
-        });
+            missing: HashSet::new(),
+            dead: None,
+            request: None,
+        }));
         assert_eq!(entry_bytes(&entry), 800);
         assert!(entry_touched(&entry).is_some());
     }
@@ -1779,9 +2041,152 @@ mod tests {
     }
 
     #[test]
+    fn queues_shed_instead_of_blocking_and_stale_epochs_die() {
+        // A slow disk must never wedge a paint: hundreds of requests
+        // return at once, the pending table stays small, and a rebased
+        // window never surfaces frames from its old epoch.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let ctx = egui::Context::default();
+        let file = Path::new("shed-queue.bin");
+        let started = Instant::now();
+        for tail in 0..500 {
+            enqueue_prefetch(&ctx, file, 320, 320, tail);
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "500 requests never block the interface"
+        );
+        let pending = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
+                .len()
+        });
+        assert!(pending <= 160, "pending stays bounded");
+        // Rebase the window, then plant a frame from the old epoch: the
+        // lookup must not surface it.
+        bump_gen(file);
+        ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<Vec<FrameReady>>(stash_id())
+                .push(FrameReady {
+                    file: file.to_path_buf(),
+                    tail: 0,
+                    image: None,
+                    epoch: 0,
+                });
+        });
+        assert!(
+            matches!(take_ready(&ctx, file, 0), TakeReady::Pending),
+            "a stale epoch never reports its frames"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_tail_leaves_holes_instead_of_looping() {
+        // Sixty spooled frames; the tail file dies mid-play. The window
+        // records holes, never re-requests them, and fails over instead
+        // of freezing on its last picture with endless rereads.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let mut sink = BudgetSink::new();
+        for index in 0..60 {
+            let shade = (index % 251) as u8;
+            let image = ColorImage::new(
+                [320, 320],
+                vec![egui::Color32::from_rgb(shade, shade, shade); 320 * 320],
+            );
+            let _ = sink.push(image, Duration::from_millis(50));
+        }
+        let source = sink.finish().expect("source");
+        assert!(matches!(source.storage, Storage::Spool { .. }));
+        let spool_path = match &source.storage {
+            Storage::Spool { file, .. } => file.path.clone(),
+            Storage::Ram(_) => unreachable!(),
+        };
+        let ctx = egui::Context::default();
+        let path = Path::new("rotten-tail.gif");
+        let mut playing = Playing {
+            source,
+            window: VecDeque::new(),
+            last_position: Duration::ZERO,
+            started: Instant::now(),
+            last_drawn: Instant::now(),
+            missing: HashSet::new(),
+            dead: None,
+            request: None,
+        };
+        maintain_window(&ctx, path, &mut playing, Duration::from_millis(100));
+        assert!(!playing.window.is_empty(), "the head paints first");
+        std::fs::remove_file(&spool_path).expect("tail dies");
+        // Page the dead tail: ticks queue, the worker reports the holes,
+        // the window records them instead of looping.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
+            if !playing.missing.is_empty() {
+                break;
+            }
+            assert!(Instant::now() < deadline, "holes are reported");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(playing.dead.is_some(), "a dead spool fails over");
+        // Holed frames are never re-requested: more ticks add no work.
+        let pending = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
+                .len()
+        });
+        for _ in 0..3 {
+            maintain_window(&ctx, path, &mut playing, Duration::from_millis(2500));
+        }
+        let later = ctx.data_mut(|data| {
+            data.get_temp_mut_or_default::<HashMap<(PathBuf, usize, u64), Instant>>(pending_id())
+                .len()
+        });
+        assert!(later <= pending, "holed frames are never re-requested");
+    }
+
+    #[test]
+    fn a_failed_final_flush_ships_nothing() {
+        // Writes succeed into the buffer but the disk dies before the
+        // flush: finish ships nothing and deletes the partial spool.
+        // Unlike a mid-write failure, every push still answers true.
+        let dir = tempfile::tempdir().expect("dir");
+        let mut sink = BudgetSink::new();
+        sink.spill_parent = Some(dir.path().to_path_buf());
+        let big = ColorImage::new([320, 320], vec![egui::Color32::BLACK; 320 * 320]);
+        for _ in 0..45 {
+            assert!(sink.push(big.clone(), Duration::from_millis(50)));
+        }
+        let spilled = sink.spill.as_ref().expect("spilling by now").path.clone();
+        assert!(spilled.is_file(), "spool exists mid-decode");
+        // Break the disk with a read-only handle, then feed only sips
+        // that stay inside the writer buffer: no push fails yet.
+        let broken = dir.path().join("broken.bin");
+        std::fs::write(&broken, b"x").expect("writes");
+        let mut permissions = std::fs::metadata(&broken).expect("meta").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&broken, permissions).expect("readonly");
+        let read_only = File::open(&broken).expect("opens read-only");
+        sink.spill.as_mut().expect("spill").file = BufWriter::new(read_only);
+        let sip = ColorImage::new([8, 8], vec![egui::Color32::BLACK; 64]);
+        for _ in 0..10 {
+            assert!(
+                sink.push(sip.clone(), Duration::from_millis(50)),
+                "buffered, no error yet"
+            );
+        }
+        assert!(sink.finish().is_none(), "half a spool never ships");
+        assert!(!spilled.exists(), "the partial spool is deleted");
+    }
+
+    #[test]
     fn spooled_frames_arrive_without_blocking_the_interface() {
         // A spool-backed source plus the real worker: the first tick only
         // queues, a later tick paints, and the interface thread never reads.
+        let _serial = WORKER_SERIAL
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let mut sink = BudgetSink::new();
         for index in 0..60 {
             let shade = (index % 251) as u8;
@@ -1805,6 +2210,9 @@ mod tests {
             last_position: Duration::ZERO,
             started: Instant::now(),
             last_drawn: Instant::now(),
+            missing: HashSet::new(),
+            dead: None,
+            request: None,
         };
         // The RAM head paints on the first tick; the spooled tail arrives
         // through the worker on later ticks.
