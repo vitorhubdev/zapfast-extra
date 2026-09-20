@@ -305,6 +305,101 @@ mod tests {
         );
     }
 
+    #[test]
+    fn arrows_follow_a_real_focused_slider() {
+        // A genuine slider, focused through the real control id: the arrows
+        // adjust it instead of stepping media, exactly like the viewer bar.
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::headless(
+            crate::paths::AppDirs::under(root.path()),
+            crate::settings::Settings::default(),
+        )
+        .0;
+        let item = |message: &str, path: &str| crate::model::ViewerItem {
+            message: message.to_owned(),
+            path: std::path::PathBuf::from(path),
+            kind: crate::model::ViewerKind::Video,
+        };
+        app.viewer = Some(crate::model::Viewer {
+            chat: "chat".to_owned(),
+            items: vec![item("a", "a.mp4"), item("b", "b.mp4")],
+            index: 0,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+            pdf_page: 0,
+            pdf_pages: 0,
+            pdf_rotate: 0,
+        });
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        // Pass one: draw the slider inside a stable id scope and keep it.
+        let slider = std::cell::Cell::new(egui::Id::NULL);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            },
+            |ui| {
+                ui.push_id("probe", |ui| {
+                    let mut value = 0.5;
+                    slider.set(ui.add(egui::Slider::new(&mut value, 0.0..=1.0)).id);
+                });
+            },
+        );
+        output.textures_delta.clear();
+        assert_ne!(slider.get(), egui::Id::NULL);
+        // Pass two: a genuine Tab moves keyboard focus onto the slider, the
+        // gesture the audit asked for. Focus state is read out of the pass;
+        // the production wiring raises the flag outside, where writes rest.
+        let key_event = |key: Key| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        };
+        let focused = std::cell::Cell::new(false);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![key_event(Key::Tab)],
+                ..Default::default()
+            },
+            |ui| {
+                ui.push_id("probe", |ui| {
+                    let mut value = 0.5;
+                    focused.set(ui.add(egui::Slider::new(&mut value, 0.0..=1.0)).has_focus());
+                });
+            },
+        );
+        output.textures_delta.clear();
+        assert!(focused.get(), "Tab focuses the real slider");
+        ctx.data_mut(|data| data.insert_temp(crate::ui::viewer::control_focus_id(), true));
+        // Arrows now adjust the slider: no media step.
+        app.actions.clear();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events: vec![egui::Event::Key {
+                    key: Key::ArrowRight,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                ..Default::default()
+            },
+            |ui| handle(&mut app, ui.ctx()),
+        );
+        output.textures_delta.clear();
+        assert!(
+            !app.actions
+                .iter()
+                .any(|action| matches!(action, Action::ViewerStep(_))),
+            "a focused slider keeps the arrows"
+        );
+    }
+
     fn escape(app: &mut App, ctx: &egui::Context) {
         let mut output = ctx.run_ui(
             egui::RawInput {

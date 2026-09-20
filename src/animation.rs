@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::io::Read;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -16,18 +17,24 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 
 /// Maximum frame width uploaded to the GPU.
 const MAX_WIDTH: u32 = 320;
-/// Maximum decoded bytes kept per animation (RGBA8, at display size). A long
-/// sticker plays to its end instead of looping a truncated head; the byte
-/// cap bounds memory instead of an arbitrary frame count. Sixty-four
-/// megabytes hold more than 150 full-width frames, so the old count limit
-/// never cuts first.
-const MAX_ANIM_BYTES: usize = 64 * 1024 * 1024;
-/// Textures uploaded per interface tick. A long animation spreads its first
-/// paint over several frames instead of stalling the scroll once.
+/// Display pixels kept in RAM per animation before the tail spills to disk.
+/// Sixteen megabytes hold forty full-width frames; everything past that
+/// pages from a spool file, so duration is never cut to fit RAM.
+const MAX_ANIM_BYTES: usize = 16 * 1024 * 1024;
+/// Frames decoded per animation, a backstop for absurd inputs. Four thousand
+/// frames are minutes of sticker; past that the head stays playable and the
+/// tail is dropped with a warning instead of growing a spool without end.
+const MAX_SOURCE_FRAMES: usize = 4_096;
+/// Textures materialized per interface tick. A long animation spreads its
+/// first paint over several frames instead of stalling the scroll once.
 /// Kept small on purpose: the budget applies per visible animation and tick,
 /// so several stickers on screen multiply it. A shared per-tick budget is
 /// future work once upload pressure is measured.
 const UPLOAD_PER_TICK: usize = 12;
+/// How far ahead of the playhead textures are prepared.
+const PREFETCH: Duration = Duration::from_millis(500);
+/// How far behind the playhead textures survive; the current one always stays.
+const WINDOW_KEEP: Duration = Duration::from_secs(1);
 /// Time an unseen animation remains decoded.
 const IDLE: Duration = Duration::from_secs(20);
 /// Time a failed or stuck decode is remembered before trying again.
@@ -54,31 +61,61 @@ impl Drop for DecodeSlot {
     }
 }
 
+/// A fully decoded animation: every frame's timing in RAM, pixels in RAM up
+/// to the budget and spilled to disk past it. Duration is never truncated.
 struct Decoded {
-    frames: Vec<(ColorImage, Duration)>,
+    source: AnimSource,
+}
+
+impl Decoded {
+    /// One display frame by index, from RAM or from the spool file.
+    #[cfg(test)]
+    fn image(&self, index: usize) -> Option<ColorImage> {
+        load_frame(&self.source, index)
+    }
+}
+
+struct AnimSource {
+    /// Start time of each frame, in order; the loop length follows separately.
+    starts: Vec<Duration>,
+    /// Full loop length.
+    total: Duration,
+    width: usize,
+    height: usize,
+    storage: Storage,
+}
+
+impl AnimSource {
+    fn frame_count(&self) -> usize {
+        self.starts.len()
+    }
+}
+
+enum Storage {
+    /// Every frame, for animations within the RAM budget.
+    Ram(Vec<ColorImage>),
+    /// Head frames in RAM, the tail paged from disk by frame index.
+    Spool {
+        head: Vec<ColorImage>,
+        file: PathBuf,
+    },
 }
 
 struct Playing {
-    frames: Vec<(TextureHandle, Duration)>,
-    total: Duration,
+    source: AnimSource,
+    /// Resident textures by frame index, in order. Only the frames around
+    /// the playhead stay uploaded; the window pages forward as it plays.
+    window: VecDeque<(usize, TextureHandle)>,
+    /// Last playhead, to spot loop wraps and rebase the window.
+    last_position: Duration,
     started: Instant,
     last_drawn: Instant,
 }
 
 enum Entry {
     Decoding(Instant),
-    Uploading(UploadState),
     Failed(Instant),
     Ready(Playing),
-}
-
-/// Decoded frames waiting for their turn on the GPU.
-struct UploadState {
-    queue: VecDeque<(ColorImage, Duration)>,
-    done: Vec<(TextureHandle, Duration)>,
-    next_index: usize,
-    total: Duration,
-    touched: Instant,
 }
 
 /// Decoded bytes of one display frame (RGBA8).
@@ -92,29 +129,28 @@ fn texture_bytes(texture: &TextureHandle) -> usize {
     width * height * 4
 }
 
-/// Decoded bytes one cache entry holds: ready textures plus everything
-/// still queued for upload. Decoding entries count zero here; at most two
-/// decode at once, and their in-flight frames join the budget on delivery.
+/// RAM bytes one cache entry holds: its texture window plus a RAM source.
+/// Spool files live on disk and count nothing here; decoding entries count
+/// zero too, at most two decode at once and join the budget on delivery.
 fn entry_bytes(entry: &Entry) -> usize {
     match entry {
-        Entry::Ready(playing) => playing
-            .frames
-            .iter()
-            .map(|(texture, _)| texture_bytes(texture))
-            .sum(),
-        Entry::Uploading(upload) => {
-            upload
-                .done
+        Entry::Ready(playing) => {
+            playing
+                .window
                 .iter()
-                .map(|(texture, _)| texture_bytes(texture))
+                .map(|(_, texture)| texture_bytes(texture))
                 .sum::<usize>()
-                + upload
-                    .queue
-                    .iter()
-                    .map(|(image, _)| image_bytes(image))
-                    .sum::<usize>()
+                + source_bytes(&playing.source)
         }
         Entry::Decoding(_) | Entry::Failed(_) => 0,
+    }
+}
+
+/// RAM bytes an animation source holds; spooled tails page from disk.
+fn source_bytes(source: &AnimSource) -> usize {
+    match &source.storage {
+        Storage::Ram(images) => images.iter().map(image_bytes).sum(),
+        Storage::Spool { head, .. } => head.iter().map(image_bytes).sum(),
     }
 }
 
@@ -122,9 +158,326 @@ fn entry_bytes(entry: &Entry) -> usize {
 fn entry_touched(entry: &Entry) -> Option<Instant> {
     match entry {
         Entry::Ready(playing) => Some(playing.last_drawn),
-        Entry::Uploading(upload) => Some(upload.touched),
         Entry::Decoding(_) | Entry::Failed(_) => None,
     }
+}
+
+/// Loads one display frame by index, from RAM or from the spool file.
+fn load_frame(source: &AnimSource, index: usize) -> Option<ColorImage> {
+    match &source.storage {
+        Storage::Ram(images) => images.get(index).cloned(),
+        Storage::Spool { head, file, .. } => {
+            if let Some(image) = head.get(index) {
+                return Some(image.clone());
+            }
+            let tail = index - head.len();
+            let frame_bytes = source.width * source.height * 4;
+            let mut input = BufReader::new(File::open(file).ok()?);
+            input
+                .seek(SeekFrom::Start(tail as u64 * frame_bytes as u64))
+                .ok()?;
+            let mut pixels = vec![0u8; frame_bytes];
+            input.read_exact(&mut pixels).ok()?;
+            Some(ColorImage::from_rgba_unmultiplied(
+                [source.width, source.height],
+                &pixels,
+            ))
+        }
+    }
+}
+
+/// Index of the frame showing at a playhead position.
+fn frame_at(starts: &[Duration], position: Duration) -> usize {
+    let mut index = 0;
+    for (i, start) in starts.iter().enumerate() {
+        if *start <= position {
+            index = i;
+        } else {
+            break;
+        }
+    }
+    index
+}
+
+static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn spool_path() -> PathBuf {
+    let id = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("zapfast-anim-{}-{id}.bin", std::process::id()))
+}
+
+struct SpillWriter {
+    file: BufWriter<File>,
+    path: PathBuf,
+}
+
+/// Opens the disk overflow for a decoded animation. Crash leftovers share
+/// the OS temporary directory with the audio spool and die with it.
+fn open_spill() -> Option<SpillWriter> {
+    let path = spool_path();
+    let file = BufWriter::new(File::create(&path).ok()?);
+    Some(SpillWriter { file, path })
+}
+
+/// Collects decoded frames, spilling past the RAM budget to disk instead of
+/// cutting the tail. Display-sized images go in; the sink decides where.
+struct BudgetSink {
+    head: Vec<ColorImage>,
+    delays: Vec<Duration>,
+    spent: usize,
+    width: usize,
+    height: usize,
+    spill: Option<SpillWriter>,
+    warned: bool,
+}
+
+impl BudgetSink {
+    fn new() -> Self {
+        Self {
+            head: Vec::new(),
+            delays: Vec::new(),
+            spent: 0,
+            width: 0,
+            height: 0,
+            spill: None,
+            warned: false,
+        }
+    }
+
+    fn push(&mut self, image: ColorImage, delay: Duration) {
+        if self.delays.len() >= MAX_SOURCE_FRAMES {
+            if !self.warned {
+                self.warned = true;
+                log::warn!("animation capped at {MAX_SOURCE_FRAMES} frames");
+            }
+            return;
+        }
+        if self.head.is_empty() {
+            self.width = image.size[0];
+            self.height = image.size[1];
+        }
+        let cost = image.size[0] * image.size[1] * 4;
+        if self.spill.is_none() && !self.head.is_empty() && self.spent + cost > MAX_ANIM_BYTES {
+            self.spill = open_spill();
+        }
+        match self.spill.as_mut() {
+            Some(spill) => {
+                if spill.file.write_all(image.as_raw()).is_err() {
+                    // A broken spool must not eat the frame: fall back to RAM.
+                    let path = spill.path.clone();
+                    self.spill = None;
+                    let _ = std::fs::remove_file(path);
+                    self.spent += cost;
+                    self.head.push(image);
+                }
+            }
+            None => {
+                self.spent += cost;
+                self.head.push(image);
+            }
+        }
+        self.delays.push(delay);
+    }
+
+    fn finish(self) -> Option<AnimSource> {
+        if self.delays.is_empty() {
+            if let Some(spill) = self.spill {
+                drop(spill.file);
+                let _ = std::fs::remove_file(spill.path);
+            }
+            return None;
+        }
+        let mut total = Duration::ZERO;
+        let mut starts = Vec::with_capacity(self.delays.len());
+        for delay in &self.delays {
+            starts.push(total);
+            total += *delay;
+        }
+        let storage = match self.spill {
+            Some(mut spill) => {
+                // Flush before the player starts seeking through it.
+                let _ = spill.file.flush();
+                drop(spill.file);
+                Storage::Spool {
+                    head: self.head,
+                    file: spill.path,
+                }
+            }
+            None => Storage::Ram(self.head),
+        };
+        Some(AnimSource {
+            starts,
+            total: total.max(Duration::from_millis(50)),
+            width: self.width,
+            height: self.height,
+            storage,
+        })
+    }
+}
+
+/// What a window tick should drop from the front and load next. Pure plan,
+/// executed by the player below; tested without a graphics context.
+struct WindowPlan {
+    /// Resident entries to drop from the front.
+    drop: usize,
+    /// Frame indices to materialize, in order.
+    load: Vec<usize>,
+}
+
+fn window_plan(
+    starts: &[Duration],
+    total: Duration,
+    resident: &[usize],
+    position: Duration,
+) -> WindowPlan {
+    let count = starts.len();
+    let frame_end = |index: usize| starts.get(index + 1).copied().unwrap_or(total);
+    let mut drop = 0;
+    while drop + 1 < resident.len() {
+        if frame_end(resident[drop]) + WINDOW_KEEP < position {
+            drop += 1;
+        } else {
+            break;
+        }
+    }
+    let mut load = Vec::new();
+    let mut next = resident
+        .last()
+        .copied()
+        .map(|last| last + 1)
+        .unwrap_or_else(|| frame_at(starts, position));
+    while load.len() < UPLOAD_PER_TICK && next < count && starts[next] <= position + PREFETCH {
+        if !resident.contains(&next) {
+            load.push(next);
+        }
+        next += 1;
+    }
+    WindowPlan { drop, load }
+}
+
+/// Least-recently-seen victim outside the protected set. Visible animations
+/// are spared while anything else can go; only when everything left is on
+/// screen does the stalest visible one yield. The current path is never it.
+fn pick_victim(
+    candidates: &[(PathBuf, Instant)],
+    current: &Path,
+    is_visible: &dyn Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let mut best: Option<(&PathBuf, Instant)> = None;
+    let mut fallback: Option<(&PathBuf, Instant)> = None;
+    for (path, touched) in candidates {
+        if path.as_path() == current {
+            continue;
+        }
+        let slot = if is_visible(path) {
+            &mut fallback
+        } else {
+            &mut best
+        };
+        if slot.is_none_or(|(_, at)| *touched < at) {
+            *slot = Some((path, *touched));
+        }
+    }
+    best.or(fallback).map(|(path, _)| path.clone())
+}
+
+impl AnimSource {
+    /// How long one frame shows: the next start, or the loop end.
+    #[cfg(test)]
+    fn delay(&self, index: usize) -> Duration {
+        self.starts
+            .get(index + 1)
+            .copied()
+            .unwrap_or(self.total)
+            .saturating_sub(self.starts.get(index).copied().unwrap_or(Duration::ZERO))
+    }
+}
+
+/// Spool file behind an entry, if it pages frames from disk.
+fn spool_of(entry: &Entry) -> Option<PathBuf> {
+    match entry {
+        Entry::Ready(playing) => match &playing.source.storage {
+            Storage::Spool { file, .. } => Some(file.clone()),
+            Storage::Ram(_) => None,
+        },
+        Entry::Decoding(_) | Entry::Failed(_) => None,
+    }
+}
+
+/// Deletes the spool file behind a retired entry, if any.
+fn forget_spool(entry: &Entry) {
+    if let Some(file) = spool_of(entry) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+fn visible_id() -> egui::Id {
+    egui::Id::new("anim-visible")
+}
+
+/// Records an on-screen animation; victims spare recently seen ones.
+fn note_visible(ctx: &egui::Context, path: &Path, now: Instant) {
+    ctx.data_mut(|data| {
+        let seen = data.get_temp_mut_or_default::<HashMap<PathBuf, Instant>>(visible_id());
+        seen.insert(path.to_path_buf(), now);
+        seen.retain(|_, at| now.duration_since(*at) < Duration::from_secs(5));
+    });
+}
+
+fn visible_recently(ctx: &egui::Context, path: &Path) -> bool {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<HashMap<PathBuf, Instant>>(visible_id())
+            .get(path)
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(2))
+    })
+}
+
+/// Pages the texture window forward: drops what fell behind, materializes a
+/// few frames ahead. A loop wrap rebases the window instead of mixing cycles.
+fn maintain_window(ctx: &egui::Context, path: &Path, playing: &mut Playing, position: Duration) {
+    if position < playing.last_position {
+        playing.window.clear();
+    }
+    playing.last_position = position;
+    let resident: Vec<usize> = playing.window.iter().map(|(index, _)| *index).collect();
+    let plan = window_plan(
+        &playing.source.starts,
+        playing.source.total,
+        &resident,
+        position,
+    );
+    for _ in 0..plan.drop {
+        playing.window.pop_front();
+    }
+    for index in plan.load {
+        let Some(image) = load_frame(&playing.source, index) else {
+            break;
+        };
+        let name = format!("{}#{index}", path.display());
+        playing
+            .window
+            .push_back((index, ctx.load_texture(name, image, TextureOptions::LINEAR)));
+    }
+}
+
+/// The resident texture showing at a playhead position, with how long it stays.
+fn window_frame(playing: &Playing, position: Duration) -> Option<(TextureHandle, Duration)> {
+    let mut chosen: Option<(usize, TextureHandle)> = None;
+    for (index, texture) in &playing.window {
+        if playing.source.starts[*index] <= position {
+            chosen = Some((*index, texture.clone()));
+        } else {
+            break;
+        }
+    }
+    let (index, texture) = chosen?;
+    let end = playing
+        .source
+        .starts
+        .get(index + 1)
+        .copied()
+        .unwrap_or(playing.source.total);
+    Some((texture, end.saturating_sub(position)))
 }
 
 #[derive(Clone, Default)]
@@ -177,109 +530,76 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
     let mut entries = cache.0.lock().unwrap_or_else(|p| p.into_inner());
     for (arrived_path, decoded) in arrived {
         let entry = match decoded {
-            Some(decoded) if !decoded.frames.is_empty() => {
-                let mut total = Duration::ZERO;
-                let mut queue = VecDeque::with_capacity(decoded.frames.len());
-                for (image, delay) in decoded.frames {
-                    total += delay;
-                    queue.push_back((image, delay));
-                }
-                Entry::Uploading(UploadState {
-                    queue,
-                    done: Vec::new(),
-                    next_index: 0,
-                    total: total.max(Duration::from_millis(50)),
-                    touched: Instant::now(),
-                })
-            }
+            Some(decoded) if decoded.source.frame_count() > 0 => Entry::Ready(Playing {
+                source: decoded.source,
+                window: VecDeque::new(),
+                last_position: Duration::ZERO,
+                started: Instant::now(),
+                last_drawn: Instant::now(),
+            }),
             _ => Entry::Failed(Instant::now()),
         };
-        entries.insert(arrived_path, entry);
+        // Replacing an entry must not leak its spool file.
+        if let Some(old) = entries.insert(arrived_path, entry) {
+            forget_spool(&old);
+        }
     }
     // Remove idle and least-recently-used animations.
     let now = Instant::now();
+    note_visible(ctx, path, now);
+    // Snapshot spool files first: pruning drops the entries that own them.
+    let spools: Vec<(PathBuf, PathBuf)> = entries
+        .iter()
+        .filter_map(|(entry_path, entry)| Some((entry_path.clone(), spool_of(entry)?)))
+        .collect();
     entries.retain(|_, entry| match entry {
         Entry::Ready(playing) => now.duration_since(playing.last_drawn) < IDLE,
-        Entry::Uploading(upload) => now.duration_since(upload.touched) < IDLE,
         Entry::Failed(at) | Entry::Decoding(at) => now.duration_since(*at) < RETRY_AFTER,
     });
+    // What pruning took off the map takes its spool file with it.
+    for (entry_path, spool) in spools {
+        if !entries.contains_key(&entry_path) {
+            let _ = std::fs::remove_file(spool);
+        }
+    }
     let mut resident: usize = entries.values().map(entry_bytes).sum();
     while resident > MAX_RESIDENT_BYTES {
-        let victim = entries
+        let candidates: Vec<(PathBuf, Instant)> = entries
             .iter()
-            .filter_map(|(entry_path, entry)| {
-                if entry_path.as_path() == path {
-                    return None;
-                }
-                Some((
-                    entry_path.clone(),
-                    entry_touched(entry)?,
-                    entry_bytes(entry),
-                ))
-            })
-            .min_by_key(|(_, touched, _)| *touched);
-        let Some((victim, _, freed)) = victim else {
+            .filter_map(|(entry_path, entry)| Some((entry_path.clone(), entry_touched(entry)?)))
+            .collect();
+        let Some(victim) = pick_victim(&candidates, path, &|candidate| {
+            visible_recently(ctx, candidate)
+        }) else {
             break;
         };
-        entries.remove(&victim);
+        let freed = entries.get(&victim).map(entry_bytes).unwrap_or(0);
+        if let Some(entry) = entries.remove(&victim) {
+            forget_spool(&entry);
+        }
         resident = resident.saturating_sub(freed);
-    }
-    // Uploads land a few textures per tick, so a long animation spreads its
-    // first paint over several frames instead of stalling the scroll once.
-    if let Some(Entry::Uploading(upload)) = entries.get_mut(path) {
-        let mut spent = 0;
-        while spent < UPLOAD_PER_TICK {
-            let Some((image, delay)) = upload.queue.pop_front() else {
-                break;
-            };
-            let name = format!("{}#{}", path.display(), upload.next_index);
-            upload.next_index += 1;
-            upload
-                .done
-                .push((ctx.load_texture(name, image, TextureOptions::LINEAR), delay));
-            spent += 1;
-        }
-        upload.touched = Instant::now();
-        if upload.queue.is_empty() {
-            let upload = match entries.remove(path) {
-                Some(Entry::Uploading(upload)) => upload,
-                _ => unreachable!("an upload just finished"),
-            };
-            entries.insert(
-                path.to_path_buf(),
-                Entry::Ready(Playing {
-                    frames: upload.done,
-                    total: upload.total,
-                    started: Instant::now(),
-                    last_drawn: Instant::now(),
-                }),
-            );
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(16));
-        }
     }
     match entries.get_mut(path) {
         Some(Entry::Ready(playing)) => {
             playing.last_drawn = now;
             let elapsed = now.duration_since(playing.started);
-            let mut position =
-                Duration::from_nanos((elapsed.as_nanos() % playing.total.as_nanos()) as u64);
-            let mut chosen = 0;
-            let mut until_next = Duration::from_millis(40);
-            for (index, (_, delay)) in playing.frames.iter().enumerate() {
-                if position < *delay {
-                    chosen = index;
-                    until_next = *delay - position;
-                    break;
+            let total = playing.source.total;
+            let position = Duration::from_nanos((elapsed.as_nanos() % total.as_nanos()) as u64);
+            maintain_window(ctx, path, playing, position);
+            match window_frame(playing, position) {
+                Some((texture, until_next)) => {
+                    if playing.source.frame_count() > 1 {
+                        ctx.request_repaint_after(until_next.max(Duration::from_millis(10)));
+                    }
+                    Frame::Ready(texture)
                 }
-                position -= *delay;
+                None => {
+                    // The first paint is still materializing.
+                    ctx.request_repaint_after(Duration::from_millis(16));
+                    Frame::Pending
+                }
             }
-            if playing.frames.len() > 1 {
-                ctx.request_repaint_after(until_next.max(Duration::from_millis(10)));
-            }
-            Frame::Ready(playing.frames[chosen].0.clone())
         }
-        Some(Entry::Uploading(_)) => Frame::Pending,
         Some(Entry::Decoding(_)) => Frame::Pending,
         Some(Entry::Failed(_)) => Frame::Unavailable,
         None => {
@@ -370,22 +690,15 @@ fn decode_image(path: &Path, extension: &str) -> Option<Decoded> {
     let frames = image::codecs::gif::GifDecoder::new(reader)
         .ok()?
         .into_frames();
-    let mut decoded = Vec::new();
-    let mut spent = 0usize;
+    let mut sink = BudgetSink::new();
     for frame in frames {
         let frame = frame.ok()?;
         let (numerator, denominator) = frame.delay().numer_denom_ms();
         let delay = Duration::from_millis(u64::from(numerator / denominator.max(1)).max(20));
         let image = frame.into_buffer();
-        // The budget prices display pixels: a 512-wide sticker shows at 320.
-        let shown = to_color_image(&image);
-        spent += shown.size[0] * shown.size[1] * 4;
-        decoded.push((shown, delay));
-        if spent >= MAX_ANIM_BYTES {
-            break;
-        }
+        sink.push(to_color_image(&image), delay);
     }
-    Some(Decoded { frames: decoded })
+    sink.finish().map(|source| Decoded { source })
 }
 
 /// Decodes animated WebP with libwebp. It returns complete canvas frames,
@@ -394,23 +707,18 @@ fn decode_webp(path: &Path) -> Option<Decoded> {
     let bytes = std::fs::read(path).ok()?;
     let decoder = webp_animation::Decoder::new(&bytes).ok()?;
     let (width, height) = decoder.dimensions();
-    let mut decoded = Vec::new();
     let mut previous = 0i64;
-    let mut spent = 0usize;
+    let mut sink = BudgetSink::new();
     for frame in decoder.into_iter() {
         let image = image::RgbaImage::from_raw(width, height, frame.data().to_vec())?;
         let delay = (i64::from(frame.timestamp()) - previous).max(20) as u64;
         previous = i64::from(frame.timestamp());
-        // The budget prices display pixels, not the encoded canvas.
-        let shown = to_color_image(&image);
-        spent += shown.size[0] * shown.size[1] * 4;
-        decoded.push((shown, Duration::from_millis(delay)));
-        if spent >= MAX_ANIM_BYTES {
-            break;
-        }
+        sink.push(to_color_image(&image), Duration::from_millis(delay));
     }
     // Single-frame files use the static-image path.
-    (decoded.len() > 1).then_some(Decoded { frames: decoded })
+    sink.finish()
+        .filter(|source| source.frame_count() > 1)
+        .map(|source| Decoded { source })
 }
 
 fn to_color_image(image: &image::RgbaImage) -> ColorImage {
@@ -456,9 +764,8 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
         )
     };
     let mut decoder = openh264::decoder::Decoder::new().ok()?;
-    let mut frames: Vec<(ColorImage, Duration)> = Vec::new();
-    let mut spent = 0usize;
     let mut delays: std::collections::VecDeque<Duration> = std::collections::VecDeque::new();
+    let mut sink = BudgetSink::new();
     // Send parameter sets and samples to the decoder in Annex B format.
     let mut parameters = Vec::new();
     push_annex_b(&mut parameters, &sps);
@@ -475,28 +782,20 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
         avcc_to_annex_b(&mut annex_b, &sample.bytes);
         if let Ok(Some(yuv)) = decoder.decode(&annex_b) {
             let delay = delays.pop_front().unwrap_or(delay);
-            if let Some(frame) = frame_of(&yuv, delay) {
-                spent += frame.0.size[0] * frame.0.size[1] * 4;
-                frames.push(frame);
-                if spent >= MAX_ANIM_BYTES {
-                    break;
-                }
+            if let Some((image, delay)) = frame_of(&yuv, delay) {
+                sink.push(image, delay);
             }
         }
     }
     if let Ok(rest) = decoder.flush_remaining() {
         for yuv in &rest {
-            if spent >= MAX_ANIM_BYTES {
-                break;
-            }
             let delay = delays.pop_front().unwrap_or(Duration::from_millis(66));
-            if let Some(frame) = frame_of(yuv, delay) {
-                spent += frame.0.size[0] * frame.0.size[1] * 4;
-                frames.push(frame);
+            if let Some((image, delay)) = frame_of(yuv, delay) {
+                sink.push(image, delay);
             }
         }
     }
-    (!frames.is_empty()).then_some(Decoded { frames })
+    sink.finish().map(|source| Decoded { source })
 }
 
 /// Converts and scales one decoded frame.
@@ -597,27 +896,21 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let frame_len = (out_width * out_height * 4) as usize;
-    let mut frames = Vec::new();
     let delay = Duration::from_millis(1000 / u64::from(fps));
-    let mut buffer = vec![0u8; frame_len];
-    let mut spent = 0usize;
+    let mut buffer = vec![0u8; (out_width * out_height * 4) as usize];
+    let mut sink = BudgetSink::new();
     loop {
         if stdout.read_exact(&mut buffer).is_err() {
             break;
         }
-        frames.push((
+        sink.push(
             ColorImage::from_rgba_unmultiplied([out_width as usize, out_height as usize], &buffer),
             delay,
-        ));
-        spent += frame_len;
-        if spent >= MAX_ANIM_BYTES {
-            break;
-        }
+        );
     }
     let _ = child.kill();
     let _ = child.wait();
-    (!frames.is_empty()).then_some(Decoded { frames })
+    sink.finish().map(|source| Decoded { source })
 }
 
 #[cfg(test)]
@@ -731,8 +1024,8 @@ mod tests {
         let path = dir.join("moving.webp");
         std::fs::write(&path, &webp).expect("writes");
         let decoded = decode(&path).expect("decodes");
-        assert_eq!(decoded.frames.len(), 2);
-        let second = &decoded.frames[1].0;
+        assert_eq!(decoded.source.frame_count(), 2);
+        let second = decoded.image(1).expect("second frame");
         let old = second.pixels[8 * second.width() + 8];
         assert_eq!(old.a(), 0, "the first frame's square is gone: {old:?}");
         let new = second.pixels[48 * second.width() + 48];
@@ -763,8 +1056,8 @@ mod tests {
             }
         }
         let decoded = decode(&path).expect("decodes");
-        assert_eq!(decoded.frames.len(), 2);
-        assert_eq!(decoded.frames[0].1, Duration::from_millis(100));
+        assert_eq!(decoded.source.frame_count(), 2);
+        assert_eq!(decoded.source.delay(0), Duration::from_millis(100));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -793,7 +1086,7 @@ mod tests {
             }
         }
         let decoded = decode(&path).expect("decodes");
-        assert_eq!(decoded.frames.len(), 200);
+        assert_eq!(decoded.source.frame_count(), 200);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -815,22 +1108,254 @@ mod tests {
         let path = dir.join("long.webp");
         std::fs::write(&path, &webp).expect("writes");
         let decoded = decode(&path).expect("decodes");
-        assert_eq!(decoded.frames.len(), 160);
+        assert_eq!(decoded.source.frame_count(), 160);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sticker_sized_webp_keeps_its_tail() {
+        // The audit's case: 200 frames at 512 wide must all survive, with
+        // the last frame and the total duration intact.
+        use webp_animation::prelude::*;
+        let side = 512u32;
+        let mut encoder = Encoder::new((side, side)).expect("encoder");
+        for index in 0..200i32 {
+            let shade = (index % 251) as u8;
+            // Opaque pixels: the shade goes in RGB, never in alpha.
+            let mut frame = vec![255u8; (side * side * 4) as usize];
+            for pixel in frame.as_chunks_mut::<4>().0 {
+                pixel[0] = shade;
+                pixel[1] = shade;
+                pixel[2] = shade;
+            }
+            encoder.add_frame(&frame, index * 50).expect("frame");
+        }
+        let webp = encoder.finalize(200 * 50).expect("finalizes");
+        let dir = std::env::temp_dir().join(format!("zapfast-512-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("long.webp");
+        std::fs::write(&path, &webp).expect("writes");
+        let decoded = decode(&path).expect("decodes");
+        assert_eq!(decoded.source.frame_count(), 200);
+        // Display caps at 320 wide; the tail shade survives within lossy drift.
+        let last = decoded.image(199).expect("last frame");
+        assert_eq!(last.size, [320, 320]);
+        for pixel in &last.pixels {
+            for channel in [pixel.r(), pixel.g(), pixel.b()] {
+                assert!(
+                    (channel as i16 - 199).abs() <= 12,
+                    "tail shade drifts: {pixel:?}"
+                );
+            }
+        }
+        assert!(decoded.source.total >= Duration::from_millis(9_900));
+        if let Storage::Spool { file, .. } = &decoded.source.storage {
+            let _ = std::fs::remove_file(file);
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tall_animation_pages_its_tail_from_disk() {
+        // Verticals grow past 320 tall (only the width is capped): 200
+        // frames at 160 by 400 exceed RAM and must page from the spool.
+        let dir = std::env::temp_dir().join(format!("zapfast-tall-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("tall.gif");
+        {
+            let file = std::fs::File::create(&path).expect("file");
+            let mut encoder = image::codecs::gif::GifEncoder::new(file);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .expect("repeat");
+            for shade in 0..200u8 {
+                let frame = image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(160, 400, image::Rgba([shade, 10, 200, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("frame");
+            }
+        }
+        let decoded = decode(&path).expect("decodes");
+        assert_eq!(decoded.source.frame_count(), 200);
+        let Storage::Spool { file, .. } = &decoded.source.storage else {
+            panic!("a 50 MB animation belongs on disk, not in RAM");
+        };
+        assert!(file.is_file(), "the spool file backs the tail");
+        // The tail reads back with its shade: frame 199 wears 199.
+        let last = decoded.image(199).expect("last frame");
+        assert_eq!(last.size, [160, 400]);
+        assert!(
+            last.pixels
+                .iter()
+                .all(|pixel| *pixel == egui::Color32::from_rgb(199, 10, 200))
+        );
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_window_prefetches_and_sheds_without_gaps() {
+        // Ten frames, 100 ms apart.
+        let starts: Vec<Duration> = (0..10).map(|i| Duration::from_millis(i * 100)).collect();
+        let total = Duration::from_millis(1000);
+        // An empty window loads forward from the playhead, bounded by prefetch.
+        let plan = window_plan(&starts, total, &[], Duration::from_millis(250));
+        assert_eq!(plan.drop, 0);
+        assert_eq!(plan.load, vec![2, 3, 4, 5, 6, 7]);
+        // A longer run sheds what fell behind and extends ahead, twelve
+        // textures per tick at most.
+        let long: Vec<Duration> = (0..100).map(|i| Duration::from_millis(i * 100)).collect();
+        let long_total = Duration::from_millis(10_000);
+        let resident: Vec<usize> = (0..10).collect();
+        let plan = window_plan(&long, long_total, &resident, Duration::from_millis(3000));
+        assert_eq!(plan.drop, 9, "only the current picture is sacred");
+        assert_eq!(plan.load.len(), UPLOAD_PER_TICK);
+        assert_eq!(plan.load[0], 10);
+    }
+
+    #[test]
+    fn victims_spare_visible_animations() {
+        let now = Instant::now();
+        let old = |secs: u64| now - Duration::from_secs(secs);
+        let a = PathBuf::from("a");
+        let b = PathBuf::from("b");
+        let c = PathBuf::from("c");
+        let candidates = vec![
+            (a.clone(), old(30)),
+            (b.clone(), old(20)),
+            (c.clone(), old(10)),
+        ];
+        // Nothing visible: the stalest non-current goes.
+        assert_eq!(
+            pick_victim(&candidates, &PathBuf::from("z"), &|_| false),
+            Some(a.clone())
+        );
+        // The current path is never it.
+        assert_eq!(pick_victim(&candidates, &a, &|_| false), Some(b.clone()));
+        // Visible ones are spared while anything else can go.
+        let some_visible = |p: &Path| p == b.as_path() || p == c.as_path();
+        assert_eq!(
+            pick_victim(&candidates, &PathBuf::from("z"), &some_visible),
+            Some(a.clone())
+        );
+        // Everything visible: the stalest visible yields to hold the budget.
+        assert_eq!(
+            pick_victim(&candidates, &PathBuf::from("z"), &|_| true),
+            Some(a.clone())
+        );
+    }
+
+    #[test]
+    fn two_big_visible_animations_do_not_thrash() {
+        // Two 200-frame animations page from disk; both stay Ready across
+        // ticks while visible, with small texture windows and no
+        // decode-evict-decode cycle.
+        let ctx = egui::Context::default();
+        let paths = ["thrash-a.gif", "thrash-b.gif"];
+        let mut spool_files = Vec::new();
+        {
+            let cache = super::cache(&ctx);
+            let mut entries = cache.0.lock().unwrap();
+            for name in paths {
+                let mut sink = BudgetSink::new();
+                for index in 0..200 {
+                    let shade = (index % 251) as u8;
+                    let image = ColorImage::new(
+                        [320, 320],
+                        vec![egui::Color32::from_rgb(shade, shade, shade); 320 * 320],
+                    );
+                    sink.push(image, Duration::from_millis(50));
+                }
+                let source = sink.finish().expect("source");
+                assert!(
+                    matches!(source.storage, Storage::Spool { .. }),
+                    "big enough to spill"
+                );
+                if let Storage::Spool { file, .. } = &source.storage {
+                    spool_files.push(file.clone());
+                }
+                entries.insert(
+                    PathBuf::from(name),
+                    Entry::Ready(Playing {
+                        source,
+                        window: VecDeque::new(),
+                        last_position: Duration::ZERO,
+                        started: Instant::now(),
+                        last_drawn: Instant::now(),
+                    }),
+                );
+            }
+        }
+        // Alternate ticks on both, the way a chat with two stickers paints.
+        for round in 0..6 {
+            for name in paths {
+                let at = round as f64 * 2.0 + if name == paths[0] { 0.0 } else { 0.05 };
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(at),
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(100.0, 100.0),
+                        );
+                        let _ = super::frame(ui, Path::new(name), rect);
+                    },
+                );
+                output.textures_delta.clear();
+            }
+        }
+        let cache = super::cache(&ctx);
+        let entries = cache.0.lock().unwrap();
+        for name in paths {
+            match entries.get(Path::new(name)) {
+                Some(Entry::Ready(playing)) => {
+                    assert!(
+                        playing.window.len() <= 2 * UPLOAD_PER_TICK,
+                        "window stays small"
+                    );
+                }
+                None => panic!("{name} must stay Ready, got missing"),
+                Some(_) => panic!("{name} must stay Ready, got not ready"),
+            }
+        }
+        assert!(
+            !entries
+                .values()
+                .any(|entry| matches!(entry, Entry::Decoding(_))),
+            "no re-decode cycle"
+        );
+        drop(entries);
+        for file in spool_files {
+            let _ = std::fs::remove_file(file);
+        }
     }
 
     #[test]
     fn the_resident_budget_counts_display_bytes() {
         let image = ColorImage::new([10, 20], vec![egui::Color32::BLACK; 200]);
         assert_eq!(image_bytes(&image), 800);
-        let mut queue = VecDeque::new();
-        queue.push_back((image, Duration::from_millis(50)));
-        let entry = Entry::Uploading(UploadState {
-            queue,
-            done: Vec::new(),
-            next_index: 0,
+        let source = AnimSource {
+            starts: vec![Duration::ZERO],
             total: Duration::from_millis(50),
-            touched: Instant::now(),
+            width: 10,
+            height: 20,
+            storage: Storage::Ram(vec![image]),
+        };
+        let entry = Entry::Ready(Playing {
+            source,
+            window: VecDeque::new(),
+            last_position: Duration::ZERO,
+            started: Instant::now(),
+            last_drawn: Instant::now(),
         });
         assert_eq!(entry_bytes(&entry), 800);
         assert!(entry_touched(&entry).is_some());
@@ -864,9 +1389,9 @@ mod tests {
         }
         let decoded = decode(&path).expect("decodes");
         // Five frames at 10 fps. The in-process path preserves their timing.
-        assert_eq!(decoded.frames.len(), 5);
-        assert_eq!(decoded.frames[0].1, Duration::from_millis(100));
-        assert_eq!(decoded.frames[0].0.size, [64, 48]);
+        assert_eq!(decoded.source.frame_count(), 5);
+        assert_eq!(decoded.source.delay(0), Duration::from_millis(100));
+        assert_eq!(decoded.image(0).expect("first frame").size, [64, 48]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -899,11 +1424,11 @@ mod probe {
         let decoded = decode_mp4(Path::new(&path)).expect("decodes in-process");
         eprintln!(
             "{} frames of {:?}, first delay {:?}, in {:?}",
-            decoded.frames.len(),
-            decoded.frames[0].0.size,
-            decoded.frames[0].1,
+            decoded.source.frame_count(),
+            decoded.image(0).map(|image| image.size),
+            decoded.source.delay(0),
             started.elapsed()
         );
-        assert!(!decoded.frames.is_empty());
+        assert!(decoded.source.frame_count() > 0);
     }
 }

@@ -391,6 +391,10 @@ struct Active {
     seeking: bool,
     frames: Receiver<Frame>,
     buffered: VecDeque<Frame>,
+    /// One arrival that did not fit, kept for the next tick. The channel
+    /// cannot take it back, so without this slot a full buffer would drop
+    /// one frame per tick.
+    held: Option<Frame>,
     shown: Duration,
     /// One texture for the whole clip, updated in place. Allocating a fresh
     /// texture per frame churned GPU memory for nothing, and the handle has
@@ -510,6 +514,8 @@ impl Player {
             let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
             active.frames = rx;
             active.buffered.clear();
+            // Frames from the retired generation never come back.
+            active.held = None;
             // The clip keeps its texture; a sentinel timestamp forces the
             // next decoded frame to upload over the still on screen.
             active.shown = Duration::MAX;
@@ -620,6 +626,7 @@ impl Player {
             // Nothing has shown yet; a first frame stamped at zero must still
             // upload instead of looking already painted.
             shown: Duration::MAX,
+            held: None,
             texture: None,
             generation,
             decode_done: false,
@@ -698,26 +705,16 @@ impl Player {
                 }
             }
         }
-        loop {
+        // The held arrival goes first: it never went back to the channel.
+        if let Some(frame) = active.held.take() {
+            active.place_frame(frame);
+        }
+        // Drain only while nothing is held: whatever does not fit stays
+        // queued in the channel, and the decoder waits on it. Nothing is
+        // ever taken just to be dropped.
+        while active.held.is_none() {
             match active.frames.try_recv() {
-                Ok(frame) => match buffer_room(
-                    active.buffered.len(),
-                    active.buffered.front().map(|frame| frame.pts),
-                    active.position(),
-                ) {
-                    // Room, or room made by shedding a frame already behind
-                    // playback while the decoder runs ahead.
-                    BufferRoom::Push => active.buffered.push_back(frame),
-                    BufferRoom::EvictThenPush => {
-                        active.buffered.pop_front();
-                        active.buffered.push_back(frame);
-                    }
-                    // Full of future frames: leave the rest queued in the
-                    // channel and let the decoder wait on it instead of
-                    // dropping the future. Late frames are also shed after
-                    // the drain, freeing room over the next ticks.
-                    BufferRoom::Hold => break,
-                },
+                Ok(frame) => active.place_frame(frame),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     active.decode_done = true;
                     break;
@@ -865,6 +862,27 @@ impl Active {
         match &self.audio {
             Some((_, sink)) => audio_position(self.base, sink.get_pos(), self.anchor),
             None => self.base + self.started.elapsed(),
+        }
+    }
+
+    /// Files one arrival into the buffer, or holds it for the next tick
+    /// when only future frames fill the buffer. The channel cannot take a
+    /// frame back, so holding is what keeps a full queue lossless.
+    fn place_frame(&mut self, frame: Frame) {
+        let room = buffer_room(
+            self.buffered.len(),
+            self.buffered.front().map(|frame| frame.pts),
+            self.position(),
+        );
+        match room {
+            BufferRoom::Push => self.buffered.push_back(frame),
+            BufferRoom::EvictThenPush => {
+                self.buffered.pop_front();
+                self.buffered.push_back(frame);
+            }
+            BufferRoom::Hold => {
+                self.held = Some(frame);
+            }
         }
     }
 }
@@ -1159,25 +1177,38 @@ fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
         .stdin(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
+    let mut stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        // No pipe to read: stop the helper instead of leaving it running.
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
     // Streamed, so a long file never sits whole in RAM: past the cap the
     // helper is stopped instead of decoding the tail for nothing.
     let cap = PCM_RATE as usize * PCM_CAP_SECS as usize;
     let mut pcm = Vec::new();
+    // A pipe read can split a four-byte sample anywhere; the tail waits
+    // for the next read instead of being dropped and misaligning the rest.
+    let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 32_768];
     loop {
         if pcm.len() >= cap {
             break;
         }
-        let read = stdout.read(&mut chunk).ok()?;
+        let read = match stdout.read(&mut chunk) {
+            Ok(read) => read,
+            Err(_) => break,
+        };
         if read == 0 {
             break;
         }
-        for bytes in chunk[..read / 4 * 4].as_chunks::<4>().0 {
-            pcm.push(f32::from_le_bytes(*bytes));
-            if pcm.len() >= cap {
-                break;
-            }
+        push_pcm(&mut pcm, &mut pending, &chunk[..read]);
+        if pcm.len() >= cap {
+            pcm.truncate(cap);
+            break;
         }
     }
     let _ = child.kill();
@@ -1186,6 +1217,18 @@ fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
         return None;
     }
     (!pcm.is_empty()).then_some(pcm)
+}
+
+/// Pushes stream bytes into samples, keeping one to three leftover bytes
+/// for the next read. Pipe reads split samples anywhere; dropping the tail
+/// would misalign every sample after it into noise.
+fn push_pcm(pcm: &mut Vec<f32>, pending: &mut Vec<u8>, bytes: &[u8]) {
+    pending.extend_from_slice(bytes);
+    let samples = pending.len() / 4;
+    for chunk in pending[..samples * 4].as_chunks::<4>().0 {
+        pcm.push(f32::from_le_bytes(*chunk));
+    }
+    pending.drain(..samples * 4);
 }
 /// Plays cached samples from a position on a fresh output, if any.
 fn attach_cached(active: &mut Active, volume: f32, muted: bool, from: Duration) {
@@ -1678,6 +1721,109 @@ mod tests {
             buffer_room(BUFFER_FRAMES, Some(Duration::ZERO), Duration::from_secs(5)),
             BufferRoom::EvictThenPush
         ));
+    }
+
+    #[test]
+    fn a_full_queue_loses_no_frame_across_ticks() {
+        // A full buffer of future frames plus a loaded channel: every
+        // numbered frame must survive repeated ticks, none silently dropped.
+        let path = std::path::PathBuf::from("queue.mp4");
+        let (tx, rx) = sync_channel::<Frame>(BUFFER_FRAMES);
+        let frame = |secs: u64| Frame {
+            pts: Duration::from_secs(secs),
+            image: ColorImage::new([2, 2], vec![egui::Color32::BLACK; 4]),
+        };
+        let mut buffered = VecDeque::new();
+        for secs in 10..10 + BUFFER_FRAMES as u64 {
+            buffered.push_back(frame(secs));
+        }
+        for secs in 100..105 {
+            tx.send(frame(secs)).expect("room in the channel");
+        }
+        let mut player = Player {
+            active: Some(Active {
+                path: path.clone(),
+                clip: Clip {
+                    duration: Duration::from_secs(200),
+                    width: 64,
+                    height: 64,
+                    has_audio: false,
+                    ffmpeg: false,
+                },
+                audio: None,
+                pcm: None,
+                audio_rx: None,
+                playing: true,
+                base: Duration::ZERO,
+                anchor: Duration::ZERO,
+                started: Instant::now(),
+                frames: rx,
+                buffered,
+                held: None,
+                shown: Duration::MAX,
+                texture: None,
+                generation: Arc::new(AtomicU64::new(1)),
+                decode_done: false,
+                seeking: false,
+                finished: false,
+            }),
+            ..Player::default()
+        };
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            player.poll(&ctx, &path);
+        }
+        // Reap everything: the buffer, the held slot and the channel.
+        let mut seen: Vec<u64> = player
+            .active
+            .as_ref()
+            .expect("still open")
+            .buffered
+            .iter()
+            .map(|frame| frame.pts.as_secs())
+            .collect();
+        let active = player.active.as_mut().expect("still open");
+        assert!(active.held.is_some(), "the overflow parks in the held slot");
+        if let Some(frame) = active.held.take() {
+            seen.push(frame.pts.as_secs());
+        }
+        while let Ok(frame) = active.frames.try_recv() {
+            seen.push(frame.pts.as_secs());
+        }
+        seen.sort_unstable();
+        let mut expected: Vec<u64> = (10..10 + BUFFER_FRAMES as u64).collect();
+        expected.extend(100..105);
+        expected.sort_unstable();
+        assert_eq!(seen, expected, "every queued frame survives");
+        player.stop();
+    }
+
+    #[test]
+    fn split_pipe_reads_keep_every_sample_aligned() {
+        // One hundred samples as raw bytes, fed whole and in hostile splits:
+        // identical samples out, nothing dropped, nothing misaligned.
+        let samples: Vec<f32> = (0..100).map(|i| i as f32 * 0.25 - 12.0).collect();
+        let mut bytes = Vec::new();
+        for sample in &samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        let whole = {
+            let mut pcm = Vec::new();
+            let mut pending = Vec::new();
+            push_pcm(&mut pcm, &mut pending, &bytes);
+            assert!(pending.is_empty());
+            pcm
+        };
+        assert_eq!(whole, samples);
+        for width in [1usize, 3, 5, 7] {
+            let mut pcm = Vec::new();
+            let mut pending = Vec::new();
+            for chunk in bytes.chunks(width) {
+                push_pcm(&mut pcm, &mut pending, chunk);
+            }
+            assert!(pending.is_empty(), "width {width} leaves no tail");
+            assert_eq!(pcm, samples, "width {width} aligns");
+        }
     }
 
     #[test]

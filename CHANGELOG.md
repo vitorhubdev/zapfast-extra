@@ -2,6 +2,29 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.33] - 2026-09-20
+
+### Fixed
+
+- A full video frame buffer drops nothing anymore. Whatever does not fit
+  stays queued in the channel or parks in a one-frame held slot, and the
+  decoder waits on it, so pausing through a fast decode keeps every frame.
+- Pipe reads that split a four-byte audio sample keep the leftover bytes
+  for the next read instead of misaligning the soundtrack into noise. The
+  ffmpeg helper is also stopped and reaped on every exit path.
+- Long stickers and GIFs play to the end at any length: frames past the
+  RAM budget page from a spool file, and only the textures around the
+  playhead stay uploaded. A 200-frame sticker at full size keeps its tail,
+  its timing and its last frame, vertical animations included.
+- Visible animations are spared from memory eviction while anything else
+  can go, so two big stickers on screen no longer evict each other in a
+  decode loop. The shared budget counts bytes, spooled tails excluded.
+- A broken picture really recovers: once its thirty-second cooldown passes,
+  the cached error is dropped and the file is read again, and the viewer
+  wakes up for the retry.
+- Arrow keys adjust a focused progress or volume slider instead of stepping
+  media; unfocused, they browse as before.
+
 ## [1.0.32] - 2026-09-20
 
 ### Fixed

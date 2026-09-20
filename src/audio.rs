@@ -284,8 +284,7 @@ impl Player {
         {
             let total = loaded.total;
             let old = self.speeds.get(message).copied().unwrap_or(1.0);
-            loaded.base =
-                speed_position(loaded.base, sink.get_pos(), loaded.base_sink, old, total);
+            loaded.base = speed_position(loaded.base, sink.get_pos(), loaded.base_sink, old, total);
             loaded.base_sink = sink.get_pos();
         }
         self.speeds.insert(message.to_owned(), speed);

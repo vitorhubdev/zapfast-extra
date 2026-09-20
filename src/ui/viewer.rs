@@ -1171,4 +1171,73 @@ mod tests {
         failures.insert("x".to_owned(), now - Duration::from_secs(31));
         assert_eq!(cooldown_left(&failures, "x", now), None);
     }
+
+    #[test]
+    fn a_replaced_picture_recovers_without_restart() {
+        // Invalid bytes fail and cool down; a valid file plus an expired
+        // cooldown rereads and paints, without restarting anything.
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("swap.png");
+        std::fs::write(&path, b"not a picture").expect("writes");
+        let ctx = egui::Context::default();
+        // The harness context needs the real file and image loaders.
+        egui_extras::install_image_loaders(&ctx);
+        let area = egui::vec2(200.0, 200.0);
+        let tag = std::cell::Cell::new(9u8);
+        let show = |ctx: &egui::Context| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, area)),
+                    ..Default::default()
+                },
+                |ui| {
+                    let ctx = ui.ctx().clone();
+                    tag.set(match image_surface(ui, &ctx, &path, area) {
+                        Surface::Ready { .. } => 0,
+                        Surface::Pending => 1,
+                        Surface::Failed => 2,
+                    });
+                },
+            );
+            output.textures_delta.clear();
+        };
+        // Pump the loader: invalid bytes settle on Failed, then stay there.
+        for _ in 0..20 {
+            show(&ctx);
+            if tag.get() != 1 {
+                break;
+            }
+        }
+        // Pump the loader with real time: file reads and decodes run on
+        // background threads. Invalid bytes settle on Failed, then stay.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while tag.get() == 1 && Instant::now() < deadline {
+            show(&ctx);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(tag.get(), 2, "invalid bytes fail");
+        show(&ctx);
+        assert_eq!(tag.get(), 2, "cooling down, no hot retry");
+        // Swap in a valid picture and expire the cooldown the way time does.
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([9, 10, 11, 255]))
+            .save(&path)
+            .expect("saves");
+        ctx.data_mut(|data| {
+            let failures = data
+                .get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(
+                    image_failures_id(),
+                );
+            for at in failures.values_mut() {
+                *at = Instant::now() - IMAGE_RETRY_AFTER - Duration::from_secs(1);
+            }
+        });
+        // Re-arm the pump: the tag still says Failed from the cooldown.
+        tag.set(1);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while tag.get() == 1 && Instant::now() < deadline {
+            show(&ctx);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(tag.get(), 0, "the swapped file paints");
+    }
 }
