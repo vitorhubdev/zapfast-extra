@@ -5,6 +5,7 @@
 //! from memory.
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -15,8 +16,13 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 
 /// Maximum frame width uploaded to the GPU.
 const MAX_WIDTH: u32 = 320;
-/// Maximum frames kept per animation.
-const MAX_FRAMES: usize = 150;
+/// Maximum decoded bytes kept per animation (RGBA8). A long sticker plays to
+/// its end instead of looping a truncated head; the byte cap bounds memory
+/// instead of an arbitrary frame count.
+const MAX_ANIM_BYTES: usize = 48 * 1024 * 1024;
+/// Textures uploaded per interface tick. A long animation spreads its first
+/// paint over several frames instead of stalling the scroll once.
+const UPLOAD_PER_TICK: usize = 24;
 /// Time an unseen animation remains decoded.
 const IDLE: Duration = Duration::from_secs(20);
 /// Time a failed or stuck decode is remembered before trying again.
@@ -54,8 +60,23 @@ struct Playing {
 
 enum Entry {
     Decoding(Instant),
+    Uploading(UploadState),
     Failed(Instant),
     Ready(Playing),
+}
+
+/// Decoded frames waiting for their turn on the GPU.
+struct UploadState {
+    queue: VecDeque<(ColorImage, Duration)>,
+    done: Vec<(TextureHandle, Duration)>,
+    next_index: usize,
+    total: Duration,
+    touched: Instant,
+}
+
+/// Decoded bytes of one frame (RGBA8).
+fn frame_bytes(width: u32, height: u32) -> usize {
+    width as usize * height as usize * 4
 }
 
 #[derive(Clone, Default)]
@@ -110,21 +131,17 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
         let entry = match decoded {
             Some(decoded) if !decoded.frames.is_empty() => {
                 let mut total = Duration::ZERO;
-                let frames = decoded
-                    .frames
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (image, delay))| {
-                        total += delay;
-                        let name = format!("{}#{index}", arrived_path.display());
-                        (ctx.load_texture(name, image, TextureOptions::LINEAR), delay)
-                    })
-                    .collect();
-                Entry::Ready(Playing {
-                    frames,
+                let mut queue = VecDeque::with_capacity(decoded.frames.len());
+                for (image, delay) in decoded.frames {
+                    total += delay;
+                    queue.push_back((image, delay));
+                }
+                Entry::Uploading(UploadState {
+                    queue,
+                    done: Vec::new(),
+                    next_index: 0,
                     total: total.max(Duration::from_millis(50)),
-                    started: Instant::now(),
-                    last_drawn: Instant::now(),
+                    touched: Instant::now(),
                 })
             }
             _ => Entry::Failed(Instant::now()),
@@ -135,12 +152,14 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
     let now = Instant::now();
     entries.retain(|_, entry| match entry {
         Entry::Ready(playing) => now.duration_since(playing.last_drawn) < IDLE,
+        Entry::Uploading(upload) => now.duration_since(upload.touched) < IDLE,
         Entry::Failed(at) | Entry::Decoding(at) => now.duration_since(*at) < RETRY_AFTER,
     });
     let mut resident: usize = entries
         .values()
         .map(|entry| match entry {
             Entry::Ready(playing) => playing.frames.len(),
+            Entry::Uploading(upload) => upload.done.len() + upload.queue.len(),
             _ => 0,
         })
         .sum();
@@ -159,6 +178,40 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
         };
         entries.remove(&victim);
         resident -= count;
+    }
+    // Uploads land a few textures per tick, so a long animation spreads its
+    // first paint over several frames instead of stalling the scroll once.
+    if let Some(Entry::Uploading(upload)) = entries.get_mut(path) {
+        let mut spent = 0;
+        while spent < UPLOAD_PER_TICK {
+            let Some((image, delay)) = upload.queue.pop_front() else {
+                break;
+            };
+            let name = format!("{}#{}", path.display(), upload.next_index);
+            upload.next_index += 1;
+            upload
+                .done
+                .push((ctx.load_texture(name, image, TextureOptions::LINEAR), delay));
+            spent += 1;
+        }
+        upload.touched = Instant::now();
+        if upload.queue.is_empty() {
+            let upload = match entries.remove(path) {
+                Some(Entry::Uploading(upload)) => upload,
+                _ => unreachable!("an upload just finished"),
+            };
+            entries.insert(
+                path.to_path_buf(),
+                Entry::Ready(Playing {
+                    frames: upload.done,
+                    total: upload.total,
+                    started: Instant::now(),
+                    last_drawn: Instant::now(),
+                }),
+            );
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
     }
     match entries.get_mut(path) {
         Some(Entry::Ready(playing)) => {
@@ -181,6 +234,7 @@ pub fn frame(ui: &egui::Ui, path: &Path, rect: egui::Rect) -> Frame {
             }
             Frame::Ready(playing.frames[chosen].0.clone())
         }
+        Some(Entry::Uploading(_)) => Frame::Pending,
         Some(Entry::Decoding(_)) => Frame::Pending,
         Some(Entry::Failed(_)) => Frame::Unavailable,
         None => {
@@ -227,13 +281,25 @@ pub fn can_play_video() -> bool {
 fn ffmpeg_present() -> bool {
     static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *KNOWN.get_or_init(|| {
-        Command::new("ffmpeg")
+        let mut check = Command::new("ffmpeg");
+        quiet(&mut check)
             .arg("-version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     })
+}
+
+/// A helper media process that never flashes a console window on Windows.
+fn quiet(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: decoding a sticker must not pop a console.
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 
 fn decode(path: &Path) -> Option<Decoded> {
@@ -260,12 +326,17 @@ fn decode_image(path: &Path, extension: &str) -> Option<Decoded> {
         .ok()?
         .into_frames();
     let mut decoded = Vec::new();
-    for frame in frames.take(MAX_FRAMES) {
+    let mut spent = 0usize;
+    for frame in frames {
         let frame = frame.ok()?;
         let (numerator, denominator) = frame.delay().numer_denom_ms();
         let delay = Duration::from_millis(u64::from(numerator / denominator.max(1)).max(20));
         let image = frame.into_buffer();
+        spent += frame_bytes(image.width(), image.height());
         decoded.push((to_color_image(&image), delay));
+        if spent >= MAX_ANIM_BYTES {
+            break;
+        }
     }
     Some(Decoded { frames: decoded })
 }
@@ -278,11 +349,17 @@ fn decode_webp(path: &Path) -> Option<Decoded> {
     let (width, height) = decoder.dimensions();
     let mut decoded = Vec::new();
     let mut previous = 0i64;
-    for frame in decoder.into_iter().take(MAX_FRAMES) {
+    let cost = frame_bytes(width, height);
+    let mut spent = 0usize;
+    for frame in decoder.into_iter() {
         let image = image::RgbaImage::from_raw(width, height, frame.data().to_vec())?;
         let delay = (i64::from(frame.timestamp()) - previous).max(20) as u64;
         previous = i64::from(frame.timestamp());
         decoded.push((to_color_image(&image), Duration::from_millis(delay)));
+        spent += cost;
+        if spent >= MAX_ANIM_BYTES {
+            break;
+        }
     }
     // Single-frame files use the static-image path.
     (decoded.len() > 1).then_some(Decoded { frames: decoded })
@@ -332,6 +409,7 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
     };
     let mut decoder = openh264::decoder::Decoder::new().ok()?;
     let mut frames: Vec<(ColorImage, Duration)> = Vec::new();
+    let mut spent = 0usize;
     let mut delays: std::collections::VecDeque<Duration> = std::collections::VecDeque::new();
     // Send parameter sets and samples to the decoder in Annex B format.
     let mut parameters = Vec::new();
@@ -339,9 +417,6 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
     push_annex_b(&mut parameters, &pps);
     let _ = decoder.decode(&parameters);
     for sample_id in 1..=count {
-        if frames.len() >= MAX_FRAMES {
-            break;
-        }
         let Ok(Some(sample)) = mp4.read_sample(track_id, sample_id) else {
             break;
         };
@@ -353,17 +428,22 @@ fn decode_mp4(path: &Path) -> Option<Decoded> {
         if let Ok(Some(yuv)) = decoder.decode(&annex_b) {
             let delay = delays.pop_front().unwrap_or(delay);
             if let Some(frame) = frame_of(&yuv, delay) {
+                spent += frame.0.size[0] * frame.0.size[1] * 4;
                 frames.push(frame);
+                if spent >= MAX_ANIM_BYTES {
+                    break;
+                }
             }
         }
     }
     if let Ok(rest) = decoder.flush_remaining() {
         for yuv in &rest {
-            if frames.len() >= MAX_FRAMES {
+            if spent >= MAX_ANIM_BYTES {
                 break;
             }
             let delay = delays.pop_front().unwrap_or(Duration::from_millis(66));
             if let Some(frame) = frame_of(yuv, delay) {
+                spent += frame.0.size[0] * frame.0.size[1] * 4;
                 frames.push(frame);
             }
         }
@@ -423,7 +503,8 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
     if !ffmpeg_present() {
         return None;
     }
-    let probe = Command::new("ffprobe")
+    let mut probe_cmd = Command::new("ffprobe");
+    let probe = quiet(&mut probe_cmd)
         .args([
             "-v",
             "error",
@@ -448,7 +529,8 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
     // Use even dimensions and preserve aspect ratio.
     let out_height = ((height as u64 * out_width as u64 / width as u64) as u32).max(2) & !1;
     let fps = 15u32;
-    let mut child = Command::new("ffmpeg")
+    let mut launch = Command::new("ffmpeg");
+    let mut child = quiet(&mut launch)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args([
@@ -467,11 +549,12 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
         .spawn()
         .ok()?;
     let mut stdout = child.stdout.take()?;
-    let frame_bytes = (out_width * out_height * 4) as usize;
+    let frame_len = (out_width * out_height * 4) as usize;
     let mut frames = Vec::new();
     let delay = Duration::from_millis(1000 / u64::from(fps));
-    let mut buffer = vec![0u8; frame_bytes];
-    while frames.len() < MAX_FRAMES {
+    let mut buffer = vec![0u8; frame_len];
+    let mut spent = 0usize;
+    loop {
         if stdout.read_exact(&mut buffer).is_err() {
             break;
         }
@@ -479,6 +562,10 @@ fn decode_with_ffmpeg(path: &Path) -> Option<Decoded> {
             ColorImage::from_rgba_unmultiplied([out_width as usize, out_height as usize], &buffer),
             delay,
         ));
+        spent += frame_len;
+        if spent >= MAX_ANIM_BYTES {
+            break;
+        }
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -630,6 +717,35 @@ mod tests {
         let decoded = decode(&path).expect("decodes");
         assert_eq!(decoded.frames.len(), 2);
         assert_eq!(decoded.frames[0].1, Duration::from_millis(100));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_long_sticker_plays_to_its_end() {
+        // Two hundred tiny frames: the old frame-count cap would have cut
+        // the tail off and looped a truncated head; the byte budget keeps
+        // the whole animation.
+        let dir = std::env::temp_dir().join(format!("zapfast-long-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("long.gif");
+        {
+            let file = std::fs::File::create(&path).expect("file");
+            let mut encoder = image::codecs::gif::GifEncoder::new(file);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .expect("repeat");
+            for shade in 0..200u8 {
+                let frame = image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(8, 8, image::Rgba([shade, shade, shade, 255])),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(50, 1),
+                );
+                encoder.encode_frame(frame).expect("frame");
+            }
+        }
+        let decoded = decode(&path).expect("decodes");
+        assert_eq!(decoded.frames.len(), 200);
         let _ = std::fs::remove_dir_all(dir);
     }
 

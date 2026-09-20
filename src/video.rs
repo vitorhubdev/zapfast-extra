@@ -27,6 +27,10 @@ const PCM_RATE: u32 = 48_000;
 const PCM_CAP_SECS: u64 = 300;
 /// Frames waiting to be shown. Caps memory while surviving decode hiccups.
 const BUFFER_FRAMES: usize = 60;
+/// Samples reported per span by the cached soundtrack. Rodio rebuilds its
+/// rate converter at span boundaries; an unbounded span would freeze the
+/// converter on the opening rate (see audio playback for the same fix).
+const SPAN_SAMPLES: usize = 4_096;
 /// How long a shown frame is kept behind the buffer for a pause or a seek.
 const KEEP_BEHIND: Duration = Duration::from_secs(1);
 
@@ -200,7 +204,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let output = std::process::Command::new("ffprobe")
+    let mut probe = std::process::Command::new("ffprobe");
+    let output = quiet(&mut probe)
         .args(["-v", "error"])
         .args(args)
         .arg(path)
@@ -243,7 +248,7 @@ impl Iterator for MemSamples {
 }
 impl rodio::Source for MemSamples {
     fn current_span_len(&self) -> Option<usize> {
-        None
+        Some((self.data.len() - self.pos).clamp(1, SPAN_SAMPLES))
     }
     fn channels(&self) -> std::num::NonZero<u16> {
         std::num::NonZero::<u16>::MIN
@@ -275,7 +280,8 @@ fn ffmpeg_poster(path: &Path) -> Option<image::RgbaImage> {
     if !ffmpeg_present() {
         return None;
     }
-    let output = std::process::Command::new("ffmpeg")
+    let mut poster = std::process::Command::new("ffmpeg");
+    let output = quiet(&mut poster)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args([
@@ -376,6 +382,10 @@ struct Active {
     /// Position when playback last (re)started; the sink or the wall clock
     /// counts from there.
     base: Duration,
+    /// Sink position when base was established. The sink keeps its own
+    /// count across a pause, so resuming from base plus position alone would
+    /// count the stretch before the pause twice and jump the picture ahead.
+    anchor: Duration,
     started: Instant,
     /// A jump is still catching up: the keyframe still shows until live frames arrive.
     seeking: bool,
@@ -440,6 +450,7 @@ impl Player {
             if active.playing {
                 active.base = active.position();
                 if let Some((_, sink)) = &active.audio {
+                    active.anchor = sink.get_pos();
                     sink.pause();
                 }
                 active.playing = false;
@@ -506,7 +517,18 @@ impl Player {
             attach_cached(active, volume, muted, target);
             return Ok(());
         }
-        self.open(path, target)
+        // A jump on a paused video stays paused; opening always plays.
+        let paused = self.active.as_ref().is_some_and(|active| !active.playing);
+        self.open(path, target)?;
+        if paused && let Some(active) = self.active.as_mut() {
+            active.base = target.min(active.clip.duration);
+            if let Some((_, sink)) = &active.audio {
+                active.anchor = sink.get_pos();
+                sink.pause();
+            }
+            active.playing = false;
+        }
+        Ok(())
     }
 
     /// Opens a file at a position, replacing whatever was playing.
@@ -551,7 +573,6 @@ impl Player {
                 (None, at)
             }
             Audio::Silent => (None, at),
-            Audio::Restart => (audio_at(path, Duration::ZERO).ok(), Duration::ZERO),
         };
         // A jump opens on its keyframe still and resumes at the target once
         // live frames arrive; opening at zero plays straight away.
@@ -580,10 +601,13 @@ impl Player {
             audio_rx,
             playing: true,
             base: at,
+            anchor: Duration::ZERO,
             started: Instant::now(),
             frames: rx,
             buffered: VecDeque::new(),
-            shown: Duration::ZERO,
+            // Nothing has shown yet; a first frame stamped at zero must still
+            // upload instead of looking already painted.
+            shown: Duration::MAX,
             texture: None,
             generation,
             decode_done: false,
@@ -635,6 +659,11 @@ impl Player {
     /// Pumps decoded frames and answers what the viewer should paint.
     pub fn poll(&mut self, ctx: &egui::Context, path: &Path) -> State {
         let Some(active) = self.active.as_mut() else {
+            // A refused file runs no decoder: say why instead of spinning on
+            // a player that will never arrive.
+            if let Some(why) = self.refusal(path) {
+                return State::Unsupported(why);
+            }
             return State::Loading;
         };
         if active.path != path {
@@ -661,7 +690,23 @@ impl Player {
             match active.frames.try_recv() {
                 Ok(frame) => {
                     if active.buffered.len() >= BUFFER_FRAMES {
-                        active.buffered.pop_front();
+                        // The decoder runs ahead of the picture. Shed frames
+                        // already behind playback first; when the buffer is
+                        // full of future frames the newcomer waits its turn
+                        // instead of jumping the picture forward.
+                        let position = active.position();
+                        while active.buffered.len() >= BUFFER_FRAMES
+                            && active.buffered.len() > 1
+                            && active
+                                .buffered
+                                .front()
+                                .is_some_and(|first| first.pts + KEEP_BEHIND < position)
+                        {
+                            active.buffered.pop_front();
+                        }
+                        if active.buffered.len() >= BUFFER_FRAMES {
+                            continue;
+                        }
                     }
                     active.buffered.push_back(frame);
                 }
@@ -686,8 +731,21 @@ impl Player {
             active.finished = true;
             active.base = total;
             if let Some((_, sink)) = &active.audio {
+                active.anchor = sink.get_pos();
                 sink.pause();
             }
+        }
+        if active.audio.as_ref().is_some_and(|(_, sink)| sink.empty())
+            && position < total
+            && !active.finished
+        {
+            // The soundtrack ended before the picture (a short track, a
+            // capped extraction): the wall clock drives on instead of
+            // freezing the picture on the silent sink.
+            active.base = position;
+            active.anchor = Duration::ZERO;
+            active.started = Instant::now();
+            active.audio = None;
         }
         if active.seeking {
             // A jump shows its keyframe still, never a scan.
@@ -721,13 +779,11 @@ impl Player {
                 }
             }
         } else {
-            let pts = active
-                .buffered
-                .iter()
-                .rev()
-                .find(|frame| frame.pts <= position)
-                .or(active.buffered.front())
-                .map(|frame| frame.pts);
+            let pts = choose_pts(
+                active.buffered.iter().map(|frame| frame.pts),
+                position,
+                active.shown,
+            );
             match pts {
                 Some(pts) => show_frame(active, ctx, path, pts, position, total),
                 None if active.decode_done => {
@@ -799,10 +855,43 @@ impl Active {
             return self.base;
         }
         match &self.audio {
-            Some((_, sink)) => self.base + sink.get_pos(),
+            Some((_, sink)) => audio_position(self.base, sink.get_pos(), self.anchor),
             None => self.base + self.started.elapsed(),
         }
     }
+}
+
+/// Media position over a live soundtrack. The sink keeps its own count
+/// across a pause, so the anchor taken when the base was established is
+/// subtracted first: without it the stretch before the pause counts twice.
+fn audio_position(base: Duration, sink_pos: Duration, anchor: Duration) -> Duration {
+    base + sink_pos.saturating_sub(anchor)
+}
+
+/// Presentation time to paint: the newest buffered frame due at position.
+/// When none is due yet the current picture holds instead of flashing a
+/// future frame early; None means nothing has shown and the poster or the
+/// spinner stays up.
+fn choose_pts(
+    times: impl Iterator<Item = Duration> + Clone,
+    position: Duration,
+    shown: Duration,
+) -> Option<Duration> {
+    let mut due = None;
+    for pts in times.clone() {
+        if pts <= position {
+            due = Some(pts);
+        }
+    }
+    if due.is_some() {
+        return due;
+    }
+    for pts in times {
+        if pts == shown {
+            return Some(shown);
+        }
+    }
+    None
 }
 
 /// How soon the viewer needs another frame.
@@ -826,16 +915,6 @@ enum Audio {
     Extracting(std::sync::mpsc::Receiver<Vec<f32>>),
     /// No soundtrack to play; the wall clock drives the picture.
     Silent,
-    /// Seeking failed: reopen from the beginning instead of drifting apart.
-    Restart,
-}
-impl Audio {
-    fn ok(self) -> Option<(rodio::MixerDeviceSink, rodio::Player)> {
-        match self {
-            Audio::Sound(audio) => Some(audio),
-            Audio::Extracting(_) | Audio::Silent | Audio::Restart => None,
-        }
-    }
 }
 /// The soundtrack from a position, or why it starts elsewhere.
 fn audio_at(path: &Path, at: Duration) -> Audio {
@@ -857,7 +936,11 @@ fn audio_at(path: &Path, at: Duration) -> Audio {
         }
     };
     if !at.is_zero() && decoder.try_seek(at).is_err() {
-        return Audio::Restart;
+        // The streaming decoder cannot land on the jump: the picture keeps
+        // its target and the soundtrack joins from a background extraction
+        // instead of silently restarting the clip from zero.
+        log::warn!("soundtrack cannot seek in {}; extracting", path.display());
+        return extract_audio(path);
     }
     // The player opens a fresh sink on every seek, so rodio's drop notice
     // would print on each one; the sink is dropped on purpose here.
@@ -893,13 +976,25 @@ fn extract_audio(path: &Path) -> Audio {
 fn ffmpeg_present() -> bool {
     static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *KNOWN.get_or_init(|| {
-        std::process::Command::new("ffmpeg")
+        let mut check = std::process::Command::new("ffmpeg");
+        quiet(&mut check)
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
     })
+}
+
+/// A helper media process that never flashes a console window on Windows.
+fn quiet(command: &mut std::process::Command) -> &mut std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW: probing a chat video must not pop a console.
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 /// Decodes a soundtrack to mono 48 kHz samples, capped for chat videos.
 /// Decodes a soundtrack in-process with symphonia, so sound works without
@@ -950,8 +1045,10 @@ fn symphonia_pcm(path: &Path) -> Option<Vec<f32>> {
         .ok()?;
     let cap = PCM_RATE as usize * PCM_CAP_SECS as usize;
     let mut mono = Vec::new();
+    let mut capped = false;
     loop {
         if mono.len() >= cap {
+            capped = true;
             break;
         }
         let packet = match probed.format.next_packet() {
@@ -969,6 +1066,11 @@ fn symphonia_pcm(path: &Path) -> Option<Vec<f32>> {
     }
     if mono.is_empty() {
         return None;
+    }
+    if capped {
+        // Chat videos longer than the cap keep their picture; the clock
+        // falls back to the wall clock once this sound runs out.
+        log::warn!("soundtrack of {} capped at {PCM_CAP_SECS}s", path.display());
     }
     // Resample only when the source rate differs; a linear pass is plenty
     // for a chat soundtrack and keeps this dependency-free.
@@ -1018,7 +1120,8 @@ fn resample_linear(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     output
 }
 fn ffmpeg_pcm(path: &Path) -> Option<Vec<f32>> {
-    let output = std::process::Command::new("ffmpeg")
+    let mut pcm = std::process::Command::new("ffmpeg");
+    let output = quiet(&mut pcm)
         .args(["-v", "error", "-i"])
         .arg(path)
         .args(["-vn", "-ar", "48000", "-ac", "1", "-f", "f32le", "pipe:1"])
@@ -1054,6 +1157,7 @@ fn attach_cached(active: &mut Active, volume: f32, muted: bool, from: Duration) 
     }
     active.audio = Some((device, sink));
     active.base = from;
+    active.anchor = Duration::ZERO;
     active.started = Instant::now();
 }
 
@@ -1087,7 +1191,9 @@ fn spawn_decode(
         });
 }
 /// Frames per second pulled through the ffmpeg pipe.
-const PIPE_FPS: u32 = 15;
+/// Thirty keeps motion smooth; the pipe carries small chat frames, so the
+/// extra throughput stays well inside what a desktop moves without trying.
+const PIPE_FPS: u32 = 30;
 /// Pulls frames through ffmpeg for files the in-process decoder cannot read.
 ///
 /// Input seeking starts at the nearest key frame; the viewer holds its still
@@ -1103,7 +1209,8 @@ fn decode_ffmpeg(
     let out_width = width.clamp(2, PLAY_WIDTH) & !1;
     let out_height =
         ((u64::from(height) * u64::from(out_width) / u64::from(width.max(1))) as u32).max(2) & !1;
-    let mut child = match std::process::Command::new("ffmpeg")
+    let mut launch = std::process::Command::new("ffmpeg");
+    let mut child = match quiet(&mut launch)
         .args(["-v", "error", "-ss", &at.as_secs_f32().to_string(), "-i"])
         .arg(path)
         .args([
@@ -1427,6 +1534,79 @@ mod tests {
         assert_eq!(stamp(100, -5000, 1000), Duration::ZERO);
         // A zero timescale never divides by zero.
         assert_eq!(stamp(100, 0, 0), Duration::from_secs(100));
+    }
+
+    #[test]
+    fn pausing_and_resuming_never_counts_a_stretch_twice() {
+        // Ten seconds in, the pause bakes the position into the base and
+        // freezes the anchor on the sink. Five more output seconds resume
+        // from twelve, not from nineteen.
+        let paused = audio_position(Duration::ZERO, Duration::from_secs(7), Duration::ZERO);
+        assert_eq!(paused, Duration::from_secs(7));
+        let anchor = Duration::from_secs(7);
+        let resumed = audio_position(paused, Duration::from_secs(12), anchor);
+        assert_eq!(resumed, Duration::from_secs(12));
+        // Ten quick pause cycles drift by nothing at all.
+        let mut base = Duration::ZERO;
+        let mut anchor = Duration::ZERO;
+        let mut sink = Duration::ZERO;
+        for _ in 0..10 {
+            sink += Duration::from_secs(1);
+            base = audio_position(base, sink, anchor);
+            anchor = sink;
+        }
+        assert_eq!(base, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_picture_holds_instead_of_showing_the_future() {
+        fn times(seconds: &[u64]) -> Vec<Duration> {
+            seconds.iter().map(|s| Duration::from_secs(*s)).collect()
+        }
+        // Future frames wait their turn; with nothing shown the poster stays.
+        assert_eq!(
+            choose_pts(
+                times(&[5, 6]).into_iter(),
+                Duration::from_secs(3),
+                Duration::MAX
+            ),
+            None
+        );
+        // Due frames show the newest one at or behind the position.
+        assert_eq!(
+            choose_pts(
+                times(&[5, 6]).into_iter(),
+                Duration::from_secs(5),
+                Duration::MAX
+            ),
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            choose_pts(
+                times(&[5, 6]).into_iter(),
+                Duration::from_secs(7),
+                Duration::MAX
+            ),
+            Some(Duration::from_secs(6))
+        );
+        // With no frame due, the picture on screen holds.
+        assert_eq!(
+            choose_pts(
+                times(&[5, 6]).into_iter(),
+                Duration::from_secs(4),
+                Duration::from_secs(5)
+            ),
+            Some(Duration::from_secs(5))
+        );
+        // A picture no longer buffered cannot hold: back to the poster.
+        assert_eq!(
+            choose_pts(
+                times(&[5, 6]).into_iter(),
+                Duration::from_secs(4),
+                Duration::from_secs(2)
+            ),
+            None
+        );
     }
 
     #[test]

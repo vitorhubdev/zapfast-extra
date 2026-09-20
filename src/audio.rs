@@ -23,6 +23,13 @@ const LONGEST_RECORDING: Duration = Duration::from_secs(15 * 60);
 const SPOOL_BLOCK: usize = 65_536;
 /// Mono frames held while resampling spooled audio.
 const RESAMPLE_BLOCK: usize = 32_768;
+/// Samples reported per span so the output re-reads the playback rate.
+///
+/// Rodio rebuilds its rate converter at span boundaries. With an unbounded
+/// span a speed change would never reach the samples already queued, so the
+/// button would move while the voice stays at 1x. Four thousand samples are
+/// about 85 ms at 48 kHz, inside the 150 ms budget for an audible change.
+const SPAN_SAMPLES: usize = 4_096;
 
 fn mono() -> NonZero<u16> {
     NonZero::<u16>::MIN
@@ -171,7 +178,7 @@ impl Iterator for SharedSamples {
 
 impl Source for SharedSamples {
     fn current_span_len(&self) -> Option<usize> {
-        None
+        Some((self.samples.len() - self.pos).clamp(1, SPAN_SAMPLES))
     }
 
     fn channels(&self) -> NonZero<u16> {
@@ -228,7 +235,7 @@ impl Iterator for FileSamples {
 
 impl Source for FileSamples {
     fn current_span_len(&self) -> Option<usize> {
-        None
+        Some(self.remaining.clamp(1, SPAN_SAMPLES as u64) as usize)
     }
 
     fn channels(&self) -> NonZero<u16> {
@@ -356,10 +363,11 @@ impl Player {
                         total,
                     };
                 }
+                let speed = self.speed_of(message);
                 let position = self
                     .output
                     .as_ref()
-                    .map(|(_, sink)| loaded.base + sink.get_pos())
+                    .map(|(_, sink)| scaled_position(loaded.base, sink.get_pos(), speed, total))
                     .unwrap_or(loaded.base)
                     .min(total);
                 Status {
@@ -596,6 +604,13 @@ impl Player {
 
 fn clip_length(samples: usize) -> Duration {
     Duration::from_secs_f64(samples as f64 / f64::from(voice::RATE))
+}
+
+/// Media position from output time. Rodio reports wall-clock output, so at
+/// 1.5x or 2x the marker has to scale the output or it lags a full speed
+/// factor behind, showing half the clip when the voice already ended.
+fn scaled_position(base: Duration, output: Duration, speed: f32, total: Duration) -> Duration {
+    (base + output.mul_f32(speed.max(0.0))).min(total)
 }
 
 /// Decodes a file for playback. OGG/Opus voice notes decode in memory;
@@ -1078,6 +1093,50 @@ mod tests {
         player.set_speed("a", 2.0);
         assert_eq!(player.speed_of("a"), 2.0);
         assert_eq!(player.speed_of("b"), 1.0);
+    }
+
+    #[test]
+    fn the_marker_scales_with_the_speed() {
+        let total = Duration::from_secs(12);
+        // Six output seconds at 2x cover the whole twelve-second clip.
+        assert_eq!(
+            scaled_position(Duration::ZERO, Duration::from_secs(6), 2.0, total),
+            total
+        );
+        // Four output seconds at 1.5x land six seconds into the clip.
+        assert_eq!(
+            scaled_position(Duration::ZERO, Duration::from_secs(4), 1.5, total),
+            Duration::from_secs(6)
+        );
+        // Normal speed reports the output unchanged, and the marker never
+        // runs past the end of the clip.
+        assert_eq!(
+            scaled_position(Duration::ZERO, Duration::from_secs(3), 1.0, total),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            scaled_position(Duration::from_secs(10), Duration::from_secs(4), 2.0, total),
+            total
+        );
+    }
+
+    #[test]
+    fn sources_report_bounded_spans_for_speed_changes() {
+        let samples: Arc<Vec<f32>> = Arc::new(vec![0.0; SPAN_SAMPLES * 3]);
+        let source = SharedSamples::new(Arc::clone(&samples), 0);
+        assert_eq!(source.current_span_len(), Some(SPAN_SAMPLES));
+        let path = test_spool("span");
+        write_raw(&path, &vec![0.0; SPAN_SAMPLES * 3]);
+        let file = FileSamples::open(&path, 0, (SPAN_SAMPLES * 3) as u64).expect("opens");
+        assert_eq!(file.current_span_len(), Some(SPAN_SAMPLES));
+        let tail = FileSamples::open(
+            &path,
+            (SPAN_SAMPLES * 3 - 10) as u64,
+            (SPAN_SAMPLES * 3) as u64,
+        )
+        .expect("opens");
+        assert_eq!(tail.current_span_len(), Some(10));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A video file gives up its soundtrack once its metadata leads.

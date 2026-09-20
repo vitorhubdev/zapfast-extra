@@ -2,6 +2,42 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.31] - 2026-09-20
+
+### Fixed
+
+- The voice speed button now changes the voice itself. A twelve-second
+  clip takes about 12 s at 1x, 8 s at 1.5x and 6 s at 2x, the change is
+  audible within a fraction of a second, and the progress marker follows
+  the speed instead of lagging behind it.
+- Pausing a video and resuming no longer counts the stretch before the
+  pause twice, so the picture stops jumping ahead. Repeated pauses do not
+  accumulate drift.
+- A jump keeps its target when the soundtrack cannot land on it. The sound
+  joins from a background extraction instead of silently restarting the
+  clip from zero.
+- The progress bar keeps full precision, so a click at seventy percent
+  lands at seventy percent of the clip. Clicks and arrow keys jump at
+  once; dragging still lands on release. A paused video stays paused
+  across a jump.
+- Files the player already refused say why at once instead of spinning
+  forever on a player that will never arrive.
+- Playback through the ffmpeg fallback runs at 30 frames per second, so
+  motion stays smooth on files the in-process decoder cannot read.
+- Long stickers and GIFs play to their end instead of looping a truncated
+  head, within a 48 MB decoded budget per animation. Their first paint
+  spreads over several interface ticks instead of stalling the scroll once.
+- A broken picture shows its error and retries quietly after thirty
+  seconds instead of burning a decode on every frame.
+- The first video frame always paints, even when it is stamped at zero,
+  and the picture holds its current frame instead of flashing a future
+  one early.
+- When a soundtrack ends before its picture (a short track or a capped
+  background extraction), the wall clock drives on so the video plays to
+  its end instead of freezing.
+- Helper media processes (probe, decode, extraction) no longer flash a
+  console window on Windows.
+
 ## [1.0.30] - 2026-09-18
 
 ### Fixed

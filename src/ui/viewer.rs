@@ -1,7 +1,7 @@
 //! Full-window viewer for a chat's pictures, stickers, and PDFs.
 
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Key, Layout, Rect, Sense, Vec2, pos2, vec2};
 
@@ -255,6 +255,16 @@ fn video_head(
     });
 }
 
+/// Bar position for a playback position, in full float precision. Whole
+/// seconds would snap a click at seventy percent to the wrong second; the
+/// fraction keeps the jump where the pointer asked for it.
+pub(crate) fn seek_fraction(position: Duration, total: Duration) -> f32 {
+    if total.is_zero() {
+        return 0.0;
+    }
+    (position.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0)
+}
+
 /// Playback controls under the playing video.
 #[allow(clippy::too_many_arguments)]
 fn video_bar(
@@ -292,18 +302,18 @@ fn video_bar(
                 theme::regular(13.0),
                 palette.secondary,
             );
-            let total_secs = total.as_secs().max(1);
-            let mut fraction = (position.as_secs_f32() / total_secs as f32).clamp(0.0, 1.0);
+            let mut fraction = seek_fraction(position, total);
             let slider = ui.add_sized(
                 vec2((ui.available_width() - 300.0).max(60.0), 22.0),
                 egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
             );
-            if slider.drag_stopped() {
+            // A drag seeks on release; a click or arrow keys seek at once.
+            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                 actions.push(Action::VideoSeek(fraction));
             }
             theme::text(
                 ui,
-                crate::util::duration(total_secs.min(u64::from(u32::MAX)) as u32),
+                crate::util::duration(total.as_secs().max(1).min(u64::from(u32::MAX)) as u32),
                 theme::regular(13.0),
                 palette.secondary,
             );
@@ -323,6 +333,10 @@ fn video_bar(
             );
             if loud.changed() {
                 actions.push(Action::VideoVolume(volume.clamp(0.0, 1.0)));
+                // Clicks and arrow keys have no drag to stop on: save at once.
+                if !loud.dragged() {
+                    actions.push(Action::SettingsChanged);
+                }
             }
             if loud.drag_stopped() {
                 actions.push(Action::SettingsChanged);
@@ -644,8 +658,13 @@ fn pdf_surface(app: &App, path: &Path, page: usize) -> Surface {
 }
 
 /// Loads a picture or sticker through the image loader.
-fn image_surface(ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2) -> Surface {
+fn image_surface(_ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2) -> Surface {
     let uri = crate::util::image_uri(path);
+    // A permanently broken file stays failed for a while instead of burning
+    // a decode on every frame; the cooldown retries quietly on its own.
+    if image_cooling_down(ctx, &uri) {
+        return Surface::Failed;
+    }
     match egui::Image::new(&uri).load_for_size(ctx, size) {
         Ok(egui::load::TexturePoll::Ready { texture }) => Surface::Ready {
             id: texture.id,
@@ -654,11 +673,32 @@ fn image_surface(ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2
         },
         Ok(egui::load::TexturePoll::Pending { .. }) => Surface::Pending,
         Err(_) => {
-            // Drop the failed entry so the next frame tries again.
-            ui.ctx().forget_image(&uri);
+            remember_image_failure(ctx, &uri);
             Surface::Failed
         }
     }
+}
+
+/// How long a broken picture waits before the viewer tries it again.
+const IMAGE_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Whether this picture broke recently and should stay failed for now.
+fn image_cooling_down(ctx: &egui::Context, uri: &str) -> bool {
+    let id = egui::Id::new("viewer-image-failures");
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(id)
+            .get(uri)
+            .is_some_and(|at| at.elapsed() < IMAGE_RETRY_AFTER)
+    })
+}
+
+/// Remembers a broken picture so the next frames skip it for a while.
+fn remember_image_failure(ctx: &egui::Context, uri: &str) {
+    let id = egui::Id::new("viewer-image-failures");
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<std::collections::HashMap<String, Instant>>(id)
+            .insert(uri.to_owned(), Instant::now());
+    });
 }
 
 /// One editable page number in the top bar.
@@ -1051,5 +1091,19 @@ mod tests {
         assert!(!animated(Path::new("photo.jpg")));
         assert!(!animated(Path::new("notes.pdf")));
         assert!(!animated(Path::new("notes")));
+    }
+
+    #[test]
+    fn a_click_lands_on_fractions_of_a_second() {
+        // Seventy percent of ten and a half seconds is 7.35 seconds in.
+        let total = Duration::from_millis(10_500);
+        let clicked = seek_fraction(Duration::from_millis(7_350), total);
+        assert!((clicked - 0.7).abs() < 0.000_1, "lands at {clicked}");
+        // Whole seconds would have snapped the same click to 0.666.
+        assert!(clicked > 0.69);
+        assert_eq!(seek_fraction(Duration::ZERO, total), 0.0);
+        assert_eq!(seek_fraction(total, total), 1.0);
+        assert_eq!(seek_fraction(Duration::from_secs(99), total), 1.0);
+        assert_eq!(seek_fraction(Duration::from_secs(1), Duration::ZERO), 0.0);
     }
 }
