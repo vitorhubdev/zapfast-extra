@@ -778,6 +778,7 @@ impl App {
             .map(|mention| crate::markup::Mention {
                 user: mention.user.clone(),
                 name: self.mention_name(&mention.id),
+                id: mention.id.clone(),
             })
             .collect()
     }

@@ -2703,6 +2703,7 @@ fn mentions_of(view: &View<'_>, message: &Message) -> Vec<markup::Mention> {
         .map(|mention| markup::Mention {
             user: mention.user.clone(),
             name: (view.mention_names)(&mention.id),
+            id: mention.id.clone(),
         })
         .collect()
 }
@@ -2714,6 +2715,7 @@ fn quote_mentions(view: &View<'_>, quoted: &crate::model::Quoted) -> Vec<markup:
         .map(|mention| markup::Mention {
             user: mention.user.clone(),
             name: (view.mention_names)(&mention.id),
+            id: mention.id.clone(),
         })
         .collect()
 }
@@ -3034,7 +3036,7 @@ fn rich_body(
     if visible || selection_alive {
         markup::paint_selectable(ui, &laid, &response, rect.min, palette.text, visible);
     }
-    if !laid.links.is_empty()
+    if (!laid.links.is_empty() || !laid.mentions.is_empty())
         && let Some(pos) = response.hover_pos()
     {
         let cursor = laid.galley.cursor_from_pos(pos - rect.min);
@@ -3042,6 +3044,16 @@ fn rich_body(
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             if response.clicked() {
                 actions.push(Action::OpenUrl(url.to_owned()));
+            }
+        } else if let Some((id, name)) = laid.mention_at(cursor.index.0) {
+            // A marked number opens that person's chat, like tapping it
+            // on the phone does.
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                actions.push(Action::StartChat {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                });
             }
         }
     }

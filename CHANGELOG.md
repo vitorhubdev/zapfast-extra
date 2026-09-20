@@ -2,6 +2,13 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.38] - 2026-09-20
+
+### Fixed
+
+- Marked numbers in group messages are clickable again: tapping one
+  opens that person's chat, like on the phone.
+
 ## [1.0.37] - 2026-09-20
 
 ### Fixed

@@ -19,6 +19,8 @@ use crate::theme;
 pub struct Mention {
     pub user: String,
     pub name: String,
+    /// Canonical chat id the mention opens.
+    pub id: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +38,8 @@ pub struct Text {
     placements: Vec<String>,
     /// Character ranges linked to web addresses.
     pub links: Vec<(Range<usize>, String)>,
+    /// Character ranges opening the mentioned person's chat: id and name.
+    pub mentions: Vec<(Range<usize>, String, String)>,
     /// Whether the message is emoji-only and should use a larger size.
     pub big: bool,
 }
@@ -53,6 +57,13 @@ impl Text {
             .find(|(range, _)| range.contains(&character))
             .map(|(_, url)| url.as_str())
     }
+    /// Returns the mentioned person's chat id and name at an index.
+    pub fn mention_at(&self, character: usize) -> Option<(&str, &str)> {
+        self.mentions
+            .iter()
+            .find(|(range, _, _)| range.contains(&character))
+            .map(|(_, id, name)| (id.as_str(), name.as_str()))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -64,6 +75,8 @@ struct Span {
     mono: bool,
     link: Option<String>,
     mention: bool,
+    /// Chat id and display name a mention span opens.
+    mention_target: Option<(String, String)>,
     /// Paints a quoted line's bar and indent.
     quote: bool,
 }
@@ -82,6 +95,7 @@ pub fn layout(
     job.wrap.max_width = max_width;
     let mut placements = Vec::new();
     let mut links = Vec::new();
+    let mut targets = Vec::new();
     let mut characters = 0;
     for span in parse(text, mentions) {
         let font_id = if span.mono {
@@ -121,6 +135,9 @@ pub fn layout(
         if let Some(url) = span.link {
             links.push((before..after, url));
         }
+        if let Some((id, name)) = span.mention_target {
+            targets.push((before..after, id, name));
+        }
         characters = after;
     }
     if job.text.is_empty() {
@@ -135,6 +152,7 @@ pub fn layout(
         galley,
         placements,
         links,
+        mentions: targets,
         big,
     }
 }
@@ -386,6 +404,7 @@ fn link_and_mention(span: Span, mentions: &[Mention]) -> Vec<Span> {
                 out.push(Span {
                     text: format!("@{}", mention.name),
                     mention: true,
+                    mention_target: Some((mention.id.clone(), mention.name.clone())),
                     quote: span.quote,
                     ..Default::default()
                 });
@@ -424,6 +443,7 @@ fn push_plain(out: &mut Vec<Span>, template: &Span, text: &str) {
             text: text.to_owned(),
             link: None,
             mention: false,
+            mention_target: None,
             ..template.clone()
         });
     }
@@ -724,6 +744,7 @@ mod tests {
         let mentions = [Mention {
             user: "174057861464188".into(),
             name: "+49 176 31141665".into(),
+            id: "174057861464188@s.whatsapp.net".into(),
         }];
         let spans = parse("20:00 @174057861464188 (no pronouns)", &mentions);
         let mention = spans.iter().find(|span| span.mention).expect("mention");
@@ -733,6 +754,35 @@ mod tests {
             "hi @+49 176 31141665"
         );
         assert_eq!(plain("hi @123", &mentions), "hi @123");
+    }
+
+    #[test]
+    fn mentions_carry_their_chat_target() {
+        let mentions = [Mention {
+            user: "5511975984197".into(),
+            name: "Lucas Kassiano".into(),
+            id: "5511975984197@s.whatsapp.net".into(),
+        }];
+        let spans = parse("@5511975984197", &mentions);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].mention_target,
+            Some((
+                "5511975984197@s.whatsapp.net".into(),
+                "Lucas Kassiano".into()
+            ))
+        );
+        // Plain text around a mention carries no target.
+        let spans = parse("hi @5511975984197!", &mentions);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].mention_target, None);
+        assert_eq!(spans[2].mention_target, None);
+        // A number nobody marked is not clickable.
+        let spans = parse("call @5511999999999", &mentions);
+        assert!(spans.iter().all(|span| span.mention_target.is_none()));
+        // Short digit runs are not mentions either.
+        let spans = parse("score @1234", &mentions);
+        assert!(spans.iter().all(|span| span.mention_target.is_none()));
     }
 }
 
