@@ -320,12 +320,29 @@ pub enum Command {
     HealSticker {
         path: PathBuf,
     },
+    /// Deletes a thumbnail that never decodes so it is rebuilt locally.
+    /// The original sticker file is never touched.
+    HealStickerThumb {
+        path: PathBuf,
+    },
+    /// Internal thumbnail-rebuild result from a blocking task.
+    ThumbHealFinished {
+        path: PathBuf,
+        ok: bool,
+    },
     React {
         chat: ChatId,
         message: String,
         emoji: String,
     },
     SetArchived(ChatId, bool),
+    /// Internal chat-setting sync result from a phone-mutation task, bound to
+    /// the intent revision it attempted.
+    ChatSyncFlushed {
+        chat: ChatId,
+        rev: i64,
+        ok: bool,
+    },
     SetPinned(ChatId, bool),
     PairWithPhone(String),
     /// Unlinks the device remotely and locally.
@@ -513,6 +530,25 @@ pub enum Event {
     MessageDeleted {
         chat: ChatId,
         id: String,
+    },
+    /// A chat deleted on a linked device vanished locally: drop its row,
+    /// cached conversation, and open state when it was showing.
+    ChatRemoved {
+        chat: ChatId,
+    },
+    /// A chat cleared on a linked device lost its messages through a
+    /// timestamp: drop the cached conversation so it reloads from the
+    /// archive.
+    ChatCleared {
+        chat: ChatId,
+        through: i64,
+    },
+    /// Explicit result of one requested thumbnail rebuild: the sticker
+    /// path and whether its thumbnail is ready. The picker applies this
+    /// instead of inferring completion from the file.
+    StickerThumb {
+        path: PathBuf,
+        ok: bool,
     },
     /// Saved stickers, imported packs, and recent stickers for the picker.
     Stickers {
@@ -738,5 +774,61 @@ impl Backend {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::updates::{
+        Release, Source,
+        install::{Installation, Kind, Prepared},
+    };
+
+    fn release() -> Release {
+        Release {
+            version: "99.0.0".into(),
+            url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".into(),
+        }
+    }
+
+    fn prepared() -> Box<Prepared> {
+        Box::new(Prepared {
+            installation: Installation {
+                executable: std::path::PathBuf::from("/demo/zapfast"),
+                kind: Kind::Portable,
+            },
+            directory: "/demo/staging".into(),
+            payload: "/demo/staging/next".into(),
+            sha256: String::new(),
+            version: "99.0.0".into(),
+        })
+    }
+
+    #[test]
+    fn detached_backends_never_run_update_commands() {
+        let (mut backend, _events) = Backend::detached();
+        assert!(backend.is_offline());
+        // Without a recorder the commands are dropped outright.
+        backend.send(Command::DownloadUpdate {
+            release: release(),
+            source: Source::GitHub,
+        });
+        backend.send(Command::InstallUpdate {
+            prepared: prepared(),
+            arguments: Vec::new(),
+        });
+        assert!(backend.take_demo_commands().is_empty());
+        // With a recorder they stay inside the process for the local responder.
+        backend.record_demo_commands();
+        backend.send(Command::DownloadUpdate {
+            release: release(),
+            source: Source::GitHub,
+        });
+        backend.send(Command::InstallUpdate {
+            prepared: prepared(),
+            arguments: Vec::new(),
+        });
+        assert_eq!(backend.take_demo_commands().len(), 2);
     }
 }

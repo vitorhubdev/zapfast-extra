@@ -31,6 +31,19 @@ pub struct ArchivedSticker {
     pub raw: Option<Vec<u8>>,
 }
 
+/// What a chat removal took out. existed is false for a replayed sync
+/// action with nothing left to remove. media lists the attachment paths
+/// the removed messages referenced; a file is deleted only when no
+/// surviving message still references it.
+#[derive(Clone, Debug, Default)]
+pub struct Removed {
+    pub existed: bool,
+    /// Whether any row actually disappeared: replays that delete nothing
+    /// stay quiet instead of refreshing the interface twice.
+    pub changed: bool,
+    pub media: Vec<std::path::PathBuf>,
+}
+
 pub struct Archive {
     connection: Connection,
 }
@@ -95,6 +108,29 @@ CREATE TABLE IF NOT EXISTS group_receipts (
     played_at INTEGER,
     PRIMARY KEY (chat, id, recipient)
 );
+CREATE TABLE IF NOT EXISTS chat_removals (
+    chat TEXT PRIMARY KEY,
+    through INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_sync_queue (
+    chat TEXT NOT NULL,
+    setting TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    updated_ms INTEGER NOT NULL,
+    rev INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (chat, setting)
+);
+CREATE TABLE IF NOT EXISTS message_tombstones (
+    chat TEXT NOT NULL,
+    id TEXT NOT NULL,
+    deleted_ms INTEGER NOT NULL,
+    PRIMARY KEY (chat, id)
+);
+CREATE TABLE IF NOT EXISTS chat_sync_order (
+    chat TEXT PRIMARY KEY,
+    order_ms INTEGER NOT NULL,
+    archived INTEGER NOT NULL
+);
 CREATE TRIGGER IF NOT EXISTS delete_group_receipts AFTER DELETE ON messages BEGIN
     DELETE FROM group_receipts WHERE chat = OLD.chat AND id = OLD.id;
 END;
@@ -122,6 +158,7 @@ const MIGRATIONS: &[(&str, &str, &str)] = &[
     ("chats", "pinned_at", "INTEGER NOT NULL DEFAULT 0"),
     ("chats", "pin_updated_at", "INTEGER"),
     ("chats", "mute_updated_at", "INTEGER"),
+    ("chat_sync_queue", "rev", "INTEGER NOT NULL DEFAULT 0"),
 ];
 const CHAT_JOIN: &str = "FROM chats c
              LEFT JOIN messages m ON m.chat = c.id AND m.rowid = (
@@ -232,6 +269,13 @@ impl Archive {
         Self::prepare(Connection::open_in_memory()?)
     }
 
+    /// Runs raw SQL in tests: fault-injection triggers and legacy rows.
+    #[cfg(test)]
+    pub fn test_batch(&self, sql: &str) -> Result<()> {
+        self.connection.execute_batch(sql)?;
+        Ok(())
+    }
+
     fn prepare(connection: Connection) -> Result<Self> {
         connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
         connection.execute_batch(SCHEMA)?;
@@ -329,6 +373,208 @@ impl Archive {
             params![id, archived],
         )?;
         Ok(())
+    }
+
+    /// Allocates the next intent revision from a persistent counter. Unlike
+    /// MAX(rev) over the live queue, this never reuses a revision after rows
+    /// are cleared, so a stale completion cannot match a fresh intent.
+    fn alloc_sync_rev(&self) -> Result<i64> {
+        // Upgrades may already hold queued rows with old revisions: the
+        // counter starts above both the stored counter and the live rows.
+        let stored: i64 = self
+            .meta("sync_rev")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let live: i64 = self.connection.query_row(
+            "SELECT COALESCE(MAX(rev), 0) FROM chat_sync_queue",
+            [],
+            |row| row.get(0),
+        )?;
+        let next = stored.max(live) + 1;
+        self.set_meta("sync_rev", &next.to_string())?;
+        Ok(next)
+    }
+
+    /// Remembers a chat setting the phone has not confirmed yet and returns
+    /// its monotonic revision. Newer intents overwrite older ones; revisions
+    /// tell stale completions apart when responses arrive out of order.
+    pub fn queue_chat_sync(
+        &self,
+        chat: &str,
+        setting: &str,
+        value: bool,
+        now_ms: i64,
+    ) -> Result<i64> {
+        let rev = self.alloc_sync_rev()?;
+        self.connection.execute(
+            "INSERT INTO chat_sync_queue (chat, setting, value, updated_ms, rev) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(chat, setting) DO UPDATE SET value = excluded.value,
+             updated_ms = excluded.updated_ms, rev = excluded.rev",
+            params![chat, setting, value, now_ms, rev],
+        )?;
+        Ok(rev)
+    }
+
+    /// Newest unconfirmed intent for one chat setting, if any, with its revision.
+    pub fn queued_chat_sync(&self, chat: &str, setting: &str) -> Result<Option<(bool, i64, i64)>> {
+        self.connection
+            .query_row(
+                "SELECT value, updated_ms, rev FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2",
+                params![chat, setting],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?)),
+            )
+            .optional()
+    }
+
+    /// Every chat setting with an unconfirmed intent, oldest first.
+    pub fn pending_chat_syncs(&self) -> Result<Vec<(String, String)>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT chat, setting FROM chat_sync_queue ORDER BY updated_ms")?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Drops one confirmed intent.
+    pub fn clear_chat_sync(&self, chat: &str, setting: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2",
+            params![chat, setting],
+        )?;
+        Ok(())
+    }
+
+    /// Drops every intent for a chat that no longer exists.
+    pub fn clear_chat_syncs_for(&self, chat: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM chat_sync_queue WHERE chat = ?1", params![chat])?;
+        Ok(())
+    }
+
+    /// Last accepted archive order per chat: local completions record their
+    /// intent time, remote applications their event time. Survives restarts
+    /// so an older echo can never flip the state back afterwards.
+    pub fn sync_order(&self, chat: &str) -> Result<Option<(i64, bool)>> {
+        self.connection
+            .query_row(
+                "SELECT order_ms, archived FROM chat_sync_order WHERE chat = ?1",
+                params![chat],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+    }
+
+    /// Records an accepted archive state, keeping the newest order only.
+    pub fn record_sync_order(&self, chat: &str, order_ms: i64, archived: bool) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO chat_sync_order (chat, order_ms, archived) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat) DO UPDATE SET order_ms = excluded.order_ms, archived = excluded.archived
+             WHERE excluded.order_ms >= chat_sync_order.order_ms",
+            params![chat, order_ms, archived],
+        )?;
+        Ok(())
+    }
+
+    /// Applies one confirmed remote archive state together with its order
+    /// marker and the intent cleanup in a single transaction: either the
+    /// whole acceptance persists or nothing does.
+    pub fn apply_remote_archive(&self, chat: &str, archived: bool, remote_ms: i64) -> Result<()> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE chats SET archived = ?2 WHERE id = ?1",
+            params![chat, archived],
+        )?;
+        transaction.execute(
+            "INSERT INTO chat_sync_order (chat, order_ms, archived) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat) DO UPDATE SET order_ms = excluded.order_ms, archived = excluded.archived
+             WHERE excluded.order_ms >= chat_sync_order.order_ms",
+            params![chat, remote_ms, archived],
+        )?;
+        transaction.execute(
+            "DELETE FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2",
+            params![chat, "archived"],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+    /// Completes one local intent transactionally: removes exactly its queue
+    /// row and records its order marker together, returning what was sent.
+    /// A replaced row yields nothing, so a newer intent is never settled.
+    pub fn complete_chat_sync(&self, chat: &str, rev: i64) -> Result<Option<(bool, i64)>> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let completed: Option<(bool, i64)> = transaction
+            .query_row(
+                "SELECT value, updated_ms FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2 AND rev = ?3",
+                params![chat, "archived", rev],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((value, updated)) = completed else {
+            return Ok(None);
+        };
+        transaction.execute(
+            "DELETE FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2 AND rev = ?3",
+            params![chat, "archived", rev],
+        )?;
+        transaction.execute(
+            "INSERT INTO chat_sync_order (chat, order_ms, archived) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat) DO UPDATE SET order_ms = excluded.order_ms, archived = excluded.archived
+             WHERE excluded.order_ms >= chat_sync_order.order_ms",
+            params![chat, updated, value],
+        )?;
+        transaction.commit()?;
+        Ok(Some((value, updated)))
+    }
+    /// Drops an intent only for the exact revision a completion attempted,
+    /// so a stale completion cannot erase a fresh intent that reused nothing.
+    pub fn clear_chat_sync_if_rev(&self, chat: &str, setting: &str, rev: i64) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2 AND rev = ?3",
+            params![chat, setting, rev],
+        )?;
+        Ok(())
+    }
+
+    /// Applies one local archive change together with its sync intent in a
+    /// single transaction: the interface never shows a state the queue lost.
+    pub fn set_archived_queued(&self, chat: &str, archived: bool, now_ms: i64) -> Result<i64> {
+        let transaction = self.connection.unchecked_transaction()?;
+        transaction.execute(
+            "UPDATE chats SET archived = ?2 WHERE id = ?1",
+            params![chat, archived],
+        )?;
+        let rev = self.alloc_sync_rev()?;
+        transaction.execute(
+            "INSERT INTO chat_sync_queue (chat, setting, value, updated_ms, rev) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(chat, setting) DO UPDATE SET value = excluded.value, updated_ms = excluded.updated_ms, rev = excluded.rev",
+            params![chat, "archived", archived, now_ms, rev],
+        )?;
+        transaction.commit()?;
+        Ok(rev)
+    }
+
+    /// Marks one message id as deleted for this device, before removing
+    /// its row, so a late history replay cannot resurrect it.
+    pub fn tombstone_message(&self, chat: &str, id: &str, now_ms: i64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO message_tombstones (chat, id, deleted_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat, id) DO NOTHING",
+            params![chat, id, now_ms],
+        )?;
+        Ok(())
+    }
+
+    /// Whether this message id was deleted for this device.
+    pub fn is_tombstoned(&self, chat: &str, id: &str) -> Result<bool> {
+        self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM message_tombstones WHERE chat = ?1 AND id = ?2)",
+            params![chat, id],
+            |row| row.get(0),
+        )
     }
 
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
@@ -561,6 +807,12 @@ impl Archive {
             params![lid, pn],
         )?;
         self.merge_group_recipient(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))?;
+        // A removal recorded under the privacy id protects the number too.
+        self.connection.execute(
+            "INSERT INTO chat_removals (chat, through) SELECT ?2, through FROM chat_removals WHERE chat = ?1
+             ON CONFLICT(chat) DO UPDATE SET through = MAX(through, excluded.through)",
+            params![format!("{lid}@lid"), format!("{pn}@s.whatsapp.net")],
+        )?;
         let changed = self.connection.execute(
             "INSERT INTO chats (id, name, kind, pinned, pinned_at, pin_updated_at,
                 muted_until, mute_updated_at)
@@ -587,9 +839,47 @@ impl Archive {
         rows.collect()
     }
 
+    /// Drops a table, for tests that need a failing lookup. Test-only:
+    /// production never drops schema objects.
+    #[cfg(test)]
+    pub(crate) fn drop_table_for_test(&self, table: &str) -> Result<()> {
+        self.connection
+            .execute(&format!("DROP TABLE {table}"), [])?;
+        Ok(())
+    }
+
+    /// Every file the archive still vouches for: message attachments plus
+    /// sticker favorites and cataloged copies, which live outside messages
+    /// but may name the same file. None means unprovable (a failed lookup
+    /// or a damaged favorites list), never an empty disk: without proof
+    /// every candidate stays.
+    pub fn protected_files(&self) -> Option<std::collections::HashSet<std::path::PathBuf>> {
+        let mut live = std::collections::HashSet::new();
+        let paths = self.media_paths().ok()?;
+        live.extend(paths.into_iter().map(|(_, _, path)| path));
+        live.extend(self.sticker_favorites_strict().ok()??);
+        live.extend(self.sticker_file_refs().ok()?);
+        Some(live)
+    }
+
+    /// Sticker favorites with strict decoding: a missing list is empty, but
+    /// a damaged one is unprovable. The picker keeps its lenient fallback;
+    /// destructive cleanups must go through protected_files and abort on
+    /// None instead.
+    pub fn sticker_favorites_strict(&self) -> Result<Option<Vec<std::path::PathBuf>>> {
+        let Some(raw) = self.meta("sticker_favorites")? else {
+            return Ok(Some(Vec::new()));
+        };
+        Ok(serde_json::from_str(&raw).ok())
+    }
+
     /// Upserts a message, preserves the furthest delivery state, and updates
     /// chat activity. `raw` contains attachment metadata.
     pub fn insert_message(&self, message: &Message, raw: Option<&[u8]>) -> Result<()> {
+        // A delete-for-me tombstone wins over any late replay of the same id.
+        if self.is_tombstoned(&message.chat, &message.id)? {
+            return Ok(());
+        }
         let existing: Option<i64> = self
             .connection
             .query_row(
@@ -927,25 +1217,146 @@ impl Archive {
         if from == to {
             return Ok(false);
         }
+        // One transaction: a failure anywhere rolls every associated row back.
+        let transaction = self.connection.unchecked_transaction()?;
         // A message id already living under both ids keeps the target copy.
-        let dupes = self.connection.execute(
+        let dupes = transaction.execute(
             "DELETE FROM messages WHERE chat = ?1 AND id IN (SELECT id FROM messages WHERE chat = ?2)",
             params![from, to],
         )?;
-        let moved = self.connection.execute(
+        let moved = transaction.execute(
             "UPDATE messages SET chat = ?2 WHERE chat = ?1",
             params![from, to],
         )?;
-        let _ = self.connection.execute(
+        transaction.execute(
             "DELETE FROM group_receipts WHERE chat = ?1 AND (id, recipient) IN (SELECT id, recipient FROM group_receipts WHERE chat = ?2)",
             params![from, to],
         )?;
-        let _ = self.connection.execute(
+        transaction.execute(
             "UPDATE group_receipts SET chat = ?2 WHERE chat = ?1",
             params![from, to],
         )?;
+        transaction.execute(
+            "INSERT INTO chat_removals (chat, through) SELECT ?2, through FROM chat_removals WHERE chat = ?1
+             ON CONFLICT(chat) DO UPDATE SET through = MAX(through, excluded.through)",
+            params![from, to],
+        )?;
+        transaction.execute("DELETE FROM chat_removals WHERE chat = ?1", params![from])?;
+        // Delete-for-me tombstones follow the chat: both copies mean the same
+        // deletion, so the union is kept.
+        transaction.execute(
+            "INSERT OR IGNORE INTO message_tombstones (chat, id, deleted_ms) SELECT ?2, id, deleted_ms FROM message_tombstones WHERE chat = ?1",
+            params![from, to],
+        )?;
+        transaction.execute(
+            "DELETE FROM message_tombstones WHERE chat = ?1",
+            params![from],
+        )?;
+        // Accepted-state order follows with newest-wins, like the intents.
+        transaction.execute(
+            "INSERT INTO chat_sync_order (chat, order_ms, archived) SELECT ?2, order_ms, archived FROM chat_sync_order WHERE chat = ?1
+             ON CONFLICT(chat) DO UPDATE SET order_ms = excluded.order_ms, archived = excluded.archived
+             WHERE excluded.order_ms > chat_sync_order.order_ms",
+            params![from, to],
+        )?;
+        let states = self.rekey_chat_syncs(from, to)?;
         let chats = self.merge_chat_rows(from, to)?;
-        Ok(dupes > 0 || moved > 0 || chats)
+        // A row the tombstone condemns must not survive under either id.
+        let condemned = transaction.execute(
+            "DELETE FROM messages WHERE chat = ?1 AND id IN (SELECT id FROM message_tombstones WHERE chat = ?1)",
+            params![to],
+        )?;
+        if condemned > 0 {
+            transaction.execute(
+                "UPDATE chats SET unread = MIN(unread, (SELECT COUNT(*) FROM messages WHERE chat = ?1 AND from_me = 0)), pending_read = NULL, last_activity = MIN(last_activity, COALESCE((SELECT MAX(timestamp) FROM messages WHERE chat = ?1), last_activity)) WHERE id = ?1",
+                params![to],
+            )?;
+        }
+        // The surviving intent outranks the OR-merged flag; a lookup failure
+        // fails the migration instead of silently keeping a merged flag.
+        // The flag follows the newest of the surviving intent and the
+        // accepted order, never the OR merge above nor any queue alone:
+        // with no intent the accepted state wins, and a stale intent
+        // cannot flip a newer accepted state. Ties keep the intent, the
+        // only unconfirmed voice. A lookup failure fails the migration
+        // instead of silently keeping a merged flag.
+        let queued: Option<(bool, i64)> = transaction
+            .query_row(
+                "SELECT value, updated_ms FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2",
+                params![to, "archived"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let accepted: Option<(i64, bool)> = transaction
+            .query_row(
+                "SELECT order_ms, archived FROM chat_sync_order WHERE chat = ?1",
+                params![to],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let winner: Option<bool> = match (queued, accepted) {
+            (Some((value, updated)), Some((order_ms, archived))) => {
+                if order_ms > updated {
+                    Some(archived)
+                } else {
+                    Some(value)
+                }
+            }
+            (Some((value, _)), None) => Some(value),
+            (None, Some((_, archived))) => Some(archived),
+            (None, None) => None,
+        };
+        if let Some(archived) = winner {
+            transaction.execute(
+                "UPDATE chats SET archived = ?2 WHERE id = ?1",
+                params![to, archived],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(dupes > 0 || moved > 0 || chats || states || condemned > 0)
+    }
+
+    /// Moves sync intents across a privacy-id migration. When both ids hold
+    /// an intent for the same setting, the newer one wins and takes a fresh
+    /// revision so in-flight completions from before the move stay stale.
+    fn rekey_chat_syncs(&self, from: &str, to: &str) -> Result<bool> {
+        let intents: Vec<(String, bool, i64, i64)> = self
+            .connection
+            .prepare("SELECT setting, value, updated_ms, rev FROM chat_sync_queue WHERE chat = ?1")?
+            .query_map(params![from], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<Result<Vec<_>>>()?;
+        if intents.is_empty() {
+            return Ok(false);
+        }
+        for (setting, value, updated, rev) in intents {
+            let current: Option<(bool, i64, i64)> = self
+                .connection
+                .query_row(
+                    "SELECT value, updated_ms, rev FROM chat_sync_queue WHERE chat = ?1 AND setting = ?2",
+                    params![to, setting],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            // Newest (updated_ms, rev) wins; legacy rows share rev 0 and keep
+            // the canonical side by rule. The winner takes a fresh revision
+            // so older in-flight completions stay stale, never as its order.
+            let newer = current.is_none_or(|(_, at, r)| (updated, rev) > (at, r));
+            if newer {
+                let fresh = self.alloc_sync_rev()?;
+                // One UPSERT on the primary key: any other failure rolls the
+                // whole migration back instead of masking as a no-op update.
+                self.connection.execute(
+                    "INSERT INTO chat_sync_queue (chat, setting, value, updated_ms, rev) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT(chat, setting) DO UPDATE SET value = excluded.value, updated_ms = excluded.updated_ms, rev = excluded.rev",
+                    params![to, setting, value, updated, fresh],
+                )?;
+            }
+        }
+        self.connection
+            .execute("DELETE FROM chat_sync_queue WHERE chat = ?1", params![from])?;
+        Ok(true)
     }
     /// Folds the chat row `from` into `to`, keeping the liveliest values.
     fn merge_chat_rows(&self, from: &str, to: &str) -> Result<bool> {
@@ -1120,6 +1531,192 @@ impl Archive {
             params![chat, id],
         )?;
         Ok(deleted > 0)
+    }
+
+    /// Deletes one message for this device only: tombstones its id against
+    /// replay, removes the row, and recomputes the chat counters from what
+    /// survived. Returns whether a row existed plus its attachment path.
+    pub fn delete_message_for_me(
+        &self,
+        chat: &str,
+        id: &str,
+        now_ms: i64,
+    ) -> Result<(bool, Vec<std::path::PathBuf>)> {
+        // One transaction: a crash between tombstone and row removal must not
+        // leave a message deleted in one place and alive in the other.
+        let transaction = self.connection.unchecked_transaction()?;
+        self.tombstone_message(chat, id, now_ms)?;
+        let row: Option<(i64, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT timestamp, json_extract(content, '$.media.path') FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat, id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((timestamp, path)) = row else {
+            transaction.commit()?;
+            return Ok((false, Vec::new()));
+        };
+        let media = path.map(std::path::PathBuf::from).into_iter().collect();
+        self.connection.execute(
+            "DELETE FROM messages WHERE chat = ?1 AND id = ?2",
+            params![chat, id],
+        )?;
+        self.connection.execute(
+            "UPDATE chats SET unread = MIN(unread, (SELECT COUNT(*) FROM messages
+                WHERE chat = ?1 AND from_me = 0 AND timestamp > COALESCE(read_through, -1))),
+                pending_read = CASE WHEN pending_read <= ?2 THEN NULL ELSE pending_read END,
+                last_activity = MIN(last_activity, COALESCE((SELECT MAX(timestamp) FROM messages
+                WHERE chat = ?1), last_activity))
+             WHERE id = ?1",
+            params![chat, timestamp],
+        )?;
+        transaction.commit()?;
+        Ok((true, media))
+    }
+
+    /// Where a deleted or cleared chat ends: messages at or below this
+    /// timestamp belong to the removed range and must never come back via
+    /// late history. Survives restarts with the archive itself.
+    pub fn removal_point(&self, chat: &str) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT through FROM chat_removals WHERE chat = ?1",
+                params![chat],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Atomically removes only the range the linked device knew about,
+    /// keeping newer messages and a durable barrier against replay. With
+    /// delete, a chat left without newer messages is removed entirely;
+    /// otherwise its messages are cleared but the chat stays listed.
+    /// Monotonic: a later call with an older boundary changes nothing.
+    pub fn remove_chat_through(&self, chat: &str, through: i64, delete: bool) -> Result<Removed> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let through = self
+            .removal_point(chat)?
+            .map_or(through, |old| old.max(through));
+        self.connection.execute(
+            "INSERT INTO chat_removals (chat, through) VALUES (?1, ?2)
+             ON CONFLICT(chat) DO UPDATE SET through = MAX(through, excluded.through)",
+            params![chat, through],
+        )?;
+        let newer: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE chat = ?1 AND timestamp > ?2)",
+            params![chat, through],
+            |row| row.get(0),
+        )?;
+        let removed = if newer {
+            let media = {
+                let mut statement = self.connection.prepare(
+                    "SELECT json_extract(content, '$.media.path') AS path FROM messages
+                     WHERE chat = ?1 AND timestamp <= ?2 AND path IS NOT NULL",
+                )?;
+                statement
+                    .query_map(params![chat, through], |row| {
+                        row.get::<_, String>(0).map(std::path::PathBuf::from)
+                    })?
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let deleted = self.connection.execute(
+                "DELETE FROM messages WHERE chat = ?1 AND timestamp <= ?2",
+                params![chat, through],
+            )?;
+            self.connection.execute(
+                "UPDATE chats SET unread = MIN(unread, (SELECT COUNT(*) FROM messages
+                    WHERE chat = ?1 AND from_me = 0 AND timestamp > COALESCE(read_through, -1))),
+                    pending_read = CASE WHEN pending_read <= ?2 THEN NULL ELSE pending_read END,
+                    last_activity = MIN(last_activity, COALESCE((SELECT MAX(timestamp) FROM messages
+                    WHERE chat = ?1), last_activity))
+                 WHERE id = ?1",
+                params![chat, through],
+            )?;
+            Removed {
+                existed: true,
+                changed: deleted > 0,
+                media,
+            }
+        } else if delete {
+            self.delete_chat(chat)?
+        } else {
+            self.clear_chat(chat)?
+        };
+        transaction.commit()?;
+        Ok(removed)
+    }
+
+    /// Removes a chat with everything stored for it. existed reports whether
+    /// a chat row was actually there, so a replayed sync action does not
+    /// announce a removal twice.
+    pub fn delete_chat(&self, chat: &str) -> Result<Removed> {
+        let media = self.chat_media(chat)?;
+        // A removed chat has no setting left to sync.
+        self.clear_chat_syncs_for(chat)?;
+        let existed = self
+            .connection
+            .execute("DELETE FROM chats WHERE id = ?1", params![chat])?
+            > 0;
+        let purged = self.purge_chat_rows(chat)?;
+        Ok(Removed {
+            existed,
+            changed: existed || purged > 0,
+            media,
+        })
+    }
+
+    /// Removes a chat's messages while keeping the chat itself listed, with
+    /// its counters clamped to what survived.
+    pub fn clear_chat(&self, chat: &str) -> Result<Removed> {
+        let media = self.chat_media(chat)?;
+        let purged = self.purge_chat_rows(chat)?;
+        self.connection.execute(
+            "UPDATE chats SET unread = 0, pending_read = NULL,
+                last_activity = COALESCE((SELECT MAX(timestamp) FROM messages WHERE chat = ?1), 0)
+             WHERE id = ?1",
+            params![chat],
+        )?;
+        let existed: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ?1)",
+            params![chat],
+            |row| row.get(0),
+        )?;
+        Ok(Removed {
+            existed,
+            changed: purged > 0,
+            media,
+        })
+    }
+
+    /// Attachment paths filed under one chat, for safe cleanup after the
+    /// rows are gone. Callers delete a file only when no surviving message
+    /// still references it.
+    fn chat_media(&self, chat: &str) -> Result<Vec<std::path::PathBuf>> {
+        let mut statement = self.connection.prepare(
+            "SELECT json_extract(content, '$.media.path') AS path FROM messages
+             WHERE chat = ?1 AND path IS NOT NULL",
+        )?;
+        statement
+            .query_map(params![chat], |row| {
+                row.get::<_, String>(0).map(std::path::PathBuf::from)
+            })?
+            .collect()
+    }
+
+    /// Deletes every stored row of a chat, returning how many messages went.
+    fn purge_chat_rows(&self, chat: &str) -> Result<usize> {
+        let purged = self
+            .connection
+            .execute("DELETE FROM messages WHERE chat = ?1", params![chat])?;
+        self.connection
+            .execute("DELETE FROM polls WHERE chat = ?1", params![chat])?;
+        self.connection
+            .execute("DELETE FROM poll_history WHERE chat = ?1", params![chat])?;
+        self.connection
+            .execute("DELETE FROM poll_votes WHERE chat = ?1", params![chat])?;
+        Ok(purged)
     }
 
     pub fn message(&self, chat: &str, id: &str) -> Result<Option<Message>> {
@@ -1619,6 +2216,170 @@ pub(crate) mod tests {
         );
     }
 
+    fn image_message(chat: &str, id: &str, timestamp: i64, path: &str) -> Message {
+        let mut message = message(chat, id, timestamp, false);
+        message.content = Content::Image {
+            caption: None,
+            media: crate::model::Media {
+                mime: "image/jpeg".into(),
+                size: 3,
+                width: Some(2),
+                height: Some(2),
+                path: Some(path.into()),
+                state: crate::model::MediaState::Idle,
+            },
+        };
+        message
+    }
+
+    #[test]
+    fn removal_keeps_newer_messages_and_is_monotonic() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "Ada").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 200), ("m3", 300)] {
+            archive
+                .insert_message(&message(chat, id, timestamp, false), None)
+                .expect("insert");
+        }
+        archive.set_unread(chat, 2).expect("unread");
+        let removed = archive
+            .remove_chat_through(chat, 200, false)
+            .expect("removes");
+        assert!(removed.existed);
+        assert_eq!(archive.removal_point(chat).expect("point"), Some(200));
+        let ids: Vec<String> = archive
+            .messages(chat, None, 10)
+            .expect("lists")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["m3".to_owned()], "only newer survives");
+        // An older boundary changes nothing; the barrier only moves forward.
+        let replayed = archive
+            .remove_chat_through(chat, 100, false)
+            .expect("replay");
+        assert!(replayed.existed);
+        assert_eq!(archive.removal_point(chat).expect("point"), Some(200));
+        assert_eq!(archive.messages(chat, None, 10).expect("lists").len(), 1);
+    }
+
+    #[test]
+    fn delete_removes_the_chat_row_without_newer_messages() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "Ada").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 200)] {
+            archive
+                .insert_message(&message(chat, id, timestamp, false), None)
+                .expect("insert");
+        }
+        let removed = archive
+            .remove_chat_through(chat, 200, true)
+            .expect("deletes");
+        assert!(removed.existed);
+        assert!(archive.chat(chat).expect("chat").is_none());
+        assert!(archive.messages(chat, None, 10).expect("lists").is_empty());
+        // A replayed delete finds nothing and reports it.
+        let replayed = archive
+            .remove_chat_through(chat, 200, true)
+            .expect("replay");
+        assert!(!replayed.existed, "a replay announces nothing twice");
+    }
+
+    #[test]
+    fn clear_keeps_the_chat_row_without_newer_messages() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "Ada").expect("chat");
+        archive
+            .insert_message(&message(chat, "m1", 100, false), None)
+            .expect("insert");
+        let removed = archive
+            .remove_chat_through(chat, 100, false)
+            .expect("clears");
+        assert!(removed.existed);
+        assert!(
+            archive.chat(chat).expect("chat").is_some(),
+            "chat stays listed"
+        );
+        assert!(archive.messages(chat, None, 10).expect("lists").is_empty());
+        assert_eq!(archive.chat(chat).expect("chat").unwrap().unread, 0);
+    }
+
+    #[test]
+    fn removal_collects_media_and_survives_reopen() {
+        let dir = std::env::temp_dir().join(format!("zapfast-removal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("archive.db");
+        let chat = "1@s.whatsapp.net";
+        let removed = {
+            let archive = Archive::open_with_key(&path, &[7; 32]).expect("opens");
+            archive.ensure_chat(chat, "Ada").expect("chat");
+            archive
+                .insert_message(&image_message(chat, "m1", 100, "old.jpg"), None)
+                .expect("insert");
+            archive
+                .insert_message(&image_message(chat, "m2", 300, "new.jpg"), None)
+                .expect("insert");
+            archive
+                .remove_chat_through(chat, 200, false)
+                .expect("removes")
+        };
+        assert_eq!(
+            removed.media,
+            vec![std::path::PathBuf::from("old.jpg")],
+            "only the removed range is collected"
+        );
+        let archive = Archive::open_with_key(&path, &[7; 32]).expect("reopens");
+        assert_eq!(archive.removal_point(chat).expect("point"), Some(200));
+        let ids: Vec<String> = archive
+            .messages(chat, None, 10)
+            .expect("lists")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["m2".to_owned()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removal_barrier_follows_the_lid_mapping() {
+        let archive = Archive::in_memory().expect("opens");
+        let lid = "123@lid";
+        let pn = "15550001111@s.whatsapp.net";
+        archive.ensure_chat(lid, "").expect("old row");
+        archive
+            .insert_message(&message(lid, "m1", 100, false), None)
+            .expect("insert");
+        archive
+            .insert_message(&message(lid, "m2", 300, false), None)
+            .expect("insert");
+        archive
+            .remove_chat_through(lid, 100, true)
+            .expect("removes");
+        archive.put_lid("123", "15550001111").expect("maps");
+        assert_eq!(
+            archive.removal_point(pn).expect("point"),
+            Some(100),
+            "the number inherits the privacy-id barrier"
+        );
+        assert!(archive.rekey_chat(lid, pn).expect("moves"));
+        assert_eq!(
+            archive.removal_point(pn).expect("point"),
+            Some(100),
+            "the barrier survives the rekey"
+        );
+        assert_eq!(archive.removal_point(lid).expect("point"), None);
+        let ids: Vec<String> = archive
+            .messages(pn, None, 10)
+            .expect("lists")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids, vec!["m2".to_owned()]);
+    }
+
     pub(crate) fn message(chat: &str, id: &str, timestamp: i64, from_me: bool) -> Message {
         Message {
             id: id.into(),
@@ -2089,6 +2850,454 @@ pub(crate) mod tests {
         assert!(archive.delete_message(chat, "m3").expect("delete"));
         assert!(!archive.delete_message(chat, "m3").expect("delete"));
         assert!(archive.message(chat, "m3").expect("read").is_none());
+    }
+
+    #[test]
+    fn rekey_older_number_yields_to_newer_lid_intent() {
+        let archive = Archive::in_memory().expect("opens");
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 300)
+            .expect("intent");
+        archive
+            .queue_chat_sync("55@s.whatsapp.net", "archived", false, 100)
+            .expect("intent");
+        assert!(
+            archive
+                .rekey_chat("1@lid", "55@s.whatsapp.net")
+                .expect("rekey")
+        );
+        let (value, updated, _) = archive
+            .queued_chat_sync("55@s.whatsapp.net", "archived")
+            .expect("queue")
+            .expect("winner");
+        assert!(value);
+        assert_eq!(updated, 300);
+        assert!(
+            archive
+                .queued_chat_sync("1@lid", "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rekey_aborted_insert_keeps_the_origin_intent() {
+        let archive = Archive::in_memory().expect("opens");
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 100)
+            .expect("intent");
+        archive
+            .connection
+            .execute_batch("CREATE TRIGGER sync_abort BEFORE INSERT ON chat_sync_queue BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .expect("trigger");
+        assert!(archive.rekey_chat("1@lid", "55@s.whatsapp.net").is_err());
+        archive
+            .connection
+            .execute_batch("DROP TRIGGER sync_abort")
+            .expect("cleanup");
+        let (value, updated, _) = archive
+            .queued_chat_sync("1@lid", "archived")
+            .expect("queue")
+            .expect("origin kept");
+        assert!(value);
+        assert_eq!(updated, 100);
+        assert!(
+            archive
+                .queued_chat_sync("55@s.whatsapp.net", "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn complete_chat_sync_rolls_back_when_order_write_fails() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("c", "C").expect("chat");
+        let rev = archive
+            .queue_chat_sync("c", "archived", true, 100)
+            .expect("intent");
+        archive
+            .connection
+            .execute_batch("CREATE TRIGGER order_abort BEFORE INSERT ON chat_sync_order BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .expect("trigger");
+        assert!(archive.complete_chat_sync("c", rev).is_err());
+        archive
+            .connection
+            .execute_batch("DROP TRIGGER order_abort")
+            .expect("cleanup");
+        assert!(
+            archive
+                .queued_chat_sync("c", "archived")
+                .expect("queue")
+                .is_some(),
+            "intent kept"
+        );
+        assert!(
+            archive.sync_order("c").expect("order").is_none(),
+            "no half-persisted order"
+        );
+        // Recovery on the same store converges.
+        assert!(archive.complete_chat_sync("c", rev).is_ok());
+        assert_eq!(archive.sync_order("c").expect("order"), Some((100, true)));
+    }
+
+    #[test]
+    fn rekey_without_queue_reconciles_flag_to_newest_order() {
+        // Each row: old flag and time, new flag and time, expected winner.
+        for (old_archived, old_ms, new_archived, new_ms, expected) in [
+            (true, 100, false, 200, false),
+            (true, 200, false, 100, true),
+        ] {
+            let archive = Archive::in_memory().expect("opens");
+            archive.ensure_chat("1@lid", "Old").expect("chat");
+            archive
+                .ensure_chat("55@s.whatsapp.net", "New")
+                .expect("chat");
+            archive
+                .apply_remote_archive("1@lid", old_archived, old_ms)
+                .expect("order");
+            archive
+                .apply_remote_archive("55@s.whatsapp.net", new_archived, new_ms)
+                .expect("order");
+            assert!(
+                archive
+                    .rekey_chat("1@lid", "55@s.whatsapp.net")
+                    .expect("rekey")
+            );
+            assert_eq!(
+                archive
+                    .chat("55@s.whatsapp.net")
+                    .expect("read")
+                    .expect("row")
+                    .archived,
+                expected,
+                "newest accepted state wins without intent"
+            );
+            assert!(
+                archive
+                    .queued_chat_sync("55@s.whatsapp.net", "archived")
+                    .expect("queue")
+                    .is_none(),
+                "no intent invented"
+            );
+        }
+    }
+
+    #[test]
+    fn rekey_newer_order_beats_stale_intent() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("1@lid", "Old").expect("chat");
+        archive
+            .ensure_chat("55@s.whatsapp.net", "New")
+            .expect("chat");
+        // Accepted unarchive at T300 outranks a stale archive intent at T100.
+        archive
+            .apply_remote_archive("55@s.whatsapp.net", false, 300)
+            .expect("order");
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 100)
+            .expect("intent");
+        assert!(
+            archive
+                .rekey_chat("1@lid", "55@s.whatsapp.net")
+                .expect("rekey")
+        );
+        assert!(
+            !archive
+                .chat("55@s.whatsapp.net")
+                .expect("read")
+                .expect("row")
+                .archived,
+            "stale intent cannot flip the newer accepted state"
+        );
+        assert_eq!(
+            archive.sync_order("55@s.whatsapp.net").expect("order"),
+            Some((300, false))
+        );
+    }
+    #[test]
+    fn sync_rev_starts_above_legacy_queued_rows() {
+        let archive = Archive::in_memory().expect("opens");
+        archive
+            .connection
+            .execute("INSERT INTO chat_sync_queue (chat, setting, value, updated_ms, rev) VALUES ('c', 'archived', 1, 50, 7)", [])
+            .expect("legacy row");
+        assert_eq!(archive.alloc_sync_rev().expect("counter"), 8);
+    }
+
+    #[test]
+    fn sync_rev_never_repeats_after_clear() {
+        let archive = Archive::in_memory().expect("opens");
+        let first = archive
+            .queue_chat_sync("c", "archived", true, 1)
+            .expect("intent");
+        archive.clear_chat_sync("c", "archived").expect("clears");
+        let second = archive
+            .queue_chat_sync("c", "archived", false, 2)
+            .expect("intent");
+        assert!(
+            second > first,
+            "cleared rows must not free revisions: {first} then {second}"
+        );
+        archive
+            .clear_chat_sync_if_rev("c", "archived", first)
+            .expect("stale clear");
+        assert!(
+            archive
+                .queued_chat_sync("c", "archived")
+                .expect("queue")
+                .is_some(),
+            "exact equality only"
+        );
+    }
+
+    #[test]
+    fn rekey_reconciles_the_flag_and_condemns_survivors() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("1@lid", "Old").expect("chat");
+        archive
+            .insert_message(&message("1@lid", "m1", 100, false), None)
+            .expect("insert");
+        // Stale archived flag under the old id must not leak through the merge.
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 100)
+            .expect("intent");
+        archive
+            .ensure_chat("55@s.whatsapp.net", "New")
+            .expect("chat");
+        archive
+            .insert_message(&message("55@s.whatsapp.net", "m2", 200, false), None)
+            .expect("insert");
+        archive
+            .queue_chat_sync("55@s.whatsapp.net", "archived", false, 200)
+            .expect("intent");
+        // A row condemned by a tombstone from the other id must not survive.
+        archive
+            .tombstone_message("1@lid", "m2", 50)
+            .expect("tombstone");
+        assert!(
+            archive
+                .rekey_chat("1@lid", "55@s.whatsapp.net")
+                .expect("rekey")
+        );
+        assert!(
+            !archive
+                .chat("55@s.whatsapp.net")
+                .expect("read")
+                .expect("row")
+                .archived,
+            "winning intent outranks the OR merge"
+        );
+        assert!(
+            archive
+                .message("55@s.whatsapp.net", "m1")
+                .expect("read")
+                .is_some()
+        );
+        assert!(
+            archive
+                .message("55@s.whatsapp.net", "m2")
+                .expect("read")
+                .is_none()
+        );
+        assert_eq!(
+            archive
+                .chat("55@s.whatsapp.net")
+                .expect("read")
+                .expect("row")
+                .unread,
+            0
+        );
+    }
+
+    #[test]
+    fn rekey_rolls_back_when_protection_copy_fails() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("1@lid", "Old").expect("chat");
+        archive
+            .insert_message(&message("1@lid", "m1", 100, false), None)
+            .expect("insert");
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 100)
+            .expect("intent");
+        archive
+            .tombstone_message("1@lid", "m2", 50)
+            .expect("tombstone");
+        // Fail after the message, receipt, and removal steps already ran.
+        archive
+            .drop_table_for_test("chat_sync_queue")
+            .expect("sabotage");
+        assert!(archive.rekey_chat("1@lid", "55@s.whatsapp.net").is_err());
+        // Nothing moved: rows, tombstones, and intents are all still home.
+        assert!(archive.message("1@lid", "m1").expect("read").is_some());
+        assert!(archive.is_tombstoned("1@lid", "m2").expect("tombstone"));
+        assert!(
+            archive.chat("1@lid").expect("read").is_some(),
+            "chat row unmoved"
+        );
+    }
+
+    #[test]
+    fn rekey_moves_tombstones_and_sync_intents() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("1@lid", "Old").expect("chat");
+        archive
+            .insert_message(&message("1@lid", "m1", 100, false), None)
+            .expect("insert");
+        let (deleted, _) = archive
+            .delete_message_for_me("1@lid", "m1", 50)
+            .expect("deletes");
+        assert!(deleted);
+        archive
+            .queue_chat_sync("1@lid", "archived", true, 100)
+            .expect("intent");
+        archive
+            .ensure_chat("55@s.whatsapp.net", "New")
+            .expect("chat");
+        // A newer intent already filed under the number wins the merge.
+        archive
+            .queue_chat_sync("55@s.whatsapp.net", "archived", false, 200)
+            .expect("intent");
+        // A lone intent moves with a fresh revision.
+        archive
+            .queue_chat_sync("2@lid", "archived", true, 150)
+            .expect("intent");
+        assert!(
+            archive
+                .rekey_chat("1@lid", "55@s.whatsapp.net")
+                .expect("rekey")
+        );
+        assert!(!archive.is_tombstoned("1@lid", "m1").expect("moved"));
+        assert!(
+            archive
+                .is_tombstoned("55@s.whatsapp.net", "m1")
+                .expect("moved")
+        );
+        archive
+            .insert_message(&message("55@s.whatsapp.net", "m1", 100, false), None)
+            .expect("replay");
+        assert!(
+            archive
+                .message("55@s.whatsapp.net", "m1")
+                .expect("read")
+                .is_none()
+        );
+        let (value, updated, _) = archive
+            .queued_chat_sync("55@s.whatsapp.net", "archived")
+            .expect("queue")
+            .expect("intent");
+        assert!(!value);
+        assert_eq!(updated, 200);
+        assert!(
+            archive
+                .rekey_chat("2@lid", "66@s.whatsapp.net")
+                .expect("rekey")
+        );
+        let (value, _, rev) = archive
+            .queued_chat_sync("66@s.whatsapp.net", "archived")
+            .expect("queue")
+            .expect("intent");
+        assert!(value);
+        assert!(rev >= 4, "moved intent takes a fresh revision, got {rev}");
+        assert!(
+            archive
+                .queued_chat_sync("2@lid", "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn queue_failure_leaves_no_partial_archive_state() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("c", "C").expect("chat");
+        archive
+            .connection
+            .execute_batch("PRAGMA query_only = ON")
+            .expect("pragma");
+        assert!(archive.set_archived_queued("c", true, 1).is_err());
+        archive
+            .connection
+            .execute_batch("PRAGMA query_only = OFF")
+            .expect("pragma");
+        // Neither the flag nor the intent survived the failed transaction.
+        assert!(!archive.chat("c").expect("read").expect("row").archived);
+        assert!(
+            archive
+                .queued_chat_sync("c", "archived")
+                .expect("read")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn chat_sync_intents_keep_only_the_newest() {
+        let archive = Archive::in_memory().expect("opens");
+        assert!(archive.pending_chat_syncs().expect("reads").is_empty());
+        archive
+            .queue_chat_sync("c", "archived", true, 100)
+            .expect("queues");
+        archive
+            .queue_chat_sync("c", "archived", false, 200)
+            .expect("replaces");
+        assert_eq!(
+            archive.queued_chat_sync("c", "archived").expect("reads"),
+            Some((false, 200, 2))
+        );
+        assert_eq!(archive.pending_chat_syncs().expect("reads").len(), 1);
+        archive.clear_chat_sync("c", "archived").expect("clears");
+        assert!(
+            archive
+                .queued_chat_sync("c", "archived")
+                .expect("reads")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn delete_for_me_tombstones_against_replay() {
+        let root = tempfile::tempdir().unwrap();
+        let shared = root.path().join("shared.mp4");
+        let lone = root.path().join("lone.mp4");
+        std::fs::write(&shared, b"bytes").unwrap();
+        std::fs::write(&lone, b"bytes").unwrap();
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("chat", "Chat").expect("chat");
+        archive
+            .insert_message(&video_message("chat", "m1", None, &shared), None)
+            .expect("insert");
+        archive
+            .insert_message(&video_message("chat", "m2", None, &shared), None)
+            .expect("insert");
+        archive
+            .insert_message(&video_message("chat", "m3", None, &lone), None)
+            .expect("insert");
+        let (deleted, media) = archive
+            .delete_message_for_me("chat", "m1", 50)
+            .expect("deletes");
+        assert!(deleted);
+        assert_eq!(media, vec![shared.clone()]);
+        assert!(archive.message("chat", "m1").expect("read").is_none());
+        // A late replay of the same id stays gone; the survivor still files.
+        archive
+            .insert_message(&video_message("chat", "m1", None, &shared), None)
+            .expect("replay");
+        assert!(archive.message("chat", "m1").expect("read").is_none());
+        assert!(archive.message("chat", "m2").expect("read").is_some());
+        // An unknown id tombstones quietly so a delete that arrived first still wins.
+        let (deleted, _) = archive
+            .delete_message_for_me("chat", "mx", 60)
+            .expect("tombstones");
+        assert!(!deleted);
+        archive
+            .insert_message(&video_message("chat", "mx", None, &shared), None)
+            .expect("replay");
+        assert!(archive.message("chat", "mx").expect("read").is_none());
+        let (deleted, media) = archive
+            .delete_message_for_me("chat", "m3", 70)
+            .expect("deletes");
+        assert!(deleted);
+        assert_eq!(media, vec![lone]);
     }
 
     #[test]

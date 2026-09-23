@@ -2,6 +2,300 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.61] - 2026-09-23
+
+### Changed
+
+- Prepare an opt-in test release of the accumulated desktop fixes. Release
+  candidate tags publish as prereleases without replacing the stable release.
+- Windows release candidates keep a numeric executable version while displaying
+  the candidate suffix in the installer. Align the crate version with VERSION.
+- Isolate worker test directories so parallel avatar and cache fixtures cannot
+  reuse each other's files.
+- Phone synchronization, installation rollback and cross-platform runtime
+  validation remain incomplete; this release is for testing, not stable approval.
+
+## [1.0.60] - 2026-09-23
+
+### Fixed
+
+- Agreeing phone echoes during a flight now move the accepted order forward,
+  so a delayed older echo can never flip the chat back afterwards.
+- Two archive tasks keep their own identity across a privacy-id migration;
+  each completion settles exactly its revision and no third task jumps ahead.
+- Local completion records its order marker and clears its intent in one
+  transaction, with a visible error and retry instead of a half-persisted
+  conclusion.
+- Migration reconciles the archived flag with the newest of the surviving
+  intent and the accepted order, instead of the merged flag or any queue
+  alone.
+
+## [1.0.59] - 2026-09-23
+
+### Fixed
+
+- Archive dispatch reports started tasks only, with a global flight ceiling;
+  spent budgets never starve fresh chats and explicit intents reopen them.
+- Newer phone changes applied mid-flight survive stale completions; old echoes
+  are rejected against the persisted accepted order, restarts included.
+- Identity migration transfers the live task instead of racing it, ties break
+  by queue order, and aborted writes keep the origin intent with full rollback.
+
+## [1.0.58] - 2026-09-23
+
+### Fixed
+
+- Archive sync dispatches only started tasks against the round cap, so spent
+  intents never starve fresh chats; one central decision covers every caller.
+- Simultaneous archive flights are bounded globally; explicit intents bypass
+  backoff deliberately while the tick respects it.
+- Newer phone changes applied mid-flight survive the stale completion; stale
+  echoes after cleanup are ignored via recorded remote timestamps.
+- Migration budgets ride with winning intent revisions; ties break by queue
+  order and aborts keep the origin intent with full rollback.
+- Revisions start above legacy queued rows on upgrade.
+
+## [1.0.57] - 2026-09-22
+
+### Fixed
+
+- Archive intents carry persistent revisions that survive clears, with exact
+  confirmation and in-flight echo handling; one revision flies per chat.
+- Sync retries run on a bounded tick with backoff, per-round dispatch cap, and
+  a spent budget that only explicit intents reopen.
+- Privacy-id migration reconciles the archived flag, deletes condemned rows,
+  moves tombstones and intents atomically, and retries failed migrations.
+- Save failures repaint from storage truth and warn instead of diverging.
+
+## [1.0.56] - 2026-09-22
+
+### Fixed
+
+- Archive sync now concludes by revision: a late success cannot erase a newer
+  intent, an old failure never spends the new intent budget, and one revision
+  flies per chat.
+- Unconfirmed archive intents retry on a bounded backoff tick while connected,
+  resume after restart, and surface one visible error instead of stalling quiet.
+- Deleted-for-me replays stay out of bubbles, unread counts, and notifications,
+  not just out of storage.
+- Tombstones and sync intents migrate across privacy-id rekeys, with newer-wins
+  merges and fresh revisions.
+- Archive flag and sync intent persist in one transaction, with failures
+  reported instead of half-applied.
+
+## [1.0.55] - 2026-09-22
+
+### Fixed
+
+- Archive and unarchive now survive offline clicks: the intent is queued,
+  flushed on reconnect, and a visible error appears after repeated failures
+  instead of diverging silently. Newer local intents outrank older remote
+  echoes, and agreeing echoes converge.
+
+- Messages deleted for me on the phone now vanish in ZapExt too: single-row
+  removal with tombstones against replay, shared files kept while referenced,
+  and the open conversation notified.
+
+## [1.0.54] - 2026-09-22
+
+### Fixed
+
+- Demo presentation stays on the fork: the tour opens on the fork
+  repository, the sample chat uses a neutral reserved example link
+  preview, and the simulated update advertises the fork releases page.
+  A detached backend drops update commands, so the demo can never
+  fetch or install a real update.
+
+## [1.0.53] - 2026-09-22
+
+### Fixed
+
+- Paste no longer depends on a press the integration never delivers: a
+  plain V press marks typing until its release, and a bare release
+  without typing behind it is its own gesture. Holding V while pressing
+  Ctrl attaches nothing. The arm advances inside the event fold, so a
+  Paste and its release in one frame count once.
+- A clear that must preserve starred messages deletes nothing, and the
+  reference policy is now single: message attachments, sticker favorites
+  and cataloged copies guard both direct removal and the startup sweep,
+  while interrupted publishes restore before sweeping and pending backups
+  stay protected. Damaged favorites abort cleanup instead of emptying it.
+- Images validate from disk with headers always, explicit decoder limits
+  and pixel budget, and full decode only when small. Test fixtures use
+  isolated folders.
+
+## [1.0.52] - 2026-09-22
+
+### Fixed
+
+- Paste gestures no longer depend on a Key press the integration never
+  delivers: a plain V press marks typing, Ctrl starts a new shortcut
+  epoch, and a bare release without typing behind it is its own gesture.
+  The arm advances inside the event fold, so a Paste and its release in
+  one frame count once. A clear that must preserve starred messages now
+  deletes nothing instead of destroying them. Reference-lookup failures
+  keep every file, and sticker favorites and cataloged copies join the
+  protected set. Images validate from disk with headers always and full
+  decode only when small, under explicit dimension caps. Interrupted
+  publishes recover their backup at startup before the cache sweep.
+
+## [1.0.51] - 2026-09-22
+
+### Fixed
+
+- Seeking to the very end of a video no longer reports the file as
+  undecodable: the target backs off one millisecond, the decoder always
+  emits the final sample, and an exhausted jump past the last picture
+  settles as the finished state. Replay from the end restarts playing.
+  New fixture tests cover pause/resume, silent clips, soundtrack
+  replacement on seek and switch, invalid files, and volume routing.
+  Voice speed keeps rodio resampling (pitch rises); the analysis for a
+  pitch-preserving WSOLA port lives in .local-roadmap.
+
+## [1.0.50] - 2026-09-22
+
+### Fixed
+
+- Thumbnail rebuilds are proven off the worker thread: a barrier-style
+  test holds two rebuilds inside the build step, keeps a third queued,
+  and still applies other commands meanwhile. A late avatar download
+  after give-up still shows, and the avatar fetch policy (absolute URLs
+  only, readable images only) is locked in tests. Newsletter metadata
+  picture fields stay unsupported: they are CDN direct paths needing
+  media-host auth the app does not negotiate.
+
+## [1.0.49] - 2026-09-22
+
+### Fixed
+
+- Attachment downloads stream into a temporary file instead of RAM: a
+  byte budget (declared length plus slack, 2 GiB ceiling) refuses
+  exorbitant streams mid-write, a total deadline covers download,
+  re-upload, and retry, and the file is published only after validation,
+  preserving the last valid copy on failure. Simultaneous requests for
+  the same file share one fetch, and expired references still trigger a
+  single phone re-upload, now detected by typed HTTP status first.
+
+## [1.0.48] - 2026-09-22
+
+### Added
+
+- Delete and Clear from a linked device now apply locally: a persisted
+  removal barrier drops only the range the phone knew, keeps newer
+  messages, and stops late history from resurrecting what was removed.
+  Replayed actions stay quiet, attachment files are deleted only when no
+  surviving message references them, and the interface closes a deleted
+  chat or reloads a cleared one. Starred filtering is not preserved:
+  clearing removes the range, documented as a limitation.
+
+## [1.0.47] - 2026-09-22
+
+### Fixed
+
+- Paste gestures are folded in delivery order with a Ctrl latch: a Ctrl+V
+  press opens image-only gestures so releasing Ctrl first no longer loses
+  the paste, a release sharing its frame with the next Paste still sees
+  the armed flag instead of duplicating, and the Paste origin comes from
+  the Ctrl state at Paste time rather than the end of the frame. Plain V
+  typing never attaches, and focus loss dissolves a pending gesture.
+
+## [1.0.46] - 2026-09-22
+
+### Fixed
+
+- Paste gestures are told apart by origin instead of image contents: a
+  keyboard Paste arms exactly its own release, a menu paste arms none,
+  and a release with nothing armed is its own gesture. Two quick pastes
+  of the same picture attach twice, Paste plus its release attaches once,
+  menu then shortcut attaches twice, and switching chats carries no
+  suppression over. Pure text, empty clipboard, search focus, and channel
+  refusal behave as before.
+
+## [1.0.45] - 2026-09-22
+
+### Fixed
+
+- Giving up on a profile picture no longer wipes the photo on screen:
+  the worker reports the cached picture when one is still stored and
+  reports absence only when there is truly nothing to show.
+- Thumbnail rebuilds moved off the worker thread: each rebuild runs as a
+  limited background task and reports back, so the worker keeps answering
+  other commands while slow stickers render.
+- Paste suppression now belongs to its gesture: the release of the staged
+  image ends it quietly, while a later paste with another image still
+  attaches. A menu paste no longer swallows the next Ctrl+V image.
+
+## [1.0.44] - 2026-09-21
+
+### Fixed
+
+- Image+text paste now handles the event the platform really delivers:
+  the integration consumes Ctrl+V presses that carry text and emits Paste
+  instead, so the takeover consumes the delivered Paste before the
+  composer sees it. A release-only fallback still stages once per gesture.
+- Avatar retries keep their failure count, deadline, and in-flight state
+  across ticks, backing off between tries and reporting absence after
+  three failures instead of retrying forever.
+- Thumbnail rebuilds report an explicit per-request result that the picker
+  applies: success repaints, failure parks the file without requeueing,
+  and the interface no longer polls the disk to infer completion.
+- Sends to unknown newsletters are refused by address, new recipients are
+  allowed only for direct and group chats, and a store failure denies
+  instead of permitting.
+
+## [1.0.43] - 2026-09-21
+
+### Fixed
+
+- Channel pictures no longer pass a relative reference to the HTTP client:
+  avatars download only from absolute HTTP(S) URLs, validate as readable
+  images before the cache is marked ready, and store atomically. Failures
+  retry later and keep the last good photo.
+- History sync without an archived flag keeps the stored state, and an
+  explicit value archives or unarchives. Group chunks without a name keep
+  the known subject instead of falling back to a generic name.
+- Channels no longer offer sending: the composer shows a channel notice
+  and every send path (text, files, voice, stickers, forwards, pastes,
+  recordings, drops) refuses without proven capability.
+- Pasting an image plus text stages only the attachment: the key press and
+  the textual paste of the same gesture are consumed when the image is
+  accepted. Plain text, search fields, and refused chats are untouched.
+  (Press-based only; audit found the integration consumes the press, so
+  1.0.44 handles the delivered Paste event instead.)
+
+## [1.0.42] - 2026-09-20
+
+### Fixed
+
+- Channel pictures now come from the channel's own metadata instead of
+  the contacts lookup: list tiles use the preview image and dialogs use
+  the full image, with initials kept when a channel has no picture.
+
+## [1.0.41] - 2026-09-20
+
+### Fixed
+
+- Broken sticker thumbnails now fall back to the original picture at once
+  and rebuild locally: the original file is never deleted, nothing is
+  downloaded again, and the fixed tile appears without restarting.
+
+## [1.0.40] - 2026-09-20
+
+### Fixed
+
+- Short conversations now sit near the composer: empty space stays above
+  the messages instead of between the last bubble and the reply box.
+- Rolling another panel no longer pulls the open conversation off its end:
+  only wheel and scrollbar gestures over the message list release the follow.
+
+## [1.0.39] - 2026-09-20
+
+### Fixed
+
+- The Archived row now follows the open tab: Channels no longer offers
+  archived chats when only normal chats are archived, and opening
+  Archived lists exactly the counted chats.
+
 ## [1.0.38] - 2026-09-20
 
 ### Fixed

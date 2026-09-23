@@ -1,6 +1,6 @@
 [package]
 name = "zapfast"
-version = "0.14.0"
+version = "1.0.61"
 authors = ["Vitor (ZapExt fork) <108148783+vitorhubdev@users.noreply.github.com>"]
 edition = "2024"
 rust-version = "1.98"

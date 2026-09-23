@@ -92,7 +92,8 @@ pub fn prepare(app: &mut App) {
         .get_mut(super::SAMPLES[0].id)
         .and_then(|chat| chat.message_mut("ada-link"))
     {
-        row.content = Content::text("The desktop app is ready! https://zapfast.rocks");
+        row.content =
+            Content::text("The desktop app is ready! https://github.com/vitorhubdev/zapfast-extra");
         row.thumbnail = None;
         let summary = row.summary();
         if let Some(last) = app.chats.first_mut().and_then(|chat| chat.last.as_mut()) {

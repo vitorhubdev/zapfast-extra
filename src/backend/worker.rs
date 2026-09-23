@@ -48,6 +48,62 @@ const SYNC_QUIET: Duration = Duration::from_secs(20);
 /// Profile-picture cache lifetime.
 const AVATAR_FRESH: Duration = Duration::from_secs(24 * 60 * 60);
 const AVATAR_MISS_FRESH: Duration = Duration::from_secs(5 * 60);
+/// Failed avatar tries before the worker stops retrying. Giving up reports
+/// the cached photo when one is still stored, or absence when there is not.
+const AVATAR_MAX_FAILURES: u32 = 3;
+
+/// Retry state of one deferred or failed profile-picture request. Attempts
+/// counts failed tries; the entry is removed only on success, absence, or
+/// give-up, never when a retry is dispatched.
+#[derive(Clone, Copy)]
+struct AvatarRetry {
+    attempts: u32,
+    next_retry: Instant,
+    in_flight: bool,
+}
+
+impl Default for AvatarRetry {
+    fn default() -> Self {
+        Self {
+            attempts: 0,
+            next_retry: Instant::now(),
+            in_flight: false,
+        }
+    }
+}
+
+/// What one avatar retry entry needs on a tick.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AvatarDue {
+    /// A try is already running or the deadline has not passed.
+    Wait,
+    /// Start another try.
+    Dispatch,
+    /// The failure cap is hit: report the kept photo or absence and drop
+    /// the entry.
+    GiveUp,
+}
+
+/// Decides one avatar retry entry without touching any state.
+fn avatar_due(retry: &AvatarRetry, now: Instant) -> AvatarDue {
+    if retry.in_flight || now < retry.next_retry {
+        AvatarDue::Wait
+    } else if retry.attempts >= AVATAR_MAX_FAILURES {
+        AvatarDue::GiveUp
+    } else {
+        AvatarDue::Dispatch
+    }
+}
+
+/// Wait before retrying a failed avatar lookup, by failure count.
+fn avatar_backoff(failures: u32) -> Duration {
+    match failures {
+        0 => Duration::ZERO,
+        1 => Duration::from_secs(30),
+        2 => Duration::from_secs(2 * 60),
+        _ => Duration::from_secs(10 * 60),
+    }
+}
 /// Phone history-request timeout.
 const PHONE_PATIENCE: Duration = Duration::from_secs(30);
 /// Phone history-request batch size.
@@ -85,6 +141,37 @@ const MEDIA_RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(8),
     Duration::from_secs(20),
 ];
+
+/// Retry wait while an archive intent stays queued without a client.
+const OFFLINE_SYNC_RETRY: Duration = Duration::from_secs(30);
+
+/// Bounds one pump tick across every chat.
+const MAX_SYNC_DISPATCH_PER_ROUND: usize = 4;
+
+/// Bounds simultaneous archive-sync flights across every chat. Direct
+/// callers share this ceiling with the pump through prepare_sync.
+const MAX_SYNC_IN_FLIGHT_TOTAL: usize = 8;
+
+/// A reserved archive-sync dispatch: decided centrally, then launched.
+#[derive(Debug, Clone)]
+struct SyncJob {
+    chat: ChatId,
+    archived: bool,
+    rev: i64,
+}
+
+/// Backoff between archive-sync attempts while the link stays up: 5 s, 15 s,
+/// 45 s, then 300 s up to the eighth failure. None stops scheduling: the
+/// queue survives for reconnects and fresh intents.
+fn retry_delay(attempts: u8) -> Option<Duration> {
+    match attempts {
+        1 => Some(Duration::from_secs(5)),
+        2 => Some(Duration::from_secs(15)),
+        3 => Some(Duration::from_secs(45)),
+        4..=8 => Some(Duration::from_secs(300)),
+        _ => None,
+    }
+}
 
 fn account_allows_receipts(
     settings: &whatsapp_rust::wacore::iq::privacy::PrivacySettingsResponse,
@@ -289,9 +376,17 @@ pub async fn run(
         sticker_downloads: HashSet::new(),
         sticker_give_up: HashSet::new(),
         download_retries: HashMap::new(),
+        sync_attempts: HashMap::new(),
+        sync_in_flight: HashMap::new(),
+        sync_aliases: HashMap::new(),
+        sync_retry_at: HashMap::new(),
+        #[cfg(any(test, feature = "demo"))]
+        sync_sink: None,
+        inflight_downloads: HashSet::new(),
         download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
         sticker_tries: HashMap::new(),
         thumb_tries: HashMap::new(),
+        thumb_heals: HashMap::new(),
         cache_swept: false,
         pdf: Arc::new(std::sync::Mutex::new(crate::pdf::Reader::default())),
         pdf_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -329,8 +424,10 @@ pub async fn run(
                 worker.emit_chats();
             }
             _ = tick.tick() => {
+                worker.pump_chat_sync();
                 worker.expire_older_requests();
                 worker.retry_avatars();
+                worker.pump_thumb_heals();
                 worker.pump_group_info();
                 worker.pump_read_sync();
                 worker.pump_poll_votes();
@@ -381,8 +478,8 @@ struct Worker {
     pending_older: HashMap<ChatId, (Instant, super::PageKey)>,
     /// Chats already notified about a phone-history timeout.
     older_warned: HashSet<ChatId>,
-    /// Deferred profile-picture requests and retry counts.
-    pending_avatars: HashMap<(String, bool), u32>,
+    /// Deferred profile-picture requests and their retry state.
+    pending_avatars: HashMap<(String, bool), AvatarRetry>,
     /// Active recent-sticker downloads by hash.
     sticker_fetches: HashSet<String>,
     /// Active chat-sticker downloads by chat and message id.
@@ -391,12 +488,36 @@ struct Worker {
     sticker_give_up: HashSet<(ChatId, String)>,
     /// Silent media retries per chat and message id.
     download_retries: HashMap<(ChatId, String), u32>,
+    /// Failed archive-sync rounds per chat and revision. A fresh user intent
+    /// drops every key of its chat; the fourth quiet failure of one revision
+    /// surfaces a visible error once.
+    sync_attempts: HashMap<(String, i64), u8>,
+    /// Test transport: accepted dispatches land here instead of spawning a task.
+    #[cfg(any(test, feature = "demo"))]
+    sync_sink: Option<std::sync::mpsc::Sender<SyncJob>>,
+    /// Archive-sync tasks currently in flight, keyed by their own chat and
+    /// revision. Two ids of one conversation keep two tasks across a
+    /// privacy-id migration; each completion settles exactly its revision,
+    /// and a new dispatch waits until none remain.
+    sync_in_flight: HashMap<(String, i64), ()>,
+    /// Old chat id to canonical id while its dispatched tasks still fly.
+    /// Completions resolve through it without consuming it, so a second
+    /// task reporting under the same old id still finds its way home.
+    sync_aliases: HashMap<String, String>,
+    /// Next retry time per chat for unconfirmed archive intents.
+    sync_retry_at: HashMap<String, Instant>,
+    /// Downloads already running per chat and message id. A second request
+    /// for the same file does not spawn another fetch; the first
+    /// completion notifies the bubble through the Downloaded command.
+    inflight_downloads: HashSet<(ChatId, String)>,
     /// Limits how many downloads run at once, media and stickers alike.
     download_slots: Arc<tokio::sync::Semaphore>,
     /// Failed sticker fetches by hash, so a hopeless one is left alone.
     sticker_tries: HashMap<String, u32>,
     /// Sticker previews that failed to build, so they are not retried forever.
     thumb_tries: HashMap<PathBuf, u32>,
+    /// Requested thumbnail rebuilds with their retry state.
+    thumb_heals: HashMap<PathBuf, ThumbHeal>,
     /// Whether the app's own cache folders were swept this run.
     cache_swept: bool,
     /// The PDF the viewer has open, kept parsed between pages.
@@ -418,7 +539,8 @@ struct ParsedChat {
     id: String,
     name: Option<String>,
     unread: Option<u32>,
-    archived: bool,
+    /// Outer None means the history chunk omitted the archived flag.
+    archived: Option<bool>,
     pinned_at: Option<i64>,
     /// Outer None means the history chunk omitted mute metadata.
     muted_until: Option<Option<i64>>,
@@ -460,6 +582,49 @@ struct ParsedMessage {
     poll_votes: Vec<wa::PollUpdate>,
 }
 
+/// Blocking byte fetcher behind avatar downloads, injectable in tests.
+type AvatarFetch = std::sync::Arc<dyn Fn(&str) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// Rebuild state of one requested sticker thumbnail. Attempts counts failed
+/// rebuilds; the entry lives until success, give-up, or logout.
+struct ThumbHeal {
+    attempts: u32,
+    next_retry: Instant,
+    in_flight: bool,
+}
+
+/// Failed thumbnail rebuilds before the worker reports failure.
+const THUMB_HEAL_MAX_FAILURES: u32 = 3;
+
+/// Thumbnail rebuilds running at once. Each rebuild reads, decodes, and
+/// encodes on a blocking thread; the cap keeps a sticker flood from
+/// starving the worker that answers every other command.
+const THUMB_HEAL_SLOTS: usize = 2;
+
+/// Wait before retrying a failed thumbnail rebuild, by failure count.
+fn thumb_heal_backoff(failures: u32) -> Duration {
+    match failures {
+        0 => Duration::ZERO,
+        1 => Duration::from_secs(10),
+        2 => Duration::from_secs(60),
+        _ => Duration::from_secs(5 * 60),
+    }
+}
+
+/// Whether a picture reference may go to a plain HTTP client: only absolute
+/// HTTP(S) URLs. Relative CDN direct paths are refused without touching the
+/// network.
+fn is_fetchable_avatar_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
+}
+
+/// Whether downloaded bytes may become the cached avatar: non-empty and
+/// decoding as an image.
+fn validate_avatar_bytes(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && image::load_from_memory(bytes).is_ok()
+}
+
 impl Worker {
     fn ephemeral_expiration(&self, chat: &str) -> Option<u32> {
         self.archive
@@ -484,6 +649,131 @@ impl Worker {
     fn emit(&self, event: Event) {
         let _ = self.events.send(event);
         self.waker.wake();
+    }
+
+    /// Applies one confirmed remote archive state transactionally: flag, order
+    /// marker, and intent cleanup persist together. Budget maps and UI update
+    /// only after commit; on error the queue stays for recovery and a warning
+    /// shows instead of a phantom acceptance.
+    fn accept_remote_archive(&mut self, chat: &str, remote: bool, remote_ms: i64) {
+        match self.archive.apply_remote_archive(chat, remote, remote_ms) {
+            Ok(()) => {
+                self.purge_sync_budget(chat);
+                self.emit_chat(chat);
+            }
+            Err(error) => {
+                log::warn!("could not apply a remote archive state: {error}");
+                self.emit(Event::Error(
+                    "Could not apply the archive change.".to_owned(),
+                ));
+            }
+        }
+    }
+
+    /// Sends one queued archive intent, explicit signals only. Returns whether
+    /// a task started. The tick uses the clock-controlled variant instead.
+    fn push_archive_sync(&mut self, chat: &str) -> bool {
+        self.push_archive_sync_at(chat, Instant::now(), true)
+    }
+
+    fn push_archive_sync_at(&mut self, chat: &str, now: Instant, force: bool) -> bool {
+        let job = self.prepare_sync(chat, now, force);
+        self.launch_sync(job, now)
+    }
+
+    /// Central dispatch decision for every caller: queued revision, one task
+    /// per chat, intent budget, deadline unless forced, and a global ceiling
+    /// on simultaneous flights. Reserves the winner in flight without sending.
+    fn prepare_sync(&mut self, chat: &str, now: Instant, force: bool) -> Option<SyncJob> {
+        let Ok(Some((archived, _, rev))) = self.archive.queued_chat_sync(chat, "archived") else {
+            return None;
+        };
+        if self.sync_in_flight.keys().any(|(id, _)| id == chat) {
+            return None;
+        }
+        if !self.sync_budget_open(chat, rev) {
+            return None;
+        }
+        if !force {
+            let due = self.sync_retry_at.get(chat).is_none_or(|at| *at <= now);
+            if !due {
+                return None;
+            }
+        }
+        if self.sync_in_flight.len() >= MAX_SYNC_IN_FLIGHT_TOTAL {
+            return None;
+        }
+        self.sync_in_flight.insert((chat.to_owned(), rev), ());
+        Some(SyncJob {
+            chat: chat.to_owned(),
+            archived,
+            rev,
+        })
+    }
+
+    /// Runs a reserved job: spawns the mutation, or defers offline with a
+    /// scheduled retry. Only a started task counts toward the round cap.
+    fn launch_sync(&mut self, job: Option<SyncJob>, now: Instant) -> bool {
+        let Some(job) = job else {
+            return false;
+        };
+        // Test transport: count the accepted dispatch without spawning.
+        #[cfg(any(test, feature = "demo"))]
+        if let Some(sink) = &self.sync_sink {
+            let _ = sink.send(job);
+            return true;
+        }
+        let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&job.chat)) else {
+            self.sync_in_flight.remove(&(job.chat.clone(), job.rev));
+            self.sync_retry_at
+                .insert(job.chat, now + OFFLINE_SYNC_RETRY);
+            return false;
+        };
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = if job.archived {
+                client.chat_actions().archive_chat(&jid, None).await
+            } else {
+                client.chat_actions().unarchive_chat(&jid, None).await
+            };
+            if let Err(error) = &result {
+                log::warn!("an archive change did not reach the phone: {error}");
+            }
+            let _ = commands.send(Command::ChatSyncFlushed {
+                chat: job.chat,
+                rev: job.rev,
+                ok: result.is_ok(),
+            });
+        });
+        true
+    }
+
+    /// Whether another attempt may fly for this revision: nine failures spend
+    /// the budget until the next explicit user intent resets it.
+    fn sync_budget_open(&self, chat: &str, rev: i64) -> bool {
+        self.sync_attempts
+            .get(&(chat.to_owned(), rev))
+            .is_none_or(|attempts| *attempts < 9)
+    }
+
+    fn pump_chat_sync(&mut self) {
+        self.pump_chat_sync_at(Instant::now())
+    }
+
+    fn pump_chat_sync_at(&mut self, now: Instant) {
+        let pending = self.archive.pending_chat_syncs().unwrap_or_default();
+        let mut dispatched = 0;
+        for (chat, setting) in pending {
+            if setting != "archived" {
+                continue;
+            }
+            if self.push_archive_sync_at(&chat, now, false) {
+                dispatched += 1;
+                if dispatched >= MAX_SYNC_DISPATCH_PER_ROUND {
+                    break;
+                }
+            }
+        }
     }
 
     /// Syncs a chat setting to the phone without blocking the worker.
@@ -795,16 +1085,80 @@ impl Worker {
         }
         // Rows filed before this mapping was known keep the old id. Moving
         // them now keeps the sidebar and the open chat reading one id.
-        if self
+        match self
             .archive
             .rekey_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))
-            .unwrap_or(false)
         {
-            log::info!("chat {pn} re-filed under its phone number");
-            changed = true;
+            Ok(true) => {
+                log::info!("chat {pn} re-filed under its phone number");
+                self.adopt_rekeyed_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"));
+                changed = true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("could not re-file chat {pn}: {error}; will retry");
+                // Keep the retry path open: without the mapping the next
+                // learn repeats the migration instead of skipping it.
+                self.lid_to_pn.remove(lid);
+            }
         }
         if changed {
             self.emit_chats();
+        }
+    }
+
+    /// Drops every attempt counter of a chat whose intent is gone, however it
+    /// went: converged echo, superseding phone state, or fresh user intent.
+    fn purge_sync_budget(&mut self, chat: &str) {
+        self.sync_attempts.retain(|(id, _), _| id != chat);
+    }
+
+    /// Moves sync bookkeeping across a privacy-id migration. A task still
+    /// flying for the old id keeps flying under the canonical id instead of
+    /// racing a second dispatch: its completion settles the survivor.
+    fn adopt_rekeyed_chat(&mut self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        // Every task keeps its own identity under the canonical id: two
+        // pre-existing flights stay two, the global ceiling keeps counting
+        // real tasks, and each completion settles exactly its revision.
+        // Revisions never repeat, so no two tasks share one key.
+        let flying: Vec<i64> = self
+            .sync_in_flight
+            .keys()
+            .filter(|(id, _)| id == from)
+            .map(|(_, rev)| *rev)
+            .collect();
+        for rev in flying.iter() {
+            self.sync_in_flight.remove(&(from.to_owned(), *rev));
+            self.sync_in_flight.insert((to.to_owned(), *rev), ());
+        }
+        if !flying.is_empty() {
+            self.sync_aliases.insert(from.to_owned(), to.to_owned());
+        }
+        // Budgets ride with revisions, so nothing transfers: the moved intent
+        // takes a fresh revision on write and starts with a clean budget. Only
+        // dead keys are pruned here.
+        self.sync_attempts.retain(|(id, _), _| id != from);
+        let survived = self
+            .archive
+            .queued_chat_sync(to, "archived")
+            .ok()
+            .flatten()
+            .is_some();
+        if survived {
+            if !self.sync_retry_at.contains_key(to) {
+                if let Some(at) = self.sync_retry_at.remove(from) {
+                    self.sync_retry_at.insert(to.to_owned(), at);
+                }
+            } else {
+                self.sync_retry_at.remove(from);
+            }
+            // Not a fresh click: respect the inherited deadline like the tick.
+            self.push_archive_sync_at(to, Instant::now(), false);
+        } else {
+            self.sync_retry_at.remove(from);
         }
     }
 
@@ -1032,6 +1386,13 @@ impl Worker {
             let Some(id) = self.group_info_queue.pop_front() else {
                 return;
             };
+            // A late failure can requeue a group deleted in the meantime.
+            if self.archive.removal_point(&id).ok().flatten().is_some()
+                && self.archive.chat(&id).ok().flatten().is_none()
+            {
+                self.group_info_requested.remove(&id);
+                continue;
+            }
             self.query_group_info(&id);
         }
     }
@@ -1186,6 +1547,9 @@ impl Worker {
                 self.poll_history.reconnect(Instant::now());
                 let _ = self.archive.retry_poll_votes();
                 self.pump_poll_votes();
+                // Reconcile archive intents the phone never confirmed, bounded
+                // per round like every other pump caller.
+                self.pump_chat_sync();
                 if let Some(client) = self.client.clone() {
                     let me = self.me_pn.clone().and_then(|pn| Self::jid_of(&pn));
                     let commands = self.commands.clone();
@@ -1312,10 +1676,59 @@ impl Worker {
             }
             E::ArchiveUpdate(update) => {
                 let chat = self.canonical(&update.jid);
-                let _ = self
+                let remote = update.action.archived.unwrap_or(false);
+                let remote_ms = update.timestamp.timestamp_millis();
+                let queued = self
                     .archive
-                    .set_archived(&chat, update.action.archived.unwrap_or(false));
-                self.emit_chat(&chat);
+                    .queued_chat_sync(&chat, "archived")
+                    .ok()
+                    .flatten();
+                let flying = self.sync_in_flight.keys().any(|(id, _)| id == &chat);
+                // Central staleness gate on the persisted accepted order: an
+                // older echo cannot flip the state back, with or without queue.
+                let seen = self
+                    .archive
+                    .sync_order(&chat)
+                    .ok()
+                    .flatten()
+                    .map_or(i64::MIN, |(ms, _)| ms);
+                if remote_ms <= seen {
+                    return;
+                }
+                match (queued, flying) {
+                    // Converged only with no older operation still flying: an echo
+                    // cannot confirm an intent it may predate.
+                    (Some((value, _, _)), false) if value == remote => {
+                        self.accept_remote_archive(&chat, remote, remote_ms);
+                    }
+                    // Our older operation still flies. Its echo (same value) is
+                    // quiet, but a newer genuine phone change is applied now so
+                    // the completion cannot silently keep the old state.
+                    (Some((value, updated, _)), true) if value != remote && remote_ms > updated => {
+                        self.accept_remote_archive(&chat, remote, remote_ms);
+                    }
+                    // An agreeing echo while our operation flies: remember its
+                    // order so a delayed older echo cannot win later. The queue
+                    // stays put and nothing repaints; the completion records
+                    // its own time with a newest-wins policy and can never
+                    // move the marker back.
+                    (Some((value, _, _)), true) if value == remote => {
+                        if let Err(error) = self.archive.record_sync_order(&chat, remote_ms, remote)
+                        {
+                            log::warn!("could not record an archive echo order: {error}");
+                        }
+                    }
+                    (Some(_), true) => {}
+                    // A newer local intent outranks this remote state: keep it,
+                    // flushing now only when no backoff is pending.
+                    (Some((_, updated_ms, _)), false) if updated_ms > remote_ms => {
+                        self.push_archive_sync_at(&chat, Instant::now(), false);
+                    }
+                    // The phone is newer: apply it and drop the stale intent.
+                    _ => {
+                        self.accept_remote_archive(&chat, remote, remote_ms);
+                    }
+                }
             }
             E::PinUpdate(update) => {
                 let chat = self.canonical(&update.jid);
@@ -1422,8 +1835,163 @@ impl Worker {
                 });
             }
             E::OfflineSyncCompleted(_) => self.emit_chats(),
+            E::DeleteChatUpdate(update) => {
+                log::info!("chat removal: received delete update");
+                let chat = self.canonical(&update.jid);
+                let through = removal_point(
+                    update
+                        .action
+                        .message_range
+                        .as_option()
+                        .and_then(|range| range.last_message_timestamp),
+                    update.timestamp.timestamp(),
+                );
+                self.remove_chat(&chat, through, update.delete_media);
+            }
+            E::ClearChatUpdate(update) => {
+                log::info!("chat removal: received clear update");
+                // The archive does not track which messages are starred, so
+                // a clear that must preserve them cannot run: deleting the
+                // range would destroy user-curated messages with no way
+                // back, and the barrier would block their replay. Skip the
+                // destructive step entirely instead of deleting more than
+                // asked. Full starred support (state, StarUpdate order,
+                // history snapshot) is a separate project.
+                if !update.delete_starred {
+                    log::info!("chat removal: keeping starred messages, clear skipped");
+                    return;
+                }
+                let chat = self.canonical(&update.jid);
+                let through = removal_point(
+                    update
+                        .action
+                        .message_range
+                        .as_option()
+                        .and_then(|range| range.last_message_timestamp),
+                    update.timestamp.timestamp(),
+                );
+                self.empty_chat(&chat, through, update.delete_media);
+            }
+            E::DeleteMessageForMeUpdate(update) => {
+                log::info!("chat removal: received delete-for-me update");
+                let chat = self.canonical(&update.chat_jid);
+                // Tombstone first: a late history replay of the same id must
+                // not resurrect the row this device just deleted.
+                let now = whatsapp_rust::wacore::time::now_millis();
+                match self
+                    .archive
+                    .delete_message_for_me(&chat, &update.message_id, now)
+                {
+                    Ok((deleted, media)) => {
+                        if !media.is_empty() {
+                            Self::drop_cached_media(&self.archive, &media);
+                        }
+                        if deleted {
+                            self.emit(Event::MessageDeleted {
+                                chat: chat.clone(),
+                                id: update.message_id.clone(),
+                            });
+                            self.emit_chat(&chat);
+                        }
+                    }
+                    Err(_error) => log::warn!("could not delete a message"),
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Deletes a chat and stops everything that could still bring it back.
+    fn remove_chat(&mut self, chat: &str, through: i64, delete_media: bool) {
+        // A group we left would otherwise keep being asked for metadata and
+        // log a failure for every attempt.
+        self.group_info_queue.retain(|id| id != chat);
+        self.group_info_retry.retain(|(_, id)| id != chat);
+        self.group_info_requested.remove(chat);
+        self.group_info_tries.remove(chat);
+        match self.archive.remove_chat_through(chat, through, true) {
+            Ok(removed) => {
+                self.pending_older.remove(chat);
+                if delete_media {
+                    Self::drop_cached_media(&self.archive, &removed.media);
+                }
+                // A replay that deletes nothing stays quiet; the barrier in
+                // the archive already guards against old history.
+                if removed.existed && removed.changed {
+                    if self.archive.chat(chat).ok().flatten().is_none() {
+                        log::info!("chat removal: deleted cached chat");
+                        self.emit(Event::ChatRemoved {
+                            chat: chat.to_owned(),
+                        });
+                    } else {
+                        log::info!("chat removal: retained messages newer than deletion boundary");
+                        self.emit(Event::ChatCleared {
+                            chat: chat.to_owned(),
+                            through,
+                        });
+                        self.emit_chat(chat);
+                    }
+                } else {
+                    log::info!("chat removal: nothing new to remove");
+                }
+            }
+            Err(_error) => log::warn!("could not delete a chat"),
+        }
+    }
+
+    /// Empties a chat while keeping it listed.
+    fn empty_chat(&mut self, chat: &str, through: i64, delete_media: bool) {
+        match self.archive.remove_chat_through(chat, through, false) {
+            Ok(removed) => {
+                self.pending_older.remove(chat);
+                if delete_media {
+                    Self::drop_cached_media(&self.archive, &removed.media);
+                }
+                if removed.existed && removed.changed {
+                    self.emit(Event::ChatCleared {
+                        chat: chat.to_owned(),
+                        through,
+                    });
+                    self.emit_chat(chat);
+                }
+            }
+            Err(_error) => log::warn!("could not clear a chat"),
+        }
+    }
+
+    /// Deletes removed attachment files that no surviving message references
+    /// anymore. Best-effort and synchronous: a handful of files at most, and
+    /// the last valid copy is never touched while still referenced.
+    fn drop_cached_media(archive: &Archive, media: &[std::path::PathBuf]) {
+        if media.is_empty() {
+            return;
+        }
+        // Unprovable means keep everything: a failed lookup or a damaged
+        // favorites list is not evidence of absence, and the startup cache
+        // sweep retries the orphans on a later run.
+        let Some(live) = archive.protected_files() else {
+            log::warn!("attachments: keeping removed files, references unprovable");
+            return;
+        };
+        for path in media {
+            if live.contains(path) {
+                continue;
+            }
+            if let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("could not remove a cached attachment");
+            }
+        }
+    }
+
+    /// Whether a message predates the deletion or clear of its chat.
+    fn predates_removal(&self, chat: &str, timestamp: i64) -> bool {
+        self.archive
+            .removal_point(chat)
+            .ok()
+            .flatten()
+            .is_some_and(|through| timestamp <= through)
     }
 
     fn remember_identity(&mut self, pn: Option<Jid>, lid: Option<Jid>, name: Option<String>) {
@@ -1470,6 +2038,7 @@ impl Worker {
         self.poll_history = Default::default();
         self.pending_older.clear();
         self.pending_avatars.clear();
+        self.thumb_heals.clear();
         self.me_pn = None;
         self.me_lid = None;
         self.me_name = None;
@@ -1833,6 +2402,20 @@ impl Worker {
     /// Archives a message and emits chat and row updates.
     fn store_message(&mut self, message: Message, raw: Option<Vec<u8>>, push_name: Option<&str>) {
         let chat = message.chat.clone();
+        if self.predates_removal(&chat, message.timestamp) {
+            // Deleted on a linked device: late history must not resurrect it.
+            return;
+        }
+        // Deleted for this device: the tombstone blocks the row below, and
+        // this guard blocks its unread count, bubble, and notification too.
+        match self.archive.is_tombstoned(&chat, &message.id) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("could not check a tombstone: {error}");
+                return;
+            }
+        }
         self.ensure_chat(&chat, if message.from_me { None } else { push_name });
         if let Some(push_name) = push_name
             && !message.from_me
@@ -2083,12 +2666,19 @@ impl Worker {
             let id = self.canonical_str(id);
             self.remember_push_name(&id, name);
         }
-        for chat in parsed.chats {
+        for mut chat in parsed.chats {
             let id = self.canonical_str(&chat.id);
             if id.ends_with("@broadcast") {
                 continue;
             }
             let existing = self.archive.chat(&id).ok().flatten();
+            if let Some(through) = self.archive.removal_point(&id).ok().flatten() {
+                chat.messages.retain(|message| message.timestamp > through);
+                // Nothing newer than the deletion: leave the chat deleted.
+                if existing.is_none() && chat.messages.is_empty() {
+                    continue;
+                }
+            }
             if metadata || existing.is_none() {
                 let name = match chat.name.filter(|name| !name.is_empty()) {
                     Some(name) if ChatKind::from_id(&id) == ChatKind::Group => name,
@@ -2111,12 +2701,24 @@ impl Worker {
                         }
                         self.chat_name(&id, None)
                     }
-                    None => self.chat_name(&id, None),
+                    // A chunk without a name keeps the stored subject for
+                    // chats that already exist, so a fallback never
+                    // overwrites a real name. New chats still get the best
+                    // name available; an explicit name always applies.
+                    None => existing
+                        .as_ref()
+                        .map(|row| row.name.clone())
+                        .unwrap_or_else(|| self.chat_name(&id, None)),
                 };
                 let mut row = Chat::new(id.clone(), name);
                 row.last_activity = chat.last_activity;
                 row.unread = existing.as_ref().map_or(0, |existing| existing.unread);
-                row.archived = chat.archived;
+                // An omitted archived flag keeps the stored state; an
+                // explicit value archives or unarchives. This mirrors how
+                // pin and mute already treat absent metadata.
+                row.archived = chat
+                    .archived
+                    .unwrap_or_else(|| existing.as_ref().is_some_and(|row| row.archived));
                 row.pinned_at = chat
                     .pinned_at
                     .unwrap_or_else(|| existing.as_ref().map_or(0, |row| row.pinned_at));
@@ -2127,16 +2729,14 @@ impl Worker {
                 row.muted_until = chat
                     .muted_until
                     .unwrap_or_else(|| existing.as_ref().and_then(|row| row.muted_until));
-                // A metadata chunk that omits the archived flag must not
-                // silently unarchive: pin and mute already keep local state
-                // when the chunk omits them, but archived has no such guard
-                // yet. Logged without identifiers until the phone's behavior
-                // here is confirmed; see CHANGELOG 1.0.7.
+                // An omitted archived flag now keeps the stored state (see
+                // above), so reaching here with a cleared flag means the
+                // phone explicitly unarchived. Logged without identifiers.
                 if metadata
+                    && chat.archived == Some(false)
                     && existing.as_ref().is_some_and(|known| known.archived)
-                    && !row.archived
                 {
-                    log::debug!("history sync cleared a locally archived chat flag");
+                    log::debug!("history sync explicitly unarchived a chat");
                 }
                 if let Err(error) = self.archive.upsert_chat(&row) {
                     log::warn!("could not store chat {id}: {error}");
@@ -2494,6 +3094,20 @@ impl Worker {
             }
             Command::Download { chat, message } => self.download(chat, message),
             Command::HealSticker { path } => self.heal_sticker(&path),
+            Command::HealStickerThumb { path } => self.heal_sticker_thumb(&path),
+            Command::ThumbHealFinished { path, ok } => {
+                if ok {
+                    self.thumb_heals.remove(&path);
+                    self.emit(Event::StickerThumb { path, ok: true });
+                } else if self.thumb_heals.contains_key(&path) {
+                    let attempts = self
+                        .thumb_heals
+                        .get(&path)
+                        .map(|heal| heal.attempts)
+                        .unwrap_or_default();
+                    self.fail_thumb_heal(path, attempts, Instant::now());
+                }
+            }
             Command::FetchAvatar { id, full } => self.fetch_avatar(id, full),
             Command::EditText {
                 chat,
@@ -2999,16 +3613,98 @@ impl Worker {
                 emoji,
             } => self.react(chat, message, emoji),
             Command::SetArchived(chat, archived) => {
-                let _ = self.archive.set_archived(&chat, archived);
-                self.emit_chat(&chat);
-                self.tell_phone(&chat, move |client, jid| async move {
-                    if archived {
-                        client.chat_actions().archive_chat(&jid, None).await
-                    } else {
-                        client.chat_actions().unarchive_chat(&jid, None).await
+                // State and intent persist together: the interface never shows
+                // an archive change the queue lost.
+                let now = whatsapp_rust::wacore::time::now_millis();
+                match self.archive.set_archived_queued(&chat, archived, now) {
+                    Ok(_) => {
+                        self.emit_chat(&chat);
+                        // A fresh intent reopens the budget for every revision.
+                        self.sync_attempts.retain(|(id, _), _| id != &chat);
+                        self.sync_retry_at.remove(&chat);
+                        self.push_archive_sync(&chat);
                     }
-                    .map_err(|error| error.to_string())
-                });
+                    Err(error) => {
+                        log::warn!("could not save an archive change: {error}");
+                        // Repaint from storage truth: the optimistic interface
+                        // change never persisted.
+                        self.emit_chat(&chat);
+                        self.emit(Event::Error(
+                            "Could not save the archive change.".to_owned(),
+                        ));
+                    }
+                }
+            }
+            Command::ChatSyncFlushed { chat, rev, ok } => {
+                // A migrated task reports under its old id: settle the survivor.
+                // The alias persists while either id may still report, so one
+                // completion never consumes another revision way home.
+                let chat = self.sync_aliases.get(&chat).cloned().unwrap_or(chat);
+                // A completion only settles the revision it attempted: older
+                // responses cannot erase or punish a newer intent.
+                if !self.sync_in_flight.contains_key(&(chat.clone(), rev)) {
+                    self.sync_attempts.remove(&(chat.clone(), rev));
+                    return;
+                }
+                self.sync_in_flight.remove(&(chat.clone(), rev));
+                if ok {
+                    // One transaction records the order marker and removes
+                    // exactly this intent: a crash between the two can never
+                    // leave a concluded intent with no persisted order. Later
+                    // echoes compare against the last accepted order, persisted.
+                    match self.archive.complete_chat_sync(&chat, rev) {
+                        Ok(_) => {
+                            self.sync_attempts.remove(&(chat.clone(), rev));
+                            self.sync_retry_at.remove(&chat);
+                            // A newer intent queued mid-flight goes out on its
+                            // own revision; a remaining flight still blocks it.
+                            self.push_archive_sync(&chat);
+                        }
+                        Err(error) => {
+                            log::warn!("could not record a completed archive sync: {error}");
+                            // The phone already applied the change, so the
+                            // intent stays queued and the tick resends the
+                            // same idempotent value instead of pretending
+                            // the conclusion persisted.
+                            self.sync_retry_at
+                                .insert(chat.clone(), Instant::now() + OFFLINE_SYNC_RETRY);
+                            self.emit_chat(&chat);
+                            self.emit(Event::Error(
+                                "Could not save the archive change.".to_owned(),
+                            ));
+                        }
+                    }
+                } else if self
+                    .archive
+                    .queued_chat_sync(&chat, "archived")
+                    .ok()
+                    .flatten()
+                    .is_some_and(|(_, _, current)| current > rev)
+                {
+                    // A superseded revision yields to the newer intent, which keeps
+                    // its own attempt budget.
+                    self.sync_attempts.remove(&(chat.clone(), rev));
+                    self.push_archive_sync(&chat);
+                } else {
+                    let attempts = {
+                        let counter = self.sync_attempts.entry((chat.clone(), rev)).or_insert(0);
+                        *counter = (*counter + 1).min(9);
+                        *counter
+                    };
+                    // Bounded and visible: after quiet rounds, say so once
+                    // instead of diverging silently. The tick retries quietly.
+                    if attempts == 4 {
+                        self.emit(Event::Error(
+                            "Could not sync the archive change to the phone.".to_owned(),
+                        ));
+                    }
+                    if let Some(delay) = retry_delay(attempts) {
+                        self.sync_retry_at
+                            .insert(chat.clone(), Instant::now() + delay);
+                    } else {
+                        self.sync_retry_at.remove(&chat);
+                    }
+                }
             }
             Command::SetPinned(chat, pinned) => {
                 let _ = self.archive.set_pinned(&chat, pinned);
@@ -3120,6 +3816,7 @@ impl Worker {
                 }
             }
             Command::Downloaded { chat, id, result } => {
+                self.inflight_downloads.remove(&(chat.clone(), id.clone()));
                 match &result {
                     Ok(path) => {
                         let _ = self.archive.set_media_path(&chat, &id, path);
@@ -3155,10 +3852,17 @@ impl Worker {
                 }
             }
             Command::AvatarFetched { id, full, path } => {
+                self.pending_avatars.remove(&(id.clone(), full));
                 self.emit(Event::Avatar { id, full, path })
             }
             Command::AvatarFailed { id, full } => {
-                *self.pending_avatars.entry((id, full)).or_insert(0) += 1;
+                // Count the failure and schedule the next try. The entry
+                // survives: clearing it here would restart the count and
+                // retry forever without ever reporting absence.
+                let retry = self.pending_avatars.entry((id, full)).or_default();
+                retry.attempts += 1;
+                retry.in_flight = false;
+                retry.next_retry = Instant::now() + avatar_backoff(retry.attempts);
             }
             Command::GroupRecipients {
                 chat,
@@ -3258,6 +3962,10 @@ impl Worker {
         quoting: Option<String>,
         mentions: Vec<String>,
     ) {
+        if !self.send_allowed(&chat) {
+            log::debug!("refusing text send without proven capability");
+            return;
+        }
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&chat)) else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
@@ -3302,7 +4010,46 @@ impl Worker {
         ));
     }
 
+    /// Whether an outgoing send may start for this chat. The address
+    /// decides first: newsletters have no proven send path whether or not
+    /// the archive knows them. Known chats follow the shared rule; new
+    /// recipients are allowed only for directly supported types. A store
+    /// failure denies rather than permits.
+    fn send_allowed(&self, chat: &str) -> bool {
+        if chat.ends_with("@newsletter") {
+            return false;
+        }
+        Self::decide_send(self.archive.chat(chat), chat)
+    }
+
+    /// Applies one archive lookup to the send guard: known chats follow the
+    /// shared rule, unknown chats only for supported types, and a store
+    /// failure denies rather than permits.
+    fn decide_send<E: std::fmt::Display>(lookup: Result<Option<Chat>, E>, chat: &str) -> bool {
+        match lookup {
+            Ok(Some(row)) => crate::model::can_send(&row),
+            Ok(None) => Self::send_allowed_unknown(chat),
+            Err(error) => {
+                log::debug!("send guard could not read chat: {error}");
+                false
+            }
+        }
+    }
+
+    /// Whether a send may start to a chat missing from the archive: only
+    /// direct chats and groups, the types the app can open and send to.
+    fn send_allowed_unknown(chat: &str) -> bool {
+        matches!(
+            crate::model::ChatKind::from_id(chat),
+            crate::model::ChatKind::Direct | crate::model::ChatKind::Group
+        )
+    }
+
     fn forward_message(&mut self, from_chat: ChatId, message_id: String, to_chat: ChatId) {
+        if !self.send_allowed(&to_chat) {
+            log::debug!("refusing forward without proven capability");
+            return;
+        }
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&to_chat)) else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
@@ -3617,6 +4364,31 @@ impl Worker {
         Ok(())
     }
 
+    /// Absolute ceiling for one attachment download. Declared lengths only
+    /// narrow this down; exceeding it is always an error with an explicit
+    /// message, never a silent new restriction: WhatsApp media stays far
+    /// below this bound.
+    const DOWNLOAD_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+    /// Slack over the declared plaintext length for framing overhead and
+    /// length lies in either direction.
+    const DOWNLOAD_LENGTH_SLACK: u64 = 1024 * 1024;
+    /// Total budget for one download including re-upload and retry. A
+    /// backstop against hanging forever, not a speed target.
+    const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+    /// Images at or below this size are fully decoded for validation;
+    /// larger ones are checked by header only (format, dimensions). A
+    /// full decode needs the whole file plus its bitmap in RAM, which no
+    /// download validation may demand unboundedly.
+    const IMAGE_FULL_DECODE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+    /// Largest image side the validator accepts, in pixels. Matches the
+    /// JPEG ceiling; phone pictures never come close.
+    const IMAGE_MAX_SIDE: u32 = 65535;
+    /// Largest pixel count the validator accepts. Below what the default
+    /// 512 MiB decoder allocation guard would still allow, so oversized
+    /// dimensions fail here first with a clear message.
+    const IMAGE_MAX_PIXELS: u64 = 100_000_000;
+
     fn download(&mut self, chat: ChatId, id: String) {
         let Some(client) = self.client.clone() else {
             self.emit(Event::Media {
@@ -3749,70 +4521,116 @@ impl Worker {
         let dir = self.dirs.media_cache_dir();
         let commands = self.commands.clone();
         let slots = self.download_slots.clone();
+        if !self.inflight_downloads.insert((chat.clone(), id.clone())) {
+            // Already fetching this file: the running task notifies the
+            // bubble when it finishes, so a second fetch would only
+            // duplicate the bytes on the wire.
+            return;
+        }
+        let limits = download_limits_for(downloadable.file_length());
+        let final_path = media_path(&dir, &chat, &id, &mime, file_name.as_deref());
+        let mut temp_os = final_path.clone().into_os_string();
+        temp_os.push(".part");
+        let temp_path = PathBuf::from(temp_os);
         tokio::spawn(async move {
             let _slot = slots.acquire_owned().await;
-            let keep = |bytes: Vec<u8>| {
-                let dir = dir.clone();
-                let path = media_path(&dir, &chat, &id, &mime, file_name.as_deref());
-                async move {
-                    tokio::fs::create_dir_all(&dir)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    tokio::fs::write(&path, &bytes)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                    Ok(path)
-                }
-            };
-            let result = match client.download(&*downloadable).await {
-                Ok(bytes) => Ok(bytes),
-                Err(error) => {
-                    let text = error.to_string();
-                    let expired = ["403", "404", "410"].iter().any(|code| text.contains(code));
-                    match (&jid, expired && !media_key.is_empty()) {
-                        (Some(jid), true) => {
-                            // Ask the phone to re-upload expired media, then retry once.
-                            let request = MediaReuploadRequest {
-                                msg_id: &id,
-                                chat_jid: jid,
-                                media_key: &media_key,
-                                is_from_me,
-                                participant: participant.as_ref(),
-                            };
-                            match client.media_reupload().request(&request).await {
-                                Ok(MediaRetryResult::Success { direct_path }) => {
-                                    match refreshed(direct_path) {
-                                        Some(again) => match client.download(&*again).await {
-                                            Ok(bytes) => Ok(bytes),
-                                            Err(error) => Err(error.to_string()),
-                                        },
-                                        None => Err(text),
+            // Stream into a temporary file next to the destination: RAM stays
+            // flat regardless of attachment size, and a partial file is never
+            // published. The guard removes the temporary file on every exit
+            // that did not rename it away, including timeouts.
+            let _temp = TempGuard::new(temp_path.clone());
+            let deadline = tokio::time::Instant::now() + limits.timeout;
+            let result =
+                match fetch_to_temp(&client, &*downloadable, &dir, &temp_path, limits, deadline)
+                    .await
+                {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        let expired = is_expired_media_error(&error);
+                        let error = error.to_string();
+                        match (&jid, expired && !media_key.is_empty()) {
+                            (Some(jid), true) => {
+                                // Ask the phone to re-upload expired media, then retry once.
+                                let request = MediaReuploadRequest {
+                                    msg_id: &id,
+                                    chat_jid: jid,
+                                    media_key: &media_key,
+                                    is_from_me,
+                                    participant: participant.as_ref(),
+                                };
+                                match tokio::time::timeout_at(
+                                    deadline,
+                                    client.media_reupload().request(&request),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(MediaRetryResult::Success { direct_path })) => {
+                                        match refreshed(direct_path) {
+                                            Some(again) => match fetch_to_temp(
+                                                &client, &*again, &dir, &temp_path, limits,
+                                                deadline,
+                                            )
+                                            .await
+                                            {
+                                                Ok(()) => Ok(()),
+                                                Err(error) => Err(error.to_string()),
+                                            },
+                                            None => Err(error),
+                                        }
                                     }
-                                }
-                                Ok(_) => {
-                                    Err("No longer available on WhatsApp's servers".to_owned())
-                                }
-                                Err(error) => {
-                                    log::info!("media re-upload was not granted: {error}");
-                                    Err("No longer available on WhatsApp's servers".to_owned())
+                                    Ok(Ok(_)) => {
+                                        Err("No longer available on WhatsApp's servers".to_owned())
+                                    }
+                                    Ok(Err(error)) => {
+                                        log::info!("media re-upload was not granted: {error}");
+                                        Err("No longer available on WhatsApp's servers".to_owned())
+                                    }
+                                    Err(_) => Err(format!(
+                                        "Re-upload request timed out after {} seconds",
+                                        limits.timeout.as_secs()
+                                    )),
                                 }
                             }
+                            _ => Err(error),
                         }
-                        _ => Err(text),
                     }
-                }
-            };
+                };
             let result = match result {
-                Ok(bytes) => {
+                Ok(()) => {
                     let mime = mime.clone();
-                    let checked = tokio::task::spawn_blocking(move || {
-                        Self::validate_media_bytes(&bytes, &mime).map(|()| bytes)
-                    })
-                    .await;
+                    let temp_path = temp_path.clone();
+                    let final_path = final_path.clone();
+                    // Images validate from disk with bounded memory (headers
+                    // always, full decode only when small); every other kind
+                    // only needs a non-empty file, so large videos never
+                    // cross through RAM here either.
+                    let checked = if mime.starts_with("image/") {
+                        let read_path = temp_path.clone();
+                        let mime = mime.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            validate_image_file(
+                                &read_path,
+                                &mime,
+                                Worker::IMAGE_FULL_DECODE_MAX_BYTES,
+                            )
+                        })
+                        .await
+                        {
+                            Ok(inner) => inner,
+                            Err(join) => Err(join.to_string()),
+                        }
+                    } else {
+                        match tokio::fs::metadata(&temp_path).await {
+                            Ok(metadata) if metadata.len() > 0 => Ok(()),
+                            Ok(_) => Err("The download came back empty".to_owned()),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    };
                     match checked {
-                        Ok(Ok(bytes)) => keep(bytes).await,
-                        Ok(Err(error)) => Err(error),
-                        Err(join) => Err(join.to_string()),
+                        Ok(()) => publish_download(&temp_path, &final_path)
+                            .await
+                            .map(|()| final_path),
+                        Err(error) => Err(error),
                     }
                 }
                 Err(error) => Err(error),
@@ -3999,6 +4817,104 @@ impl Worker {
         self.download(chat, id);
     }
 
+    /// Deletes a thumbnail that never decodes so it is rebuilt from the
+    /// original file. The original is never touched and nothing is
+    /// downloaded: thumbnails are purely local derivatives.
+    fn heal_sticker_thumb(&mut self, path: &Path) {
+        // (Re)queue the rebuild without resetting past failures, so a
+        // hopeless file still reaches give-up instead of looping forever.
+        self.thumb_heals
+            .entry(path.to_path_buf())
+            .or_insert_with(|| ThumbHeal {
+                attempts: 0,
+                next_retry: Instant::now(),
+                in_flight: false,
+            });
+        self.pump_thumb_heals();
+    }
+
+    /// Dispatches due thumbnail rebuilds to blocking tasks and returns at
+    /// once: each result comes back as a command the worker applies later.
+    /// A success deletes the request, a failure schedules the next try,
+    /// and the cap reports failure once and deletes it. The interface
+    /// applies these results instead of inferring completion from the file.
+    fn pump_thumb_heals(&mut self) {
+        self.pump_thumb_heals_with(std::sync::Arc::new(|thumbs: PathBuf, file: PathBuf| {
+            crate::stickers::build_thumb(&thumbs, &file)
+        }));
+    }
+
+    /// Same dispatch with an injectable build step, so tests can gate the
+    /// tasks on a barrier instead of hoping a real decode stays slow.
+    fn pump_thumb_heals_with(
+        &mut self,
+        build: std::sync::Arc<dyn Fn(PathBuf, PathBuf) -> Result<PathBuf, String> + Send + Sync>,
+    ) {
+        let now = Instant::now();
+        let flying = self
+            .thumb_heals
+            .values()
+            .filter(|heal| heal.in_flight)
+            .count();
+        let mut slots = THUMB_HEAL_SLOTS.saturating_sub(flying);
+        if slots == 0 {
+            return;
+        }
+        let thumbs = self.dirs.sticker_thumb_dir();
+        let due: Vec<PathBuf> = self.thumb_heals.keys().cloned().collect();
+        for path in due {
+            if slots == 0 {
+                break;
+            }
+            match self.thumb_heals.get(&path) {
+                Some(heal) if !heal.in_flight && now >= heal.next_retry => {}
+                _ => continue,
+            }
+            // A build validates any cached file first and regenerates when
+            // it does not decode, so no delete is needed here. A path with
+            // no content-hash name can never address a thumbnail: fail it
+            // at once instead of scheduling hopeless retries.
+            let Some(thumb) = crate::stickers::thumb_path(&thumbs, &path) else {
+                self.thumb_heals.remove(&path);
+                self.emit(Event::StickerThumb { path, ok: false });
+                continue;
+            };
+            let _ = thumb;
+            if let Some(heal) = self.thumb_heals.get_mut(&path) {
+                heal.in_flight = true;
+            } else {
+                continue;
+            }
+            slots -= 1;
+            let commands = self.commands.clone();
+            let task_thumbs = thumbs.clone();
+            let task_build = build.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = task_build(task_thumbs, path.clone());
+                if let Err(error) = &result {
+                    log::debug!("thumbnail rebuild failed: {error}");
+                }
+                let _ = commands.send(Command::ThumbHealFinished {
+                    path,
+                    ok: result.is_ok(),
+                });
+            });
+        }
+    }
+
+    /// Records one failed thumbnail rebuild: schedules the next try or,
+    /// past the cap, reports failure once and drops the request.
+    fn fail_thumb_heal(&mut self, path: PathBuf, attempts: u32, now: Instant) {
+        if attempts >= THUMB_HEAL_MAX_FAILURES {
+            self.thumb_heals.remove(&path);
+            self.emit(Event::StickerThumb { path, ok: false });
+        } else if let Some(heal) = self.thumb_heals.get_mut(&path) {
+            heal.attempts = attempts + 1;
+            heal.in_flight = false;
+            heal.next_retry = now + thumb_heal_backoff(heal.attempts);
+        }
+    }
+
     /// Reclaims the app's own attachment cache, once per run.
     ///
     /// The archive is the list of what still matters: the file every message
@@ -4014,18 +4930,25 @@ impl Worker {
         // poster now, without a new download.
         self.backfill_video_meta();
         let media = self.dirs.media_cache_dir();
-        let keep: HashSet<String> = match self.archive.media_paths() {
-            Ok(rows) => rows
-                .into_iter()
-                .map(|(_, _, path)| path.to_string_lossy().into_owned())
-                .collect(),
-            Err(error) => {
-                // Without the list, every file would look like rubbish.
-                log::warn!("attachments: keeping them all, the list failed: {error}");
-                return;
-            }
+        // One protection policy for every cleanup: message attachments,
+        // sticker favorites, and cataloged copies. Unprovable means keep
+        // everything, exactly like the direct removal path.
+        let Some(protected) = self.archive.protected_files() else {
+            log::warn!("attachments: keeping them all, references unprovable");
+            return;
         };
+        let mut keep = sweep_keep_set(protected, &[]);
         tokio::task::spawn_blocking(move || {
+            // Interrupted publishes restore before the sweep: a backup
+            // whose destination is missing is still the last valid copy,
+            // and the sweep below would otherwise delete it as garbage.
+            let (restored, preserved) = recover_interrupted_publishes(&media);
+            if restored > 0 {
+                log::info!("attachments: restored {restored} interrupted publishes");
+            }
+            // Backups that could not move back stay protected until the
+            // next run retries them.
+            keep.extend(sweep_keep_set(HashSet::new(), &preserved));
             let held = crate::cache::usage(&media);
             let freed = crate::cache::sweep(&media, &|path| {
                 keep.contains(&path.to_string_lossy().into_owned())
@@ -4147,7 +5070,10 @@ impl Worker {
                 .archive
                 .rekey_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"))
             {
-                Ok(true) => moved += 1,
+                Ok(true) => {
+                    self.adopt_rekeyed_chat(&format!("{lid}@lid"), &format!("{pn}@s.whatsapp.net"));
+                    moved += 1;
+                }
                 Ok(false) => {}
                 Err(error) => log::warn!("could not re-file chat {pn}: {error}"),
             }
@@ -4356,7 +5282,11 @@ impl Worker {
             .chain(packs.iter().flat_map(|pack| pack.stickers.iter().cloned()))
             .chain(recent.iter().cloned())
             .filter(|path| {
-                crate::stickers::thumb_path(&thumbs, path).is_some_and(|thumb| !thumb.is_file())
+                // Paths with an explicit heal request are rebuilt by the heal
+                // pump, which reports each result, instead of this batch.
+                !self.thumb_heals.contains_key(path)
+                    && crate::stickers::thumb_path(&thumbs, path)
+                        .is_some_and(|thumb| !thumb.is_file())
                     && self.thumb_tries.get(path).copied().unwrap_or(0) < 2
             })
             .collect();
@@ -4535,6 +5465,53 @@ impl Worker {
         Ok(())
     }
 
+    fn ureq_avatar_fetch() -> AvatarFetch {
+        std::sync::Arc::new(|url: &str| {
+            ureq::get(url)
+                .call()
+                .and_then(|mut response| response.body_mut().read_to_vec())
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    /// Downloads a picture URL through the given transport, validates the
+    /// bytes, and stores them atomically. A refused reference, invalid
+    /// image, or transport failure is an error: the caller retries later
+    /// and keeps showing the last good photo meanwhile. Absence is never
+    /// synthesized here.
+    async fn download_and_store_avatar(
+        fetch: &AvatarFetch,
+        url: String,
+        path: PathBuf,
+    ) -> Result<PathBuf, String> {
+        if !is_fetchable_avatar_url(&url) {
+            return Err("refusing non-absolute avatar reference".to_owned());
+        }
+        let bytes = tokio::task::spawn_blocking({
+            let fetch = fetch.clone();
+            move || fetch(&url)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        if !validate_avatar_bytes(&bytes) {
+            return Err("downloaded avatar is not a readable image".to_owned());
+        }
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+        // Written through a temporary file so a reader never sees a half one.
+        let staging = path.with_extension("part");
+        tokio::fs::write(&staging, &bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::fs::rename(&staging, &path)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(path)
+    }
+
     fn avatar_file(&self, id: &str, full: bool) -> PathBuf {
         self.dirs.avatar_file(id, full)
     }
@@ -4555,6 +5532,7 @@ impl Worker {
                 })
         {
             let path = (metadata.len() > 0).then_some(path);
+            self.pending_avatars.remove(&(id.clone(), full));
             self.emit(Event::Avatar { id, full, path });
             return;
         }
@@ -4580,6 +5558,7 @@ impl Worker {
             candidates
         };
         if candidates.is_empty() {
+            self.pending_avatars.remove(&(id.clone(), full));
             self.emit(Event::Avatar {
                 id,
                 full,
@@ -4592,13 +5571,23 @@ impl Worker {
             .as_ref()
             .is_some_and(|client| client.is_connected());
         let Some(client) = self.client.clone().filter(|_| connected) else {
-            // Defer profile-picture lookup until connected.
-            self.pending_avatars.entry((id, full)).or_insert(0);
+            // Defer profile-picture lookup until connected, keeping the
+            // failure count and deadline; only the in-flight flag resets.
+            self.pending_avatars
+                .entry((id.clone(), full))
+                .or_default()
+                .in_flight = false;
             return;
         };
         let commands = self.commands.clone();
         tokio::spawn(async move {
             let fetched = async {
+                // Channels use the same contacts picture lookup: the library
+                // answers it for newsletter JIDs, while the newsletter
+                // metadata picture fields are CDN direct paths, not fetchable
+                // URLs, so they must never reach a plain HTTP client.
+                // Resolving a direct path would need media-host auth the app
+                // does not negotiate; that stays a registered limitation.
                 let mut picture = None;
                 let mut failed = false;
                 'lookup: for jid in &candidates {
@@ -4623,24 +5612,12 @@ impl Worker {
                         Ok(None)
                     };
                 };
-                let url = picture.url;
-                let bytes = tokio::task::spawn_blocking(move || {
-                    ureq::get(&url)
-                        .call()
-                        .and_then(|mut response| response.body_mut().read_to_vec())
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| error.to_string())??;
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
-                tokio::fs::write(&path, &bytes)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                Ok::<Option<PathBuf>, String>(Some(path.clone()))
+                // Validation, atomic store, and failure-as-error live in
+                // one place: only a readable image marks the cache ready.
+                let path =
+                    Self::download_and_store_avatar(&Self::ureq_avatar_fetch(), picture.url, path)
+                        .await?;
+                Ok::<Option<PathBuf>, String>(Some(path))
             }
             .await;
             match fetched {
@@ -4655,7 +5632,9 @@ impl Worker {
         });
     }
 
-    /// Retries deferred or failed profile-picture requests.
+    /// Retries deferred or failed profile-picture requests. Entries keep
+    /// their failure count and deadline across ticks: only success,
+    /// reported absence, or the failure cap removes them.
     fn retry_avatars(&mut self) {
         if !self
             .client
@@ -4664,22 +5643,38 @@ impl Worker {
         {
             return;
         }
+        let now = Instant::now();
         let due: Vec<(String, bool)> = self.pending_avatars.keys().cloned().collect();
         for (id, full) in due {
-            let attempts = self
-                .pending_avatars
-                .remove(&(id.clone(), full))
-                .unwrap_or(0);
-            if attempts >= 3 {
-                self.emit(Event::Avatar {
-                    id,
-                    full,
-                    path: None,
-                });
+            let Some(retry) = self.pending_avatars.get_mut(&(id.clone(), full)) else {
                 continue;
+            };
+            match avatar_due(retry, now) {
+                AvatarDue::Wait => continue,
+                AvatarDue::GiveUp => {
+                    self.give_up_avatar(id, full);
+                    continue;
+                }
+                AvatarDue::Dispatch => {}
             }
+            retry.in_flight = true;
             self.fetch_avatar(id, full);
         }
+    }
+
+    /// Reports a profile picture the worker stopped retrying: the cached
+    /// photo when one is still on disk, or absence when there is nothing
+    /// valid to show. Only success, proven absence, or an explicit removal
+    /// clears a photo; exhausting retries never wipes the last good one.
+    fn give_up_avatar(&mut self, id: String, full: bool) {
+        self.pending_avatars.remove(&(id.clone(), full));
+        let path = self.avatar_file(&id, full);
+        let keep = std::fs::metadata(&path).is_ok_and(|meta| meta.len() > 0);
+        self.emit(Event::Avatar {
+            id,
+            full,
+            path: keep.then_some(path),
+        });
     }
 
     /// Loads archived messages needed to scroll to a quote.
@@ -4788,6 +5783,10 @@ impl Worker {
         caption: Option<String>,
         mentions: Vec<String>,
     ) {
+        if !self.send_allowed(&chat) {
+            log::debug!("refusing files send without proven capability");
+            return;
+        }
         for (index, path) in paths.into_iter().enumerate() {
             let Some(client) = self.client.clone() else {
                 self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
@@ -4849,6 +5848,10 @@ impl Worker {
         caption: Option<String>,
         mentions: Vec<String>,
     ) {
+        if !self.send_allowed(&chat) {
+            log::debug!("refusing pasted-image send without proven capability");
+            return;
+        }
         let Some(client) = self.client.clone() else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
@@ -4890,6 +5893,10 @@ impl Worker {
 
     /// Encodes and sends an OGG/Opus voice message with optional quote.
     fn send_voice(&mut self, chat: ChatId, samples: Vec<f32>, quoting: Option<String>) {
+        if !self.send_allowed(&chat) {
+            log::debug!("refusing voice send without proven capability");
+            return;
+        }
         let Some(client) = self.client.clone() else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
@@ -4995,6 +6002,10 @@ impl Worker {
     /// The local copy is filed and drawn before the upload starts: the bubble
     /// paints the sticker at once and only its tick waits for the server.
     fn send_sticker(&mut self, chat: ChatId, path: PathBuf, quoting: Option<String>) {
+        if !self.send_allowed(&chat) {
+            log::debug!("refusing sticker send without proven capability");
+            return;
+        }
         let Some(client) = self.client.clone() else {
             self.emit(Event::Error("Not connected to WhatsApp".to_owned()));
             return;
@@ -5280,6 +6291,14 @@ fn seconds(timestamp: i64) -> i64 {
     }
 }
 
+/// Where a deleted or cleared chat ends: the last message the deleting
+/// device knew about, or the moment of the action when it sent no range.
+fn removal_point(last_message: Option<i64>, action: i64) -> i64 {
+    last_message
+        .filter(|timestamp| *timestamp > 0)
+        .map_or(action, seconds)
+}
+
 fn sanitize(id: &str) -> String {
     id.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -5321,6 +6340,285 @@ fn media_path(dir: &Path, chat: &str, id: &str, mime: &str, file_name: Option<&s
         None => format!("{}-{}", sanitize(chat), sanitize(id)),
     };
     dir.join(format!("{stem}.{extension}"))
+}
+
+/// Budget for one attachment download: an effective byte cap and a total
+/// deadline covering download, re-upload, and retry.
+#[derive(Clone, Copy, Debug)]
+struct DownloadLimits {
+    max_bytes: u64,
+    timeout: Duration,
+}
+
+/// Caps a download at its declared plaintext length plus slack, falling
+/// back to the absolute ceiling when the length is unknown. Narrower than
+/// the old unbounded fetch without changing what the app may download:
+/// honest WhatsApp references always declare their length below the cap.
+fn download_limits_for(declared: Option<u64>) -> DownloadLimits {
+    let max_bytes = declared
+        .map(|length| length.saturating_add(Worker::DOWNLOAD_LENGTH_SLACK))
+        .unwrap_or(Worker::DOWNLOAD_MAX_BYTES)
+        .min(Worker::DOWNLOAD_MAX_BYTES);
+    DownloadLimits {
+        max_bytes,
+        timeout: Worker::DOWNLOAD_TIMEOUT,
+    }
+}
+
+/// File sink that refuses to grow past a budget, for streaming downloads
+/// that must never hold the whole attachment in RAM. Truncating back to
+/// zero (what the library does before every retry) restores the budget.
+struct LimitedFile {
+    file: std::fs::File,
+    max_bytes: u64,
+    remaining: u64,
+}
+
+impl LimitedFile {
+    fn create(path: &Path, max_bytes: u64) -> std::io::Result<Self> {
+        Ok(Self {
+            file: std::fs::File::create(path)?,
+            max_bytes,
+            remaining: max_bytes,
+        })
+    }
+}
+
+impl std::io::Write for LimitedFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() as u64 > self.remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::QuotaExceeded,
+                format!("attachment exceeds its {} byte budget", self.max_bytes),
+            ));
+        }
+        let written = self.file.write(buf)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+impl std::io::Seek for LimitedFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+impl whatsapp_rust::wacore::download::DownloadWriter for LimitedFile {
+    fn truncate(&mut self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)?;
+        self.remaining = self.max_bytes.saturating_sub(len);
+        Ok(())
+    }
+}
+
+/// Removes a temporary download file on drop unless it was published away
+/// by rename. Covers errors, timeouts, and cancelled tasks: a partial file
+/// is never left behind to be mistaken for a complete attachment.
+struct TempGuard {
+    path: Option<PathBuf>,
+}
+
+impl TempGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Publishes a verified temporary download over its destination without
+/// ever exposing a partial file. When a previous copy exists it is moved
+/// aside first and restored if the final rename fails, so a failed publish
+/// never destroys the last valid copy.
+async fn publish_download(temp: &Path, dest: &Path) -> Result<(), String> {
+    if tokio::fs::try_exists(dest)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        let mut backup = dest.as_os_str().to_owned();
+        backup.push(".bak");
+        let backup = PathBuf::from(backup);
+        tokio::fs::rename(dest, &backup)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Err(error) = tokio::fs::rename(temp, dest).await {
+            let _ = tokio::fs::rename(&backup, dest).await;
+            return Err(error.to_string());
+        }
+        let _ = tokio::fs::remove_file(&backup).await;
+    } else {
+        tokio::fs::rename(temp, dest)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Whether a download failure means the reference expired and the phone
+/// should be asked to re-upload. Typed status first, message fallback for
+/// errors whose chain carries no status.
+fn is_expired_media_error(error: &anyhow::Error) -> bool {
+    use whatsapp_rust::ErrorChainExt;
+    if let Some(status) = error.http_status() {
+        return matches!(status, 403 | 404 | 410);
+    }
+    let text = error.to_string();
+    ["403", "404", "410"].iter().any(|code| text.contains(code))
+}
+
+/// Restores downloads whose publish was interrupted between moving the old
+/// copy aside and renaming the temporary file over it. For every backup
+/// file: a missing destination means the interruption happened mid-publish
+/// and the backup is still the last valid copy, so it moves back; an
+/// Builds the sweep keep set both the startup cleanup and its tests share:
+/// proven references plus extra paths that must survive (backups whose
+/// restore is still pending). Pure string mapping, no I/O.
+fn sweep_keep_set(
+    protected: std::collections::HashSet<PathBuf>,
+    extra: &[PathBuf],
+) -> HashSet<String> {
+    protected
+        .into_iter()
+        .chain(extra.iter().cloned())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// existing destination means the publish completed and only its cleanup
+/// was missed, so the backup goes. A failed restore keeps the backup for
+/// the next run instead of deleting anything. Returns how many backups
+/// moved back, plus the backup paths that must survive the next cleanup
+/// because their restore is still pending.
+fn recover_interrupted_publishes(dir: &Path) -> (usize, Vec<PathBuf>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!("attachments: could not scan for interrupted publishes: {error}");
+            return (0, Vec::new());
+        }
+    };
+    let mut restored = 0;
+    let mut preserved = Vec::new();
+    for entry in entries {
+        let path = match entry {
+            Ok(entry) => entry.path(),
+            Err(_) => continue,
+        };
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(dest_name) = name.strip_suffix(".bak") else {
+            continue;
+        };
+        let dest = path.with_file_name(dest_name);
+        if !dest.exists() {
+            match std::fs::rename(&path, &dest) {
+                Ok(()) => {
+                    restored += 1;
+                    log::info!("attachments: restored an interrupted publish");
+                }
+                Err(error) => {
+                    log::warn!("attachments: could not restore an interrupted publish: {error}");
+                    preserved.push(path);
+                }
+            }
+        } else if dest.is_file() {
+            // The publish completed and only its cleanup was missed. A
+            // destination that is not a file is not ours to judge: the
+            // backup stays for a human to look at.
+            if let Err(error) = std::fs::remove_file(&path) {
+                log::warn!("attachments: could not clear a spent backup: {error}");
+            }
+        } else {
+            log::warn!("attachments: backup kept, destination is not a file");
+            preserved.push(path);
+        }
+    }
+    (restored, preserved)
+}
+
+/// Validates a downloaded image straight from disk with bounded memory.
+/// Headers (format, dimensions) always come from a header-only read that
+/// never holds pixels; only small files pay for a full decode. Larger
+/// files are accepted on headers alone, which the CDN authentication
+/// already backs with a whole-file MAC.
+fn validate_image_file(path: &Path, mime: &str, full_decode_max: u64) -> Result<(), String> {
+    let size = std::fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .len();
+    if size == 0 {
+        return Err("The download came back empty".to_owned());
+    }
+    let not_picture = || "The download is not a readable picture".to_owned();
+    // Explicit decoder limits on top of the 512 MiB allocation guard that
+    // ships by default; the fields are public, only the struct itself is
+    // non-exhaustive.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(Worker::IMAGE_MAX_SIDE);
+    limits.max_image_height = Some(Worker::IMAGE_MAX_SIDE);
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|_| not_picture())?
+        .with_guessed_format()
+        .map_err(|_| not_picture())?;
+    reader.limits(limits);
+    let (width, height) = reader.into_dimensions().map_err(|_| not_picture())?;
+    if !image_dimensions_acceptable(width, height) {
+        return Err(not_picture());
+    }
+    if size <= full_decode_max {
+        let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+        Worker::validate_media_bytes(&bytes, mime)?;
+    }
+    Ok(())
+}
+
+/// Whether decoded dimensions fit the validator budget: nonzero, within
+/// the side ceiling, and within the total pixel budget. Pure so the
+/// boundaries stay testable without multi-hundred-megapixel fixtures.
+fn image_dimensions_acceptable(width: u32, height: u32) -> bool {
+    if width == 0 || height == 0 {
+        return false;
+    }
+    if width > Worker::IMAGE_MAX_SIDE || height > Worker::IMAGE_MAX_SIDE {
+        return false;
+    }
+    (width as u64) * (height as u64) <= Worker::IMAGE_MAX_PIXELS
+}
+
+/// Streams one attachment into a temporary file under the given budget and
+/// deadline. RAM stays flat: the library decrypts straight into the sink
+/// with small buffers, and the cap refuses exorbitant streams mid-write.
+async fn fetch_to_temp(
+    client: &Client,
+    downloadable: &dyn Downloadable,
+    dir: &Path,
+    temp: &Path,
+    limits: DownloadLimits,
+    deadline: tokio::time::Instant,
+) -> Result<(), anyhow::Error> {
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(anyhow::Error::from)?;
+    let file = LimitedFile::create(temp, limits.max_bytes).map_err(anyhow::Error::from)?;
+    match tokio::time::timeout_at(deadline, client.download_to_writer(downloadable, file)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(anyhow::anyhow!(
+            "Download timed out after {} seconds",
+            limits.timeout.as_secs()
+        )),
+    }
 }
 
 fn media(
@@ -6286,7 +7584,7 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
         id: conversation.id.clone(),
         name: non_empty(&conversation.display_name).or_else(|| non_empty(&conversation.name)),
         unread: conversation.unread_count,
-        archived: conversation.archived.unwrap_or(false),
+        archived: conversation.archived,
         pinned_at: conversation.pinned.map(|when| i64::from(when) * 1000),
         muted_until: conversation.mute_end_time.map(|end| {
             // Zero explicitly clears a history mute; a wrapped -1 means
@@ -6311,6 +7609,617 @@ mod tests {
     use super::*;
     use crate::model::MediaState;
 
+    fn png_fixture() -> Vec<u8> {
+        let mut out = Vec::new();
+        let picture = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 200, 90, 255]));
+        image::DynamicImage::ImageRgba8(picture)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encodes");
+        out
+    }
+
+    #[test]
+    fn only_absolute_http_urls_reach_the_avatar_transport() {
+        assert!(is_fetchable_avatar_url("https://cdn.example/pic.jpg"));
+        assert!(is_fetchable_avatar_url("HTTP://cdn.example/pic.jpg"));
+        assert!(!is_fetchable_avatar_url("/v/t61/pic.enc"));
+        assert!(!is_fetchable_avatar_url("v/t61/pic.enc"));
+        assert!(!is_fetchable_avatar_url(""));
+        assert!(validate_avatar_bytes(&png_fixture()));
+        assert!(!validate_avatar_bytes(b"not-an-image"));
+        assert!(!validate_avatar_bytes(b""));
+    }
+
+    fn png_thumb_bytes() -> Vec<u8> {
+        let mut out = Vec::new();
+        let picture = image::RgbaImage::from_pixel(200, 100, image::Rgba([10, 200, 90, 255]));
+        image::DynamicImage::ImageRgba8(picture)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("encodes");
+        out
+    }
+
+    #[test]
+    fn thumb_heal_backoff_grows_with_failures() {
+        assert_eq!(thumb_heal_backoff(0), Duration::ZERO);
+        assert_eq!(thumb_heal_backoff(1), Duration::from_secs(10));
+        assert_eq!(thumb_heal_backoff(2), Duration::from_secs(60));
+        assert_eq!(thumb_heal_backoff(3), Duration::from_secs(5 * 60));
+        assert_eq!(thumb_heal_backoff(99), Duration::from_secs(5 * 60));
+    }
+
+    /// Reads the next internal command a blocking task sends back.
+    async fn next_command(inbox: &mut mpsc::UnboundedReceiver<Command>) -> Command {
+        tokio::time::timeout(Duration::from_secs(10), inbox.recv())
+            .await
+            .expect("task answers")
+            .expect("channel open")
+    }
+
+    #[tokio::test]
+    async fn thumb_heal_rebuilds_then_reports_success() {
+        let (mut worker, events, mut inbox, _wa) = worker();
+        let bytes = png_thumb_bytes();
+        let hash = crate::stickers::hash_of(&bytes);
+        let dir = std::env::temp_dir().join(format!("zapfast-thumbheal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join(format!("{hash}.webp"));
+        std::fs::write(&file, &bytes).expect("writes");
+        worker.heal_sticker_thumb(&file);
+        // The rebuild runs elsewhere: nothing is reported yet and the
+        // worker thread is already free for other commands.
+        assert!(
+            worker
+                .thumb_heals
+                .get(&file)
+                .is_some_and(|heal| heal.in_flight),
+            "rebuild dispatched"
+        );
+        assert!(events.try_recv().is_err(), "no synchronous report");
+        let finished = next_command(&mut inbox).await;
+        assert!(
+            matches!(&finished, Command::ThumbHealFinished { path, ok } if path == &file && *ok),
+            "unexpected command: {finished:?}"
+        );
+        worker.handle_command(finished).await;
+        assert!(!worker.thumb_heals.contains_key(&file));
+        match events.try_recv().expect("reports success") {
+            Event::StickerThumb { path, ok } => {
+                assert_eq!(path, file);
+                assert!(ok);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+        let thumb = crate::stickers::thumb_path(&worker.dirs.sticker_thumb_dir(), &file)
+            .expect("thumb path");
+        assert!(thumb.is_file(), "thumbnail rebuilt without network");
+        let _ = std::fs::remove_file(&thumb);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn thumb_heal_dispatch_keeps_the_worker_answering() {
+        let (mut worker, events, mut inbox, _wa) = worker();
+        // Its own identity, so parallel suites never share its thumbnail.
+        let mut bytes = Vec::new();
+        let picture = image::RgbaImage::from_pixel(200, 100, image::Rgba([200, 30, 30, 255]));
+        image::DynamicImage::ImageRgba8(picture)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encodes");
+        let hash = crate::stickers::hash_of(&bytes);
+        let dir =
+            std::env::temp_dir().join(format!("zapfast-thumbheal-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join(format!("{hash}.webp"));
+        std::fs::write(&file, &bytes).expect("writes");
+        worker.heal_sticker_thumb(&file);
+        assert!(
+            worker
+                .thumb_heals
+                .get(&file)
+                .is_some_and(|heal| heal.in_flight),
+            "rebuild dispatched"
+        );
+        // While the rebuild runs elsewhere, other commands still process.
+        let key = ("15550002222@s.whatsapp.net".to_owned(), false);
+        worker
+            .handle_command(Command::AvatarFailed {
+                id: key.0.clone(),
+                full: key.1,
+            })
+            .await;
+        assert_eq!(worker.pending_avatars[&key].attempts, 1);
+        // Then the rebuild result lands and reports success.
+        let finished = next_command(&mut inbox).await;
+        assert!(
+            matches!(&finished, Command::ThumbHealFinished { path, ok } if path == &file && *ok),
+            "unexpected command: {finished:?}"
+        );
+        worker.handle_command(finished).await;
+        assert!(!worker.thumb_heals.contains_key(&file));
+        match events.try_recv().expect("reports success") {
+            Event::StickerThumb { path, ok } => {
+                assert_eq!(path, file);
+                assert!(ok);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+        let thumb = crate::stickers::thumb_path(&worker.dirs.sticker_thumb_dir(), &file)
+            .expect("thumb path");
+        assert!(thumb.is_file(), "thumbnail rebuilt without network");
+        let _ = std::fs::remove_file(&thumb);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn thumb_heals_cap_two_and_answer_while_blocked() {
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+        let (mut worker, _events, mut inbox, _wa) = worker();
+        // Three due rebuilds with hash names; the files never matter
+        // because the build step is injected below.
+        let files: Vec<PathBuf> = (1..=3)
+            .map(|n| std::env::temp_dir().join(format!("{n:064x}.webp")))
+            .collect();
+        for file in &files {
+            worker.thumb_heals.insert(
+                file.clone(),
+                ThumbHeal {
+                    attempts: 0,
+                    next_retry: Instant::now() - Duration::from_secs(1),
+                    in_flight: false,
+                },
+            );
+        }
+        // The first two builds report their entry and then hold until the
+        // release sender is dropped; later builds pass straight through.
+        // Timeouts turn a stall into a failure instead of a hung suite.
+        let entered = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let build = {
+            let entered = entered.clone();
+            let release_rx = release_rx.clone();
+            move |_thumbs: PathBuf, _file: PathBuf| -> Result<PathBuf, String> {
+                if entered.fetch_add(1, Ordering::SeqCst) < 2 {
+                    entered_tx.send(()).expect("test waits for entry");
+                    // A dropped sender releases too; either way the task
+                    // finishes and reports.
+                    let _ = release_rx.lock().expect("receiver").recv();
+                }
+                Ok("done".into())
+            }
+        };
+        worker.pump_thumb_heals_with(std::sync::Arc::new(build) as _);
+        // Both tasks are inside the build step: the rendezvous proves the
+        // overlap instead of hoping a decode stays slow.
+        for _ in 0..2 {
+            entered_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("both builds entered");
+        }
+        let flying = worker
+            .thumb_heals
+            .values()
+            .filter(|heal| heal.in_flight)
+            .count();
+        assert_eq!(flying, 2, "two rebuilds run at once");
+        assert!(
+            worker
+                .thumb_heals
+                .values()
+                .filter(|heal| !heal.in_flight)
+                .count()
+                == 1,
+            "the third request waits for a slot"
+        );
+        // While both builds are stuck, other commands still apply.
+        let key = ("15550002222@s.whatsapp.net".to_owned(), false);
+        assert!(inbox.try_recv().is_err(), "no build finished while held");
+        worker
+            .handle_command(Command::AvatarFailed {
+                id: key.0.clone(),
+                full: key.1,
+            })
+            .await;
+        assert_eq!(worker.pending_avatars[&key].attempts, 1);
+        drop(release_tx);
+        // Both results land; handling them clears the finished requests.
+        for _ in 0..2 {
+            let finished = next_command(&mut inbox).await;
+            assert!(
+                matches!(&finished, Command::ThumbHealFinished { ok: true, .. }),
+                "unexpected command: {finished:?}"
+            );
+            worker.handle_command(finished).await;
+        }
+        assert_eq!(worker.thumb_heals.len(), 1, "only the waiter remains");
+        // The freed slots dispatch the waiter, which passes straight through.
+        worker.pump_thumb_heals_with(std::sync::Arc::new(|_, _| Ok("done".into())) as _);
+        let finished = next_command(&mut inbox).await;
+        worker.handle_command(finished).await;
+        assert!(worker.thumb_heals.is_empty(), "the waiter finished");
+    }
+
+    #[tokio::test]
+    async fn thumb_heal_gives_up_after_capped_failures() {
+        let (mut worker, events, mut inbox, _wa) = worker();
+        // Hash-named but missing: every rebuild fails on the read.
+        let dir =
+            std::env::temp_dir().join(format!("zapfast-thumbheal-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join(format!("{}.webp", "a".repeat(64)));
+        let _ = std::fs::remove_file(&file);
+        worker.heal_sticker_thumb(&file);
+        // Dispatched to a task, not reported: the failure is still to come.
+        assert!(
+            worker
+                .thumb_heals
+                .get(&file)
+                .is_some_and(|heal| heal.in_flight),
+            "rebuild dispatched"
+        );
+        assert!(events.try_recv().is_err());
+        // The first failure schedules a retry instead of reporting.
+        let finished = next_command(&mut inbox).await;
+        assert!(
+            matches!(&finished, Command::ThumbHealFinished { path, ok } if path == &file && !ok),
+            "unexpected command: {finished:?}"
+        );
+        worker.handle_command(finished).await;
+        assert_eq!(worker.thumb_heals[&file].attempts, 1);
+        assert!(!worker.thumb_heals[&file].in_flight);
+        assert!(events.try_recv().is_err());
+        // A retry before its deadline dispatches nothing.
+        worker.pump_thumb_heals();
+        assert_eq!(worker.thumb_heals[&file].attempts, 1);
+        assert!(inbox.try_recv().is_err(), "nothing dispatched early");
+        assert!(events.try_recv().is_err());
+        // Failures keep scheduling retries until the cap...
+        for expected in 2..=THUMB_HEAL_MAX_FAILURES {
+            worker.thumb_heals.get_mut(&file).unwrap().next_retry =
+                Instant::now() - Duration::from_secs(1);
+            worker.pump_thumb_heals();
+            let finished = next_command(&mut inbox).await;
+            assert!(
+                matches!(&finished, Command::ThumbHealFinished { path, ok } if path == &file && !ok),
+                "unexpected command: {finished:?}"
+            );
+            worker.handle_command(finished).await;
+            assert_eq!(worker.thumb_heals[&file].attempts, expected);
+            assert!(!worker.thumb_heals[&file].in_flight);
+            assert!(events.try_recv().is_err(), "no report yet");
+        }
+        // ...then the capped failure reports exactly once.
+        worker.thumb_heals.get_mut(&file).unwrap().next_retry =
+            Instant::now() - Duration::from_secs(1);
+        worker.pump_thumb_heals();
+        let finished = next_command(&mut inbox).await;
+        worker.handle_command(finished).await;
+        assert!(!worker.thumb_heals.contains_key(&file));
+        match events.try_recv().expect("reports failure") {
+            Event::StickerThumb { path, ok } => {
+                assert_eq!(path, file);
+                assert!(!ok);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn avatar_backoff_grows_with_failures() {
+        assert_eq!(avatar_backoff(0), Duration::ZERO);
+        assert_eq!(avatar_backoff(1), Duration::from_secs(30));
+        assert_eq!(avatar_backoff(2), Duration::from_secs(2 * 60));
+        assert_eq!(avatar_backoff(3), Duration::from_secs(10 * 60));
+        assert_eq!(avatar_backoff(99), Duration::from_secs(10 * 60));
+    }
+
+    #[test]
+    fn avatar_retry_entries_wait_dispatch_or_give_up() {
+        let now = Instant::now();
+        let waiting = AvatarRetry {
+            attempts: 1,
+            next_retry: now + Duration::from_secs(60),
+            in_flight: false,
+        };
+        assert_eq!(avatar_due(&waiting, now), AvatarDue::Wait);
+        let flying = AvatarRetry {
+            attempts: 1,
+            next_retry: now - Duration::from_secs(1),
+            in_flight: true,
+        };
+        assert_eq!(avatar_due(&flying, now), AvatarDue::Wait);
+        let due = AvatarRetry {
+            attempts: 2,
+            next_retry: now - Duration::from_secs(1),
+            in_flight: false,
+        };
+        assert_eq!(avatar_due(&due, now), AvatarDue::Dispatch);
+        let capped = AvatarRetry {
+            attempts: AVATAR_MAX_FAILURES,
+            next_retry: now - Duration::from_secs(1),
+            in_flight: false,
+        };
+        assert_eq!(avatar_due(&capped, now), AvatarDue::GiveUp);
+    }
+
+    #[tokio::test]
+    async fn avatar_failures_accumulate_instead_of_restarting() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let id = "15550009999@s.whatsapp.net".to_owned();
+        // Deferred while offline: the entry exists with nothing in flight.
+        worker
+            .handle_command(Command::FetchAvatar {
+                id: id.clone(),
+                full: false,
+            })
+            .await;
+        let key = (id.clone(), false);
+        assert_eq!(worker.pending_avatars[&key].attempts, 0);
+        assert!(!worker.pending_avatars[&key].in_flight);
+        // Consecutive failures accumulate instead of restarting at one, with
+        // growing gaps between tries (30s, 2min, 10min).
+        for expected in 1..=AVATAR_MAX_FAILURES {
+            let before = Instant::now();
+            worker
+                .handle_command(Command::AvatarFailed {
+                    id: id.clone(),
+                    full: false,
+                })
+                .await;
+            let retry = &worker.pending_avatars[&key];
+            assert_eq!(retry.attempts, expected);
+            assert!(!retry.in_flight);
+            let backoff = avatar_backoff(expected);
+            let wait = retry.next_retry.saturating_duration_since(before);
+            assert!(
+                wait >= backoff && wait <= backoff + Duration::from_secs(5),
+                "failure {expected} waits {wait:?}, expected {backoff:?}"
+            );
+        }
+        // Nothing reported yet: the cap decides on the next due tick.
+        assert!(events.try_recv().is_err());
+        // Past its deadline the capped entry is ready to report absence.
+        worker.pending_avatars.get_mut(&key).unwrap().next_retry =
+            Instant::now() - Duration::from_secs(1);
+        assert_eq!(
+            avatar_due(&worker.pending_avatars[&key], Instant::now()),
+            AvatarDue::GiveUp
+        );
+        // A deferred fetch while offline keeps the count and deadline.
+        worker
+            .handle_command(Command::FetchAvatar {
+                id: id.clone(),
+                full: false,
+            })
+            .await;
+        assert_eq!(worker.pending_avatars[&key].attempts, AVATAR_MAX_FAILURES);
+        assert!(!worker.pending_avatars[&key].in_flight);
+    }
+
+    #[tokio::test]
+    async fn avatar_download_stores_valid_images_atomically() {
+        let dir = std::env::temp_dir().join(format!("zapfast-avatar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let bytes = png_fixture();
+        let path = dir.join("a.jpg");
+        let fetch: AvatarFetch =
+            std::sync::Arc::new(move |_: &str| Ok::<Vec<u8>, String>(bytes.clone()));
+        let stored = Worker::download_and_store_avatar(
+            &fetch,
+            "https://cdn.example/pic.jpg".into(),
+            path.clone(),
+        )
+        .await
+        .expect("stores");
+        assert_eq!(stored, path);
+        assert_eq!(std::fs::read(&path).expect("reads"), png_fixture());
+        assert!(
+            !dir.join("a.part").exists(),
+            "no staging file is left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn avatar_download_refuses_relative_paths_without_network() {
+        let dir = std::env::temp_dir().join(format!("zapfast-avatar-rel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("a.jpg");
+        let called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = called.clone();
+        let fetch: AvatarFetch = std::sync::Arc::new(move |_: &str| {
+            probe.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok::<Vec<u8>, String>(Vec::new())
+        });
+        let error =
+            Worker::download_and_store_avatar(&fetch, "/v/t61/pic.enc".into(), path.clone())
+                .await
+                .expect_err("refuses");
+        assert!(error.contains("non-absolute"), "{error}");
+        assert!(
+            !called.load(std::sync::atomic::Ordering::SeqCst),
+            "the transport is never touched"
+        );
+        assert!(!path.exists(), "nothing is cached");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn avatar_download_failures_keep_the_last_good_photo() {
+        let dir = std::env::temp_dir().join(format!("zapfast-avatar-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("a.jpg");
+        let good = png_fixture();
+        std::fs::write(&path, &good).expect("seeds");
+        let bad: AvatarFetch =
+            std::sync::Arc::new(|_: &str| Ok::<Vec<u8>, String>(b"not-an-image".to_vec()));
+        let error = Worker::download_and_store_avatar(
+            &bad,
+            "https://cdn.example/pic.jpg".into(),
+            path.clone(),
+        )
+        .await
+        .expect_err("rejects");
+        assert!(error.contains("readable"), "{error}");
+        let down: AvatarFetch =
+            std::sync::Arc::new(|_: &str| Err::<Vec<u8>, String>("boom".into()));
+        Worker::download_and_store_avatar(
+            &down,
+            "https://cdn.example/pic.jpg".into(),
+            path.clone(),
+        )
+        .await
+        .expect_err("fails");
+        assert_eq!(
+            std::fs::read(&path).expect("reads"),
+            good,
+            "failures never overwrite the last good photo"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn avatar_give_up_keeps_the_last_good_photo() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let id = "15550009999@s.whatsapp.net".to_owned();
+        // An older photo, as after successive update failures.
+        let path = worker.avatar_file(&id, false);
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("creates");
+        std::fs::write(&path, png_fixture()).expect("seeds");
+        worker.pending_avatars.insert(
+            (id.clone(), false),
+            AvatarRetry {
+                attempts: AVATAR_MAX_FAILURES,
+                next_retry: Instant::now() - Duration::from_secs(1),
+                in_flight: false,
+            },
+        );
+        worker.give_up_avatar(id.clone(), false);
+        assert!(!worker.pending_avatars.contains_key(&(id.clone(), false)));
+        match events.try_recv().expect("reports the kept photo") {
+            Event::Avatar {
+                id: got,
+                full,
+                path: kept,
+            } => {
+                assert_eq!(got, id);
+                assert!(!full);
+                assert_eq!(kept, Some(path.clone()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+        assert_eq!(
+            std::fs::read(&path).expect("reads"),
+            png_fixture(),
+            "the file is untouched"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn avatar_give_up_reports_absence_without_a_cached_photo() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let id = "15550008888@s.whatsapp.net".to_owned();
+        let path = worker.avatar_file(&id, false);
+        let _ = std::fs::remove_file(&path);
+        worker.pending_avatars.insert(
+            (id.clone(), false),
+            AvatarRetry {
+                attempts: AVATAR_MAX_FAILURES,
+                next_retry: Instant::now() - Duration::from_secs(1),
+                in_flight: false,
+            },
+        );
+        worker.give_up_avatar(id.clone(), false);
+        match events.try_recv().expect("reports absence") {
+            Event::Avatar {
+                id: got,
+                full,
+                path: kept,
+            } => {
+                assert_eq!(got, id);
+                assert!(!full);
+                assert_eq!(kept, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+    }
+    #[tokio::test]
+    async fn avatar_late_success_after_give_up_still_shows() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let id = "15550007777@s.whatsapp.net".to_owned();
+        let path = worker.avatar_file(&id, false);
+        let _ = std::fs::remove_file(&path);
+        worker.pending_avatars.insert(
+            (id.clone(), false),
+            AvatarRetry {
+                attempts: AVATAR_MAX_FAILURES,
+                next_retry: Instant::now() - Duration::from_secs(1),
+                in_flight: false,
+            },
+        );
+        worker.give_up_avatar(id.clone(), false);
+        assert!(events.try_recv().is_ok(), "absence reported");
+        // A late download that finally lands is still a success: only
+        // success, proven absence, or explicit removal clears a photo.
+        worker
+            .handle_command(Command::AvatarFetched {
+                id: id.clone(),
+                full: false,
+                path: Some(path.clone()),
+            })
+            .await;
+        match events.try_recv().expect("reports the late photo") {
+            Event::Avatar {
+                id: got,
+                path: kept,
+                ..
+            } => {
+                assert_eq!(got, id);
+                assert_eq!(kept, Some(path));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(events.try_recv().is_err(), "exactly one report");
+    }
+    #[test]
+    fn avatar_fetch_policy_locks_supported_formats() {
+        // Only absolute HTTP(S) URLs may reach a plain HTTP client:
+        // newsletter metadata carries CDN direct paths, which need
+        // media-host auth the app does not negotiate.
+        assert!(is_fetchable_avatar_url(
+            "https://pps.whatsapp.net/photo.jpg"
+        ));
+        assert!(is_fetchable_avatar_url("http://pps.whatsapp.net/photo.jpg"));
+        assert!(!is_fetchable_avatar_url("/media/direct/path"));
+        assert!(!is_fetchable_avatar_url("mmg-fna.whatsapp.net/photo.jpg"));
+        assert!(!is_fetchable_avatar_url(""));
+        // Only non-empty readable images may mark the cache ready.
+        assert!(validate_avatar_bytes(&png_fixture()));
+        assert!(!validate_avatar_bytes(&[]));
+        assert!(!validate_avatar_bytes(b"not a picture"));
+    }
     fn phone_sticker(
         hash: &str,
         path: Option<PathBuf>,
@@ -6833,7 +8742,13 @@ mod receipt_tests {
         let (events, events_rx) = std::sync::mpsc::channel();
         let (commands, inbox) = mpsc::unbounded_channel();
         let (wa_sender, wa_events) = mpsc::unbounded_channel();
-        let root = std::env::temp_dir().join(format!("zapfast-worker-test-{}", std::process::id()));
+        // A shared process directory lets parallel avatar/cache tests see
+        // each other's files. Keep a unique synthetic root for each worker.
+        let root = tempfile::Builder::new()
+            .prefix("zapfast-worker-test-")
+            .tempdir()
+            .expect("isolated worker directory")
+            .keep();
         let worker = Worker {
             dirs: AppDirs::under(&root),
             events,
@@ -6867,9 +8782,17 @@ mod receipt_tests {
             sticker_downloads: HashSet::new(),
             sticker_give_up: HashSet::new(),
             download_retries: HashMap::new(),
+            sync_attempts: HashMap::new(),
+            sync_in_flight: HashMap::new(),
+            sync_aliases: HashMap::new(),
+            sync_retry_at: HashMap::new(),
+            #[cfg(any(test, feature = "demo"))]
+            sync_sink: None,
+            inflight_downloads: HashSet::new(),
             download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
             sticker_tries: HashMap::new(),
             thumb_tries: HashMap::new(),
+            thumb_heals: HashMap::new(),
             cache_swept: false,
             pdf: Arc::new(std::sync::Mutex::new(crate::pdf::Reader::default())),
             pdf_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -7315,6 +9238,116 @@ mod receipt_tests {
         }
     }
 
+    fn history_chunk(id: &str, archived: Option<bool>, name: Option<&str>) -> ParsedHistory {
+        ParsedHistory {
+            chats: vec![parse_conversation(wa::Conversation {
+                id: id.into(),
+                archived,
+                display_name: name.map(str::to_owned),
+                ..Default::default()
+            })],
+            push_names: Vec::new(),
+            lids: Vec::new(),
+            stickers: Vec::new(),
+        }
+    }
+
+    fn seed_chat(worker: &Worker, id: &str, name: &str, archived: bool) {
+        let mut chat = Chat::new(id.into(), name.into());
+        chat.archived = archived;
+        worker.archive.upsert_chat(&chat).expect("seeds");
+    }
+
+    fn stored_chat(worker: &Worker, id: &str) -> Chat {
+        worker.archive.chat(id).unwrap().expect("stored")
+    }
+
+    #[test]
+    fn history_without_archived_flag_keeps_the_stored_state() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        seed_chat(&worker, PEER, "Ada", true);
+        // An omitted flag keeps the stored archived state.
+        worker.apply_history(history_chunk(PEER, None, None), true);
+        assert!(stored_chat(&worker, PEER).archived);
+        // An explicit value archives or unarchives.
+        worker.apply_history(history_chunk(PEER, Some(false), None), true);
+        assert!(!stored_chat(&worker, PEER).archived);
+        worker.apply_history(history_chunk(PEER, Some(true), None), true);
+        assert!(stored_chat(&worker, PEER).archived);
+        // A new chat without the flag defaults to unarchived.
+        const NEWBIE: &str = "15550002222@s.whatsapp.net";
+        worker.apply_history(history_chunk(NEWBIE, None, None), true);
+        assert!(!stored_chat(&worker, NEWBIE).archived);
+    }
+
+    #[test]
+    fn history_without_a_group_name_keeps_the_known_subject() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        const GROUP: &str = "120363111222333@g.us";
+        seed_chat(&worker, GROUP, "Real Subject", false);
+        // A nameless chunk keeps the stored subject, not the fallback.
+        worker.apply_history(history_chunk(GROUP, None, None), true);
+        assert_eq!(stored_chat(&worker, GROUP).name, "Real Subject");
+        // Explicit renames still apply, even to the literal fallback.
+        worker.apply_history(history_chunk(GROUP, None, Some("New Subject")), true);
+        assert_eq!(stored_chat(&worker, GROUP).name, "New Subject");
+        worker.apply_history(history_chunk(GROUP, None, Some("Group")), true);
+        assert_eq!(stored_chat(&worker, GROUP).name, "Group");
+        // A group genuinely named Group is not treated as nameless.
+        worker.apply_history(history_chunk(GROUP, None, None), true);
+        assert_eq!(stored_chat(&worker, GROUP).name, "Group");
+        // A brand-new group without a name still gets the fallback.
+        const FRESH: &str = "120363999888777@g.us";
+        worker.apply_history(history_chunk(FRESH, None, None), true);
+        assert_eq!(stored_chat(&worker, FRESH).name, "Group");
+    }
+
+    #[test]
+    fn sends_require_a_supported_type_or_a_known_sendable_chat() {
+        let (worker, _events, _inbox, _wa) = worker();
+        // Unknown addresses: direct chats and groups may start, channels
+        // and broadcast lists may not, all without touching the archive.
+        assert!(Worker::send_allowed_unknown("15550001111@s.whatsapp.net"));
+        assert!(Worker::send_allowed_unknown("120363111222333@g.us"));
+        assert!(!Worker::send_allowed_unknown("55@newsletter"));
+        assert!(!Worker::send_allowed_unknown("55@broadcast"));
+        // A channel missing from the archive is still refused by address.
+        assert!(!worker.send_allowed("55@newsletter"));
+        // A new direct chat is allowed through.
+        assert!(worker.send_allowed("15550002222@s.whatsapp.net"));
+        // Known rows follow the shared rule: channels never, muted never.
+        const CHANNEL: &str = "77@newsletter";
+        seed_chat(&worker, CHANNEL, "News", false);
+        assert!(!worker.send_allowed(CHANNEL));
+        // Muted announcement state arrives through group info, the same
+        // path production uses (upsert_chat does not persist read_only).
+        seed_chat(&worker, "15550003333@s.whatsapp.net", "Muted", false);
+        worker
+            .archive
+            .set_group_info("15550003333@s.whatsapp.net", None, &[], true)
+            .expect("seeds");
+        assert!(!worker.send_allowed("15550003333@s.whatsapp.net"));
+        // One lookup decision, offline-testable: a store failure denies even
+        // a new direct chat, while unknown types follow the same rule.
+        assert!(!Worker::decide_send(
+            Err::<Option<Chat>, String>("boom".to_owned()),
+            "15550001111@s.whatsapp.net",
+        ));
+        assert!(Worker::decide_send(
+            Ok::<Option<Chat>, String>(None),
+            "15550001111@s.whatsapp.net",
+        ));
+        assert!(!Worker::decide_send(
+            Ok::<Option<Chat>, String>(None),
+            "55@newsletter",
+        ));
+        let channel = Chat::new("77@newsletter".into(), "News".into());
+        assert!(!Worker::decide_send(
+            Ok::<Option<Chat>, String>(Some(channel)),
+            "77@newsletter",
+        ));
+    }
+
     #[tokio::test]
     async fn mute_and_pin_sync_before_history_survive_replays_and_unsetting() {
         let (mut worker, _events, _inbox, _wa) = worker();
@@ -7710,5 +9743,2204 @@ mod receipt_tests {
         };
         assert_eq!(status("B2"), Delivery::Delivered);
         assert_eq!(status("B1"), Delivery::Sent);
+    }
+    #[tokio::test]
+    async fn archive_intent_survives_offline_and_converges_on_echo() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        assert!(worker.client.is_none(), "synthetic worker stays offline");
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            matches!(
+                worker
+                    .archive
+                    .queued_chat_sync(PEER, "archived")
+                    .expect("queue"),
+                Some((true, _, _))
+            ),
+            "offline intent stays queued"
+        );
+        // An agreeing echo, even older, converges and forgets the intent.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 1)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn newer_local_archive_intent_outranks_older_remote_state() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.archive.set_archived(PEER, true).expect("local");
+        worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 3_000)
+            .expect("intent");
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 1_000)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "local intent kept"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "intent kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn older_remote_archive_state_replaces_a_stale_intent() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.archive.set_archived(PEER, true).expect("local");
+        worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1_000)
+            .expect("intent");
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 3_000)))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "remote state applied"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_failures_surface_once_then_stay_quiet() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        let rev = worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1)
+            .expect("intent");
+        for _ in 0..4 {
+            // Each counted failure answers a real attempt of this revision.
+            worker.sync_in_flight.insert((PEER.into(), rev), ());
+            worker
+                .handle_command(Command::ChatSyncFlushed {
+                    chat: PEER.into(),
+                    rev,
+                    ok: false,
+                })
+                .await;
+        }
+        let errors = ui_events(&events)
+            .into_iter()
+            .filter(|event| matches!(event, Event::Error(_)))
+            .count();
+        assert_eq!(errors, 1, "one visible failure, not four");
+        worker.sync_in_flight.insert((PEER.into(), rev), ());
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev,
+                ok: false,
+            })
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .all(|event| !matches!(event, Event::Error(_))),
+            "stays quiet afterwards"
+        );
+        worker.sync_in_flight.insert((PEER.into(), rev), ());
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn tombstoned_replay_stays_off_screen_and_unread() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        let incoming = |id: &str, timestamp: i64| Message {
+            chat: PEER.into(),
+            sender: PEER.into(),
+            sender_name: None,
+            from_me: false,
+            ..own_message(id, timestamp)
+        };
+        worker.store_message(incoming("m1", 100), None, None);
+        assert_eq!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .unread,
+            1
+        );
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
+            .await;
+        // Deleting the only message recomputes the counters from survivors.
+        assert_eq!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .unread,
+            0
+        );
+        let _ = ui_events(&events);
+        // A late replay of the tombstoned id stays out of storage, bubbles,
+        // unread counts, and notifications alike.
+        worker.store_message(incoming("m1", 100), None, None);
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_none());
+        assert_eq!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .unread,
+            0
+        );
+        assert!(ui_events(&events).is_empty(), "no bubble and no ping");
+    }
+
+    #[tokio::test]
+    async fn delete_for_me_removes_one_row_and_blocks_its_replay() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 200)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
+            .await;
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_none());
+        assert!(worker.archive.message(PEER, "m2").expect("row").is_some());
+        let deleted = ui_events(&events)
+            .into_iter()
+            .filter(|event| matches!(event, Event::MessageDeleted { .. }))
+            .count();
+        assert_eq!(deleted, 1);
+        // A late replay of the same id stays gone.
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        assert!(
+            worker.archive.message(PEER, "m1").expect("row").is_none(),
+            "replay stays gone"
+        );
+        // Repeating the event is quiet.
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .all(|event| !matches!(event, Event::MessageDeleted { .. })),
+            "repeat stays quiet"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_for_me_keeps_files_a_survivor_still_references() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-delete-media-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&root);
+        let shared = root.join("shared.mp4");
+        let lone = root.join("lone.mp4");
+        std::fs::write(&shared, b"bytes").expect("file");
+        std::fs::write(&lone, b"bytes").expect("file");
+        let video = |id: &str, timestamp: i64, path: &std::path::Path| Message {
+            chat: PEER.into(),
+            content: Content::Video {
+                caption: None,
+                media: crate::model::Media {
+                    mime: "video/mp4".into(),
+                    size: 5,
+                    width: None,
+                    height: None,
+                    path: Some(path.to_path_buf()),
+                    state: Default::default(),
+                },
+                seconds: None,
+                gif: false,
+            },
+            ..own_message(id, timestamp)
+        };
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.store_message(video("m1", 100, &shared), None, None);
+        worker.store_message(video("m2", 200, &shared), None, None);
+        worker.store_message(video("m3", 300, &lone), None, None);
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
+            .await;
+        assert!(shared.exists(), "survivor still references it");
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m2", 250)))
+            .await;
+        assert!(!shared.exists(), "last reference deleted the file");
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m3", 350)))
+            .await;
+        assert!(!lone.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn stale_completion_cannot_erase_a_newer_intent() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        // Archive flies as revision 1; the user unarchives before it answers.
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        // The late success of revision 1 must not clear revision 2.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            matches!(
+                worker
+                    .archive
+                    .queued_chat_sync(PEER, "archived")
+                    .expect("queue"),
+                Some((false, _, 2))
+            ),
+            "newer intent survives"
+        );
+        // Its own completion converges.
+        worker.sync_in_flight.insert((PEER.into(), 2), ());
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 2,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn old_failure_does_not_spend_the_new_intent_budget() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: false,
+            })
+            .await;
+        assert!(
+            !worker
+                .sync_attempts
+                .keys()
+                .any(|(id, _)| id.as_str() == PEER),
+            "superseded failure spends nothing"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "newer intent still queued"
+        );
+    }
+
+    #[test]
+    fn retry_delay_backs_off_then_stops() {
+        use std::time::Duration;
+        assert_eq!(retry_delay(0), None);
+        assert_eq!(retry_delay(1), Some(Duration::from_secs(5)));
+        assert_eq!(retry_delay(2), Some(Duration::from_secs(15)));
+        assert_eq!(retry_delay(3), Some(Duration::from_secs(45)));
+        assert_eq!(retry_delay(4), Some(Duration::from_secs(300)));
+        assert_eq!(retry_delay(8), Some(Duration::from_secs(300)));
+        assert_eq!(retry_delay(9), None);
+    }
+
+    #[tokio::test]
+    async fn pump_retries_due_intents_without_new_input() {
+        use std::time::{Duration, Instant};
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1)
+            .expect("intent");
+        // A future deadline waits; a past one dispatches on the tick alone.
+        let now = Instant::now();
+        worker
+            .sync_retry_at
+            .insert(PEER.into(), now + Duration::from_secs(60));
+        worker.pump_chat_sync_at(now);
+        assert_eq!(
+            worker.sync_retry_at.get(PEER),
+            Some(&(now + Duration::from_secs(60)))
+        );
+        worker
+            .sync_retry_at
+            .insert(PEER.into(), now - Duration::from_secs(1));
+        worker.pump_chat_sync_at(now);
+        assert!(
+            worker.sync_retry_at.get(PEER).is_some_and(|at| *at > now),
+            "offline intent rescheduled, still queued"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn rekey_adopts_sync_bookkeeping() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker
+            .archive
+            .queue_chat_sync(PEER_LID, "archived", true, 100)
+            .expect("intent");
+        let rev = worker
+            .archive
+            .queue_chat_sync(PEER_LID, "archived", true, 100)
+            .expect("intent");
+        worker.sync_attempts.insert((PEER_LID.into(), rev), 3);
+        // A stale exhausted budget on the number must not leash the winner.
+        worker.sync_attempts.insert((PEER.into(), 999), 9);
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER_LID, "archived")
+                .expect("queue")
+                .is_none()
+        );
+        let moved = worker
+            .archive
+            .queued_chat_sync(PEER, "archived")
+            .expect("queue")
+            .expect("intent follows the number");
+        assert_ne!(moved.2, rev, "fresh revision on the move");
+        assert!(
+            !worker
+                .sync_attempts
+                .keys()
+                .any(|(id, _)| id.as_str() == PEER_LID),
+            "old keys pruned"
+        );
+        assert!(
+            !worker.sync_attempts.contains_key(&(PEER.into(), moved.2)),
+            "winner keeps a fresh budget despite the stale 9"
+        );
+        assert!(
+            worker.sync_retry_at.contains_key(PEER),
+            "survivor scheduled offline"
+        );
+    }
+
+    #[tokio::test]
+    async fn echo_with_in_flight_op_leaves_queue_alone() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        let _ = ui_events(&events);
+        // An agreeing echo cannot confirm an intent its own older
+        // operation may predate: the completion reconciles instead.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 1)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "queue kept while an op flies"
+        );
+        assert!(ui_events(&events).is_empty(), "echo stays quiet");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_unarchive_archive_keeps_the_last_intent() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        // A stale echo of the first archive must not touch the last one.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 1)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+        // The late success of revision 1 settles nothing and spends nothing.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            !worker
+                .sync_attempts
+                .keys()
+                .any(|(id, _)| id.as_str() == PEER),
+            "no budget spent on superseded revisions"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_sends_nothing_on_tick() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        let rev = worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1)
+            .expect("intent");
+        for _ in 0..300 {
+            worker.sync_in_flight.insert((PEER.into(), rev), ());
+            worker
+                .handle_command(Command::ChatSyncFlushed {
+                    chat: PEER.into(),
+                    rev,
+                    ok: false,
+                })
+                .await;
+        }
+        assert_eq!(
+            worker.sync_attempts.get(&(PEER.into(), rev)),
+            Some(&9),
+            "budget saturates instead of overflowing"
+        );
+        worker.sync_retry_at.remove(PEER);
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        for _ in 0..3 {
+            worker.pump_chat_sync();
+        }
+        assert!(
+            accepted.try_recv().is_err(),
+            "exhausted budget sends nothing"
+        );
+        assert!(
+            !worker.sync_in_flight.keys().any(|(id, _)| id == PEER),
+            "no new flight"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "queue kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn pump_dispatches_at_most_four_chats_per_round() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        for index in 0..6 {
+            let chat = format!("c{index}@s.whatsapp.net");
+            worker
+                .archive
+                .queue_chat_sync(&chat, "archived", true, index)
+                .expect("intent");
+        }
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker.pump_chat_sync();
+        let mut first_round = Vec::new();
+        while let Ok(job) = accepted.try_recv() {
+            first_round.push(job.chat);
+        }
+        assert_eq!(first_round.len(), 4, "one round dispatches four");
+        for chat in &first_round {
+            let rev = worker
+                .archive
+                .queued_chat_sync(chat, "archived")
+                .expect("queue")
+                .expect("pending")
+                .2;
+            worker
+                .handle_command(Command::ChatSyncFlushed {
+                    chat: chat.clone(),
+                    rev,
+                    ok: true,
+                })
+                .await;
+        }
+        worker.pump_chat_sync();
+        let mut second_round = Vec::new();
+        while let Ok(job) = accepted.try_recv() {
+            second_round.push(job.chat);
+        }
+        assert_eq!(second_round.len(), 2, "the rest follows next round");
+    }
+
+    #[tokio::test]
+    async fn fresh_intent_reopens_a_spent_budget() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.sync_attempts.insert((PEER.into(), 999), 9);
+        worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1)
+            .expect("intent");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        assert!(
+            !worker
+                .sync_attempts
+                .keys()
+                .any(|(id, _)| id.as_str() == PEER),
+            "explicit intent resets"
+        );
+        assert!(
+            worker.sync_retry_at.contains_key(PEER),
+            "offline intent scheduled"
+        );
+    }
+
+    #[tokio::test]
+    async fn learn_lid_failure_keeps_retry_open() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER_LID, "Old").expect("chat");
+        worker
+            .archive
+            .queue_chat_sync(PEER_LID, "archived", true, 100)
+            .expect("intent");
+        worker
+            .archive
+            .drop_table_for_test("chat_sync_queue")
+            .expect("sabotage");
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(
+            !worker.lid_to_pn.contains_key("167650256810092"),
+            "mapping returns for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn save_failure_repaints_and_warns() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .archive
+            .drop_table_for_test("chat_sync_queue")
+            .expect("sabotage");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "nothing persisted"
+        );
+        let seen: Vec<Event> = ui_events(&events);
+        assert!(
+            seen.iter().any(|event| matches!(event, Event::Error(_))),
+            "visible warning"
+        );
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, Event::ChatUpdated(_))),
+            "repaint from truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn exhausted_chats_do_not_starve_fresh_ones() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        for index in 0..4 {
+            let chat = format!("old{index}@s.whatsapp.net");
+            let rev = worker
+                .archive
+                .queue_chat_sync(&chat, "archived", true, index)
+                .expect("intent");
+            worker.sync_attempts.insert((chat, rev), 9);
+        }
+        for index in 0..2 {
+            let chat = format!("new{index}@s.whatsapp.net");
+            worker
+                .archive
+                .queue_chat_sync(&chat, "archived", true, 100 + index)
+                .expect("intent");
+        }
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        for _ in 0..3 {
+            worker.pump_chat_sync();
+        }
+        let mut seen = Vec::new();
+        while let Ok(job) = accepted.try_recv() {
+            seen.push(job.chat);
+        }
+        assert_eq!(seen.len(), 2, "only the fresh intents dispatch");
+        assert!(seen.iter().all(|chat| chat.starts_with("new")));
+        for chat in &seen {
+            let rev = worker
+                .archive
+                .queued_chat_sync(chat, "archived")
+                .expect("queue")
+                .expect("rev")
+                .2;
+            worker
+                .handle_command(Command::ChatSyncFlushed {
+                    chat: chat.clone(),
+                    rev,
+                    ok: true,
+                })
+                .await;
+        }
+        let pending: Vec<String> = worker
+            .archive
+            .pending_chat_syncs()
+            .expect("reads")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert!(
+            pending.iter().all(|id| id.starts_with("old")),
+            "exhausted four stay queued and quiet"
+        );
+    }
+
+    #[tokio::test]
+    async fn global_flight_ceiling_blocks_the_ninth_chat() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        for index in 0..9 {
+            let chat = format!("g{index}@s.whatsapp.net");
+            worker
+                .archive
+                .queue_chat_sync(&chat, "archived", true, index)
+                .expect("intent");
+        }
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker.pump_chat_sync();
+        worker.pump_chat_sync();
+        let mut seen = Vec::new();
+        while let Ok(job) = accepted.try_recv() {
+            seen.push(job.chat);
+        }
+        assert_eq!(seen.len(), 8, "eight fly at most");
+        let first = seen[0].clone();
+        let rev = worker
+            .archive
+            .queued_chat_sync(&first, "archived")
+            .expect("queue")
+            .expect("rev")
+            .2;
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: first,
+                rev,
+                ok: true,
+            })
+            .await;
+        worker.pump_chat_sync();
+        assert!(accepted.try_recv().is_ok(), "room frees the waiter");
+    }
+
+    #[tokio::test]
+    async fn echo_before_deadline_does_not_send() {
+        use std::time::{Duration, Instant};
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .archive
+            .queue_chat_sync(PEER, "archived", true, 1)
+            .expect("intent");
+        let now = Instant::now();
+        worker
+            .sync_retry_at
+            .insert(PEER.into(), now + Duration::from_secs(300));
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 0)))
+            .await;
+        assert!(accepted.try_recv().is_err(), "backoff respected");
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+        worker
+            .sync_retry_at
+            .insert(PEER.into(), now - Duration::from_secs(1));
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 0)))
+            .await;
+        assert!(accepted.try_recv().is_ok(), "due echo flushes");
+    }
+
+    #[tokio::test]
+    async fn newer_remote_change_during_flight_wins() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        let _ = ui_events(&events);
+        let later = whatsapp_rust::wacore::time::now_millis() + 60_000;
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, later)))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "phone change applied"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none(),
+            "intent superseded"
+        );
+        let applied = ui_events(&events)
+            .into_iter()
+            .filter(|e| matches!(e, Event::ChatUpdated(_)))
+            .count();
+        assert_eq!(applied, 1, "ui follows the phone");
+        // The stale success must not flip the state back.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_stale_op_leaves_newer_remote_state() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        let later = whatsapp_rust::wacore::time::now_millis() + 60_000;
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, later)))
+            .await;
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: false,
+            })
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+        assert!(
+            ui_events(&events)
+                .iter()
+                .all(|e| !matches!(e, Event::Error(_))),
+            "no failure to report"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_intent_after_remote_then_old_echo() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 1_000)))
+            .await;
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 500)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "local intent kept"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "intent kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_with_queued_intent_dispatches_again() {
+        // Attempts live in memory while the queue lives in storage: a fresh
+        // worker over the same persisted row must dispatch again. Restart
+        // reopens the budget by design; only explicit intents reset it sooner.
+        let archive = {
+            let (worker, _events, _inbox, _wa) = worker();
+            worker
+                .archive
+                .queue_chat_sync(PEER, "archived", true, 1)
+                .expect("persisted intent");
+            worker.archive
+        };
+        let (mut restarted, _events, _inbox, _wa) = worker();
+        restarted.archive = archive;
+        assert!(restarted.sync_attempts.is_empty());
+        let (sink, accepted) = std::sync::mpsc::channel();
+        restarted.sync_sink = Some(sink);
+        restarted.pump_chat_sync();
+        assert!(accepted.try_recv().is_ok(), "restart reopens dispatch");
+    }
+
+    #[tokio::test]
+    async fn completed_intent_rejects_older_echo() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        let _ = ui_events(&events);
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 1)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "stale echo ignored"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none()
+        );
+        assert!(ui_events(&events).is_empty(), "nothing repaints");
+    }
+
+    #[tokio::test]
+    async fn agreeing_echo_during_flight_then_old_echo() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        worker.sync_in_flight.insert((PEER.into(), 1), ());
+        let now = whatsapp_rust::wacore::time::now_millis();
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, now)))
+            .await;
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        let _ = ui_events(&events);
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 1)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "old echo ignored"
+        );
+        assert!(ui_events(&events).is_empty());
+    }
+
+    #[tokio::test]
+    async fn agreeing_echo_midflight_sets_order_that_rejects_older_echo() {
+        let make_worker = worker;
+        let (mut worker, events, _inbox, _wa) = make_worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        // Local archive intent at T100, already dispatched.
+        let rev = worker
+            .archive
+            .set_archived_queued(PEER, true, 100)
+            .expect("intent");
+        worker.sync_in_flight.insert((PEER.into(), rev), ());
+        // Agreeing echo at T300 while flying: order remembered, queue kept.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 300)))
+            .await;
+        assert_eq!(
+            worker.archive.sync_order(PEER).expect("order"),
+            Some((300, true)),
+            "agreeing echo sets the accepted order"
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "queue stays until the completion"
+        );
+        // Completion records T100 but newest-wins keeps T300.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev,
+                ok: true,
+            })
+            .await;
+        assert_eq!(
+            worker.archive.sync_order(PEER).expect("order"),
+            Some((300, true)),
+            "completion never moves the marker back"
+        );
+        let _ = ui_events(&events);
+        // A delayed older echo at T200 loses against T300.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 200)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "older echo rejected"
+        );
+        assert!(ui_events(&events).is_empty());
+        // A genuinely new state at T400 still applies.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 400)))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "newer state applies"
+        );
+        // Same story after reopening the same store: the order survived.
+        let archive = worker.archive;
+        let (mut restarted, _events, _inbox, _wa) = make_worker();
+        restarted.archive = archive;
+        restarted
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 350)))
+            .await;
+        assert!(
+            !restarted
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "order persists across restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_with_two_flights_counts_both_until_done() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        // One dispatch on each id before the equivalence is known. The
+        // migrated id holds the newer intent, so it wins with a fresh
+        // revision and both flights go stale against the survivor.
+        worker.archive.ensure_chat(PEER_LID, "Old").expect("chat");
+        worker.archive.ensure_chat(PEER, "New").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        worker
+            .handle_command(Command::SetArchived(PEER_LID.into(), true))
+            .await;
+        let r1 = worker
+            .archive
+            .queued_chat_sync(PEER_LID, "archived")
+            .expect("queue")
+            .expect("intent")
+            .2;
+        let r2 = worker
+            .archive
+            .queued_chat_sync(PEER, "archived")
+            .expect("queue")
+            .expect("intent")
+            .2;
+        assert_eq!(worker.sync_in_flight.len(), 2, "two real tasks");
+        assert!(accepted.try_recv().is_ok(), "first dispatch went out");
+        assert!(accepted.try_recv().is_ok(), "second dispatch went out");
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert_eq!(
+            worker.sync_in_flight.len(),
+            2,
+            "migration keeps both tasks, it never overwrites one"
+        );
+        assert!(
+            accepted.try_recv().is_err(),
+            "no third task while two still fly"
+        );
+        // The older task fails once the survivor exists: it yields without
+        // spending, and still no new task starts while one flies.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER_LID.into(),
+                rev: r1,
+                ok: false,
+            })
+            .await;
+        assert_eq!(worker.sync_in_flight.len(), 1, "one task left");
+        assert!(
+            accepted.try_recv().is_err(),
+            "survivor waits for the remaining flight"
+        );
+        // The second task succeeds but is stale against the survivor, so
+        // the survivor finally goes out on its own revision.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: r2,
+                ok: true,
+            })
+            .await;
+        assert!(accepted.try_recv().is_ok(), "survivor dispatched last");
+        let r3 = worker
+            .sync_in_flight
+            .keys()
+            .find(|(id, _)| id.as_str() == PEER)
+            .map(|(_, rev)| *rev)
+            .expect("survivor flight");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: r3,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none(),
+            "winner converged"
+        );
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "newest intent value kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_completion_persist_keeps_intent_and_recovers() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(accepted.try_recv().is_ok(), "dispatch went out");
+        let rev = worker
+            .sync_in_flight
+            .keys()
+            .find(|(id, _)| id.as_str() == PEER)
+            .map(|(_, rev)| *rev)
+            .expect("flight");
+        // The order write fails while the queue delete would succeed: the
+        // transaction must roll everything back instead of half-persisting.
+        worker
+            .archive
+            .test_batch("CREATE TRIGGER order_abort BEFORE INSERT ON chat_sync_order BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+            .expect("trigger");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some(),
+            "intent kept for recovery"
+        );
+        assert!(
+            worker.archive.sync_order(PEER).expect("order").is_none(),
+            "no half-persisted order"
+        );
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|e| matches!(e, Event::Error(_))),
+            "failure is visible"
+        );
+        assert!(worker.sync_retry_at.contains_key(PEER), "retry scheduled");
+        worker
+            .archive
+            .test_batch("DROP TRIGGER order_abort")
+            .expect("cleanup");
+        // Recovery resends the same idempotent value and converges.
+        worker.push_archive_sync(PEER);
+        assert!(accepted.try_recv().is_ok(), "resent after persist failure");
+        let retry = worker
+            .sync_in_flight
+            .keys()
+            .find(|(id, _)| id.as_str() == PEER)
+            .map(|(_, rev)| *rev)
+            .expect("retry flight");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: retry,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none(),
+            "recovered"
+        );
+        assert!(
+            worker.archive.sync_order(PEER).expect("order").is_some(),
+            "order recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_without_queue_follows_newest_accepted_state() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER_LID, "Old").expect("chat");
+        worker.archive.ensure_chat(PEER, "New").expect("chat");
+        // Old id archived long ago, number unarchived more recently.
+        worker
+            .archive
+            .apply_remote_archive(PEER_LID, true, 100)
+            .expect("order");
+        worker
+            .archive
+            .apply_remote_archive(PEER, false, 200)
+            .expect("order");
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "newest accepted state wins without intent"
+        );
+        assert_eq!(
+            worker.archive.sync_order(PEER).expect("order"),
+            Some((200, false)),
+            "accepted order kept"
+        );
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|e| matches!(e, Event::Chats(_))),
+            "reconciled chat repainted"
+        );
+    }
+    #[tokio::test]
+    async fn migration_keeps_one_flight_for_both_ids() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker
+            .handle_command(Command::SetArchived(PEER_LID.into(), true))
+            .await;
+        assert_eq!(worker.sync_in_flight.len(), 1);
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert_eq!(
+            worker.sync_in_flight.len(),
+            1,
+            "same task transferred, not duplicated"
+        );
+        assert!(accepted.try_recv().is_ok(), "first dispatch went out");
+        assert!(
+            accepted.try_recv().is_err(),
+            "no second dispatch while flying"
+        );
+        let survivor = worker
+            .archive
+            .queued_chat_sync(PEER, "archived")
+            .expect("queue")
+            .expect("survivor");
+        assert!(survivor.0, "winner value moved");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER_LID.into(),
+                rev: 1,
+                ok: true,
+            })
+            .await;
+        assert!(
+            accepted.try_recv().is_ok(),
+            "survivor dispatched after completion"
+        );
+        assert!(
+            worker.archive.chat(PEER).expect("chat").is_none(),
+            "no chat row invented"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_failed_task_dispatches_survivor() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker
+            .handle_command(Command::SetArchived(PEER_LID.into(), true))
+            .await;
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(accepted.try_recv().is_ok());
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER_LID.into(),
+                rev: 1,
+                ok: false,
+            })
+            .await;
+        assert!(
+            accepted.try_recv().is_ok(),
+            "survivor dispatched after failure"
+        );
+        assert!(
+            worker.sync_attempts.is_empty(),
+            "superseded failure spends nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn migration_during_backoff_sends_nothing_early() {
+        use std::time::{Duration, Instant};
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker
+            .archive
+            .queue_chat_sync(PEER_LID, "archived", true, 100)
+            .expect("intent");
+        let now = Instant::now();
+        worker
+            .sync_retry_at
+            .insert(PEER_LID.into(), now + Duration::from_secs(300));
+        worker.learn_lid("167650256810092", "4917663430455");
+        assert!(accepted.try_recv().is_err(), "inherited deadline respected");
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+    }
+
+    fn delete_update(jid: &str, timestamp: i64) -> wa_events::Event {
+        wa_events::Event::DeleteChatUpdate(
+            wa_events::DeleteChatUpdate::builder()
+                .jid(jid.parse().expect("jid"))
+                .delete_media(false)
+                .timestamp(whatsapp_rust::wacore::time::from_secs(timestamp).expect("time"))
+                .action(Box::new(wa::sync_action_value::DeleteChatAction::default()))
+                .from_full_sync(false)
+                .build(),
+        )
+    }
+
+    fn archive_update(chat: &str, archived: bool, timestamp_ms: i64) -> wa_events::Event {
+        wa_events::Event::ArchiveUpdate(
+            wa_events::ArchiveUpdate::builder()
+                .jid(chat.parse().expect("jid"))
+                .timestamp(whatsapp_rust::wacore::time::from_millis(timestamp_ms).expect("time"))
+                .action(Box::new(wa::sync_action_value::ArchiveChatAction {
+                    archived: Some(archived),
+                    ..Default::default()
+                }))
+                .from_full_sync(false)
+                .build(),
+        )
+    }
+
+    fn delete_for_me_update(chat: &str, id: &str, timestamp_ms: i64) -> wa_events::Event {
+        wa_events::Event::DeleteMessageForMeUpdate(
+            wa_events::DeleteMessageForMeUpdate::builder()
+                .chat_jid(chat.parse().expect("jid"))
+                .message_id(id.to_owned())
+                .from_me(false)
+                .timestamp(whatsapp_rust::wacore::time::from_millis(timestamp_ms).expect("time"))
+                .action(Box::new(
+                    wa::sync_action_value::DeleteMessageForMeAction::default(),
+                ))
+                .from_full_sync(false)
+                .build(),
+        )
+    }
+
+    fn clear_update(jid: &str, timestamp: i64, delete_starred: bool) -> wa_events::Event {
+        wa_events::Event::ClearChatUpdate(
+            wa_events::ClearChatUpdate::builder()
+                .jid(jid.parse().expect("jid"))
+                .delete_starred(delete_starred)
+                .delete_media(false)
+                .timestamp(whatsapp_rust::wacore::time::from_secs(timestamp).expect("time"))
+                .action(Box::new(wa::sync_action_value::ClearChatAction::default()))
+                .from_full_sync(false)
+                .build(),
+        )
+    }
+
+    fn ui_events(events: &std::sync::mpsc::Receiver<Event>) -> Vec<Event> {
+        events.try_iter().collect()
+    }
+
+    #[tokio::test]
+    async fn delete_then_late_history_stays_deleted() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 200)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        worker
+            .handle_wa_event(Arc::new(delete_update(PEER, 200)))
+            .await;
+        assert!(worker.archive.chat(PEER).expect("chat").is_none());
+        assert!(ui_events(&events).iter().any(|event| matches!(
+            event,
+            Event::ChatRemoved { chat } if chat == PEER
+        )));
+        // Late history below the barrier never resurrects the chat.
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("late", 150)
+            },
+            None,
+            None,
+        );
+        assert!(worker.archive.chat(PEER).expect("chat").is_none());
+        assert!(worker.archive.message(PEER, "late").expect("row").is_none());
+        // A genuinely new message revives the conversation.
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("fresh", 250)
+            },
+            None,
+            None,
+        );
+        assert_eq!(
+            worker
+                .archive
+                .message(PEER, "fresh")
+                .expect("row")
+                .unwrap()
+                .id,
+            "fresh"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_keeps_newer_messages_and_announces_once() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 300)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        worker
+            .handle_wa_event(Arc::new(clear_update(PEER, 200, true)))
+            .await;
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_none());
+        assert!(worker.archive.message(PEER, "m2").expect("row").is_some());
+        assert!(worker.archive.chat(PEER).expect("chat").is_some());
+        let cleared = ui_events(&events)
+            .into_iter()
+            .filter(|event| matches!(event, Event::ChatCleared { .. }))
+            .count();
+        assert_eq!(cleared, 1);
+        // A duplicated clear finds a chat but nothing to remove: quiet.
+        worker
+            .handle_wa_event(Arc::new(clear_update(PEER, 200, true)))
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .all(|event| !matches!(event, Event::ChatCleared { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_keeping_starred_deletes_nothing() {
+        // The archive cannot tell starred messages apart yet, so a clear
+        // that must preserve them must not delete anything: losing
+        // user-curated messages with no way back is worse than divergence.
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("m1", 100), ("m2", 200)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        worker
+            .handle_wa_event(Arc::new(clear_update(PEER, 200, false)))
+            .await;
+        // Storing the fixtures above already emitted; only the clear may
+        // speak from here on.
+        let _ = ui_events(&events);
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_some());
+        assert!(worker.archive.message(PEER, "m2").expect("row").is_some());
+        assert_eq!(
+            worker.archive.removal_point(PEER).expect("point"),
+            None,
+            "no barrier either: nothing was removed"
+        );
+        assert!(
+            ui_events(&events).is_empty(),
+            "an unapplied clear stays completely quiet"
+        );
+    }
+
+    #[test]
+    fn removed_files_survive_failed_reference_lookups() {
+        let (worker, _events, _inbox, _wa) = worker();
+        let dir = std::env::temp_dir().join(format!("zapfast-refcheck-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join("kept.jpg");
+        std::fs::write(&file, b"kept").expect("writes");
+        // Break the reference lookup itself: without answers from the
+        // database, no candidate may be treated as unreferenced.
+        worker
+            .archive
+            .drop_table_for_test("messages")
+            .expect("breaks");
+        Worker::drop_cached_media(&worker.archive, std::slice::from_ref(&file));
+        assert!(file.exists(), "a failed lookup keeps every file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removed_files_cover_favorites_and_catalog() {
+        let (worker, _events, _inbox, _wa) = worker();
+        let dir = std::env::temp_dir().join(format!("zapfast-refcover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let favorite = dir.join("favorite.webp");
+        let cataloged = dir.join("cataloged.webp");
+        let orphan = dir.join("orphan.webp");
+        for file in [&favorite, &cataloged, &orphan] {
+            std::fs::write(file, b"sticker").expect("writes");
+        }
+        // No message references any of them: one is favorited, one is
+        // cataloged, one is truly orphaned.
+        assert!(
+            worker
+                .archive
+                .toggle_sticker_favorite(&favorite)
+                .expect("stars")
+        );
+        worker
+            .archive
+            .upsert_phone_sticker("abc123", &[], 0, 0.0)
+            .expect("catalogs");
+        worker
+            .archive
+            .set_sticker_path("abc123", &cataloged)
+            .expect("paths");
+        Worker::drop_cached_media(
+            &worker.archive,
+            &[favorite.clone(), cataloged.clone(), orphan.clone()],
+        );
+        assert!(favorite.exists(), "a favorite without messages survives");
+        assert!(
+            cataloged.exists(),
+            "a cataloged copy without messages survives"
+        );
+        assert!(!orphan.exists(), "a true orphan is still reclaimed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn lid_delete_applies_to_the_phone_chat() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.learn_lid("167650256810092", "4917663430455");
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        worker
+            .handle_wa_event(Arc::new(delete_update(PEER_LID, 100)))
+            .await;
+        assert!(worker.archive.chat(PEER).expect("chat").is_none());
+        assert!(ui_events(&events).iter().any(|event| matches!(
+            event,
+            Event::ChatRemoved { chat } if chat == PEER
+        )));
+    }
+
+    #[test]
+    fn removed_media_files_drop_only_when_unreferenced() {
+        let (worker, _events, _inbox, _wa) = worker();
+        // Its own folder: the archive removal test owns zapfast-removal in
+        // this process and both remove their folder.
+        let dir =
+            std::env::temp_dir().join(format!("zapfast-removal-media-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let shared = dir.join("shared.jpg");
+        let orphan = dir.join("orphan.jpg");
+        std::fs::write(&shared, b"shared").expect("writes");
+        std::fs::write(&orphan, b"orphan").expect("writes");
+        // Two surviving rows reference the same file; the removed row owns
+        // the orphan alone.
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp, path) in [
+            ("old", 100, orphan.to_str().expect("path")),
+            ("keeper", 300, shared.to_str().expect("path")),
+            ("keeper2", 400, shared.to_str().expect("path")),
+        ] {
+            let mut message = own_message(id, timestamp);
+            message.chat = PEER.into();
+            message.content = Content::Image {
+                caption: None,
+                media: crate::model::Media {
+                    mime: "image/jpeg".into(),
+                    size: 6,
+                    width: None,
+                    height: None,
+                    path: Some(path.into()),
+                    state: crate::model::MediaState::Idle,
+                },
+            };
+            worker
+                .archive
+                .insert_message(&message, None)
+                .expect("insert");
+        }
+        let removed = worker
+            .archive
+            .remove_chat_through(PEER, 200, false)
+            .expect("removes");
+        // The orphan is collected; the shared file still has live rows.
+        assert!(removed.media.contains(&orphan));
+        Worker::drop_cached_media(&worker.archive, &removed.media);
+        assert!(!orphan.exists(), "unreferenced file is deleted");
+        assert!(shared.exists(), "referenced file is preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_limits_cap_declared_plus_slack() {
+        let ten_mebibytes = 10 * 1024 * 1024;
+        assert_eq!(
+            download_limits_for(Some(ten_mebibytes)).max_bytes,
+            ten_mebibytes + 1024 * 1024
+        );
+        assert_eq!(
+            download_limits_for(None).max_bytes,
+            Worker::DOWNLOAD_MAX_BYTES
+        );
+        assert_eq!(
+            download_limits_for(Some(u64::MAX)).max_bytes,
+            Worker::DOWNLOAD_MAX_BYTES,
+            "a lying length cannot raise the ceiling"
+        );
+        assert_eq!(
+            download_limits_for(Some(100)).timeout,
+            Worker::DOWNLOAD_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn limited_file_enforces_cap_and_resets_on_truncate() {
+        use whatsapp_rust::download::DownloadWriter;
+        let dir = std::env::temp_dir().join(format!("zapfast-limited-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("sink.bin");
+        let mut sink = LimitedFile::create(&path, 16).expect("creates");
+        use std::io::{Seek, SeekFrom, Write};
+        sink.write_all(&[7u8; 10]).expect("fits");
+        assert!(sink.write_all(&[7u8; 7]).is_err(), "over budget fails");
+        sink.write_all(&[7u8; 6]).expect("exact fit lands");
+        sink.truncate(0).expect("truncate");
+        // The library always rewinds after clearing; the position is not
+        // part of the truncate contract.
+        sink.seek(SeekFrom::Start(0)).expect("rewind after clear");
+        sink.write_all(&[9u8; 16])
+            .expect("budget restored after clear");
+        let mut back = Vec::new();
+        use std::io::Read;
+        std::fs::File::open(&path)
+            .expect("opens")
+            .read_to_end(&mut back)
+            .expect("reads");
+        assert_eq!(back, vec![9u8; 16]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chunked_streaming_never_holds_the_whole_file() {
+        // 32 MiB through 8 KiB writes: the file is exact while no single
+        // allocation ever holds more than one chunk on our side.
+        let dir = std::env::temp_dir().join(format!("zapfast-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("big.bin");
+        let mut sink = LimitedFile::create(&path, 40 * 1024 * 1024).expect("creates");
+        use std::io::Write;
+        let chunk = vec![3u8; 8192];
+        for _ in 0..4096 {
+            sink.write_all(&chunk).expect("streams");
+        }
+        assert_eq!(
+            std::fs::metadata(&path).expect("stat").len(),
+            32 * 1024 * 1024
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temp_guard_cleans_up() {
+        let dir = std::env::temp_dir().join(format!("zapfast-guard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("partial.part");
+        std::fs::write(&path, b"partial").expect("writes");
+        drop(TempGuard::new(path.clone()));
+        assert!(!path.exists(), "the partial file is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn publish_moves_aside_and_restores() {
+        let dir = std::env::temp_dir().join(format!("zapfast-publish-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.expect("creates");
+        let dest = dir.join("photo.jpg");
+        let temp = dir.join("photo.jpg.part");
+        // Fresh publish lands the file.
+        tokio::fs::write(&temp, b"new").await.expect("writes");
+        publish_download(&temp, &dest).await.expect("publishes");
+        assert_eq!(tokio::fs::read(&dest).await.expect("reads"), b"new");
+        assert!(!temp.exists(), "temporary renamed away");
+        // Over an existing copy the new file wins and no backup lingers.
+        tokio::fs::write(&temp, b"newer").await.expect("writes");
+        publish_download(&temp, &dest).await.expect("publishes");
+        assert_eq!(tokio::fs::read(&dest).await.expect("reads"), b"newer");
+        assert!(!dir.join("photo.jpg.bak").exists());
+        // A missing temporary fails without touching the last valid copy.
+        let missing = dir.join("gone.part");
+        assert!(publish_download(&missing, &dest).await.is_err());
+        assert_eq!(
+            tokio::fs::read(&dest).await.expect("reads"),
+            b"newer",
+            "the last valid copy survives a failed publish"
+        );
+        assert!(!dir.join("photo.jpg.bak").exists());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn expired_media_classification() {
+        assert!(is_expired_media_error(&anyhow::anyhow!(
+            "Download failed with status: 403"
+        )));
+        assert!(is_expired_media_error(&anyhow::anyhow!(
+            "not found/expired with status: 410"
+        )));
+        assert!(!is_expired_media_error(&anyhow::anyhow!(
+            "Download failed with status: 500"
+        )));
+        assert!(!is_expired_media_error(&anyhow::anyhow!(
+            "socket closed without a status"
+        )));
+    }
+
+    fn png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([10, 200, 30, 255]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(picture)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encodes");
+        bytes
+    }
+
+    #[test]
+    fn image_validation_decodes_small_and_sniffs_large() {
+        let dir = std::env::temp_dir().join(format!("zapfast-imgval-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        // Small and valid: headers plus a full decode.
+        let small = dir.join("small.png");
+        std::fs::write(&small, png_bytes(4, 4)).expect("writes");
+        assert!(validate_image_file(&small, "image/png", 1024 * 1024).is_ok());
+        // Truncated mid-file: the full decode below the threshold catches it.
+        let mut cut = png_bytes(16, 16);
+        cut.truncate(cut.len() / 2);
+        let truncated = dir.join("cut.png");
+        std::fs::write(&truncated, &cut).expect("writes");
+        assert!(validate_image_file(&truncated, "image/png", 1024 * 1024).is_err());
+        // Valid headers with a garbage tail past a tiny threshold: accepted
+        // on headers alone, without reading the megabytes that follow.
+        let mut big = png_bytes(4, 4);
+        big.extend_from_slice(&[0u8; 1024 * 1024]);
+        let padded = dir.join("padded.png");
+        std::fs::write(&padded, &big).expect("writes");
+        assert!(validate_image_file(&padded, "image/png", 100).is_ok());
+        // Pure garbage, tens of megabytes: the header sniff fails fast
+        // without ever holding pixels.
+        let garbage = dir.join("garbage.bin");
+        std::fs::write(&garbage, vec![0u8; 40 * 1024 * 1024]).expect("writes");
+        assert!(validate_image_file(&garbage, "image/png", 1024 * 1024).is_err());
+        // Empty is empty, at any threshold.
+        let empty = dir.join("empty.png");
+        std::fs::write(&empty, []).expect("writes");
+        assert!(validate_image_file(&empty, "image/png", 1024 * 1024).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_validation_rejects_excessive_dimensions() {
+        let dir = std::env::temp_dir().join(format!("zapfast-imgdim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let wide = dir.join("wide.png");
+        std::fs::write(&wide, png_bytes(66000, 8)).expect("writes");
+        assert!(validate_image_file(&wide, "image/png", 1024 * 1024 * 1024).is_err());
+        // Header-only path skips the decoder, so only the explicit check
+        // guards it. A bare BMP header carries dimensions with no pixel
+        // data at all, which is exactly what that path reads; sides fit
+        // but pixels do not.
+        let huge = dir.join("huge.bmp");
+        std::fs::write(&huge, bmp_header_only(60000, 6000)).expect("writes");
+        assert!(validate_image_file(&huge, "image/bmp", 0).is_err());
+        let tiny = dir.join("tiny.bmp");
+        std::fs::write(&tiny, bmp_header_only(4, 4)).expect("writes");
+        assert!(validate_image_file(&tiny, "image/bmp", 0).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bare BMP header with dimensions but no pixel data. Header-only
+    /// validation reads exactly these bytes.
+    fn bmp_header_only(width: i32, height: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"BM");
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 4]);
+        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes.extend_from_slice(&height.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 24]);
+        bytes
+    }
+
+    #[test]
+    fn image_dimension_boundaries_hold() {
+        assert!(image_dimensions_acceptable(4, 4));
+        assert!(image_dimensions_acceptable(65535, 1525));
+        assert!(!image_dimensions_acceptable(0, 4));
+        assert!(!image_dimensions_acceptable(4, 0));
+        assert!(!image_dimensions_acceptable(65536, 8));
+        assert!(!image_dimensions_acceptable(8, 65536));
+        // Sides fit, pixels do not: 360 megapixels needs no fixture.
+        assert!(!image_dimensions_acceptable(60000, 6000));
+        assert!(!image_dimensions_acceptable(65535, 65535));
+    }
+
+    #[test]
+    fn image_validations_run_concurrently() {
+        // Eight parallel validations of the same small file: no shared
+        // state, every one answers.
+        let dir = std::env::temp_dir().join(format!("zapfast-imgpar-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join("small.png");
+        std::fs::write(&file, png_bytes(8, 8)).expect("writes");
+        let answers: Vec<bool> = std::thread::scope(|scope| {
+            (0..8)
+                .map(|_| {
+                    let file = file.clone();
+                    scope
+                        .spawn(move || validate_image_file(&file, "image/png", 1024 * 1024).is_ok())
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join().expect("joins"))
+                .collect()
+        });
+        assert!(answers.iter().all(|ok| *ok));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn interrupted_publishes_restore_or_clean_up() {
+        let dir = std::env::temp_dir().join(format!("zapfast-pubrecover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        // Backup without destination: the publish died mid-step and the
+        // backup is still the last valid copy.
+        std::fs::write(dir.join("photo.jpg.bak"), b"old").expect("writes");
+        // Backup beside a destination: the publish completed and only its
+        // cleanup was missed.
+        std::fs::write(dir.join("done.jpg"), b"new").expect("writes");
+        std::fs::write(dir.join("done.jpg.bak"), b"old").expect("writes");
+        let (restored, preserved) = recover_interrupted_publishes(&dir);
+        assert_eq!(restored, 1);
+        assert!(preserved.is_empty(), "nothing still pending");
+        assert_eq!(std::fs::read(dir.join("photo.jpg")).expect("reads"), b"old");
+        assert!(!dir.join("photo.jpg.bak").exists());
+        assert_eq!(std::fs::read(dir.join("done.jpg")).expect("reads"), b"new");
+        assert!(!dir.join("done.jpg.bak").exists());
+        let (restored, _) = recover_interrupted_publishes(&dir);
+        assert_eq!(restored, 0, "second run is quiet");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_restore_keeps_everything() {
+        let dir = std::env::temp_dir().join(format!("zapfast-pubfail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        // The destination slot is occupied by a directory, so the backup
+        // cannot move back: nothing may be deleted.
+        std::fs::create_dir_all(dir.join("stuck.jpg")).expect("creates");
+        std::fs::write(dir.join("stuck.jpg.bak"), b"old").expect("writes");
+        let (restored, preserved) = recover_interrupted_publishes(&dir);
+        assert_eq!(restored, 0);
+        assert_eq!(preserved, vec![dir.join("stuck.jpg.bak")]);
+        assert!(dir.join("stuck.jpg.bak").exists(), "the backup stays");
+        assert!(dir.join("stuck.jpg").is_dir(), "the slot is untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn age_file(file: &std::path::Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .expect("opens")
+            .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+            .expect("ages");
+    }
+
+    #[test]
+    fn startup_flow_keeps_pending_backups_and_favorites() {
+        // The full startup composition, aged past the sweep settle time
+        // without waiting: recover first, then sweep with the unified
+        // keep set. A favorite-only file, a cataloged file, and a backup
+        // that cannot move back all survive; a true orphan does not.
+        let (worker, _events, _inbox, _wa) = worker();
+        let dir = std::env::temp_dir().join(format!("zapfast-startup-flow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let favorite = dir.join("favorite.webp");
+        let cataloged = dir.join("cataloged.webp");
+        let orphan = dir.join("orphan.webp");
+        for file in [&favorite, &cataloged, &orphan] {
+            std::fs::write(file, b"sticker").expect("writes");
+            age_file(file);
+        }
+        assert!(
+            worker
+                .archive
+                .toggle_sticker_favorite(&favorite)
+                .expect("stars")
+        );
+        worker
+            .archive
+            .upsert_phone_sticker("flow123", &[], 0, 0.0)
+            .expect("catalogs");
+        worker
+            .archive
+            .set_sticker_path("flow123", &cataloged)
+            .expect("paths");
+        std::fs::create_dir_all(dir.join("stuck.jpg")).expect("creates");
+        std::fs::write(dir.join("stuck.jpg.bak"), b"old").expect("writes");
+        age_file(&dir.join("stuck.jpg.bak"));
+        std::fs::write(dir.join("restored.jpg.bak"), b"old").expect("writes");
+        // The exact startup composition: proven references, then recover,
+        // then the preserved backups join the same keep set.
+        let protected = worker.archive.protected_files().expect("provable");
+        let mut keep = sweep_keep_set(protected, &[]);
+        let (restored, preserved) = recover_interrupted_publishes(&dir);
+        assert_eq!(restored, 1, "the orphaned backup moves back");
+        keep.extend(sweep_keep_set(std::collections::HashSet::new(), &preserved));
+        let freed = crate::cache::sweep(&dir, &|path| {
+            keep.contains(&path.to_string_lossy().into_owned())
+        });
+        assert!(favorite.exists(), "favorite-only survives the sweep");
+        assert!(cataloged.exists(), "cataloged survives the sweep");
+        assert!(
+            dir.join("stuck.jpg.bak").exists(),
+            "pending backup survives"
+        );
+        assert!(dir.join("restored.jpg").exists(), "restored file stays");
+        assert!(!orphan.exists(), "a true aged orphan is reclaimed");
+        assert_eq!(freed.files, 1, "only the orphan went");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn damaged_favorites_abort_protection() {
+        let (worker, _events, _inbox, _wa) = worker();
+        worker
+            .archive
+            .set_meta("sticker_favorites", "not json")
+            .expect("damages");
+        assert!(
+            worker
+                .archive
+                .sticker_favorites_strict()
+                .expect("reads")
+                .is_none(),
+            "damaged list is unprovable, not empty"
+        );
+        assert!(
+            worker.archive.protected_files().is_none(),
+            "no proof, no cleanup anywhere"
+        );
+        let dir = std::env::temp_dir().join(format!("zapfast-damaged-fav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join("candidate.jpg");
+        std::fs::write(&file, b"candidate").expect("writes");
+        Worker::drop_cached_media(&worker.archive, std::slice::from_ref(&file));
+        assert!(file.exists(), "unprovable keeps every file");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

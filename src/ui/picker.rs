@@ -27,6 +27,7 @@ enum Row {
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
+    drain_thumb_results(app, ctx);
     let Some(tab) = app.picker else {
         return;
     };
@@ -394,6 +395,26 @@ mod emoji_tests {
     use super::*;
 
     #[test]
+    fn thumbnail_heals_apply_worker_results_without_the_disk() {
+        let ctx = egui::Context::default();
+        let thumbs = std::env::temp_dir();
+        let orig = std::path::PathBuf::from("sticker.webp");
+        // One claim per path; a pending path paints the original.
+        assert!(claim_thumb_heal(&ctx, &orig));
+        assert!(!claim_thumb_heal(&ctx, &orig));
+        assert!(thumb_heal_pending(&ctx, &orig));
+        // Failure parks the path: never pending, never claimed again.
+        apply_thumb_result(&ctx, &thumbs, &orig, false);
+        assert!(!thumb_heal_pending(&ctx, &orig));
+        assert!(!claim_thumb_heal(&ctx, &orig));
+        // Success clears without parking: a later failure may heal again.
+        let other = std::path::PathBuf::from("other.webp");
+        assert!(claim_thumb_heal(&ctx, &other));
+        apply_thumb_result(&ctx, &thumbs, &other, true);
+        assert!(!thumb_heal_pending(&ctx, &other));
+        assert!(claim_thumb_heal(&ctx, &other));
+    }
+    #[test]
     fn arrows_move_through_the_emoji_grid() {
         assert_eq!(move_emoji_selection(0, 25, 10, Key::ArrowRight), 1);
         assert_eq!(move_emoji_selection(1, 25, 10, Key::ArrowDown), 11);
@@ -455,6 +476,7 @@ struct StickerChoices {
     save: Option<std::path::PathBuf>,
     forget: Option<std::path::PathBuf>,
     heal: Vec<std::path::PathBuf>,
+    heal_thumb: Vec<std::path::PathBuf>,
     preview: Option<std::path::PathBuf>,
     favorite: Option<std::path::PathBuf>,
 }
@@ -608,6 +630,9 @@ fn apply_choices(app: &mut App, choices: StickerChoices) {
     }
     for path in choices.heal {
         app.actions.push(Action::HealSticker { path });
+    }
+    for path in choices.heal_thumb {
+        app.actions.push(Action::HealStickerThumb { path });
     }
     if let Some(path) = choices.preview {
         app.actions
@@ -802,6 +827,106 @@ fn moves(path: &Path) -> bool {
 #[derive(Clone, Default)]
 struct HealedStickers(std::collections::HashSet<std::path::PathBuf>);
 
+/// Thumbnails with a rebuild in flight, keyed by original path. While a
+/// path is here the tile paints the original without touching the disk.
+/// Entries leave only through an explicit worker result.
+#[derive(Clone, Default)]
+struct ThumbHeals(std::collections::HashSet<std::path::PathBuf>);
+
+/// Thumbnails the worker gave up rebuilding this session. Never requeued,
+/// so a hopeless file cannot loop between claims and failure reports.
+#[derive(Clone, Default)]
+struct ThumbDead(std::collections::HashSet<std::path::PathBuf>);
+
+/// Claims the self-heal for a cache tile that never decodes: true when this
+/// session has not tried this path yet and has not given up on it.
+fn claim_thumb_heal(ctx: &egui::Context, path: &Path) -> bool {
+    ctx.data_mut(|data| {
+        if data
+            .get_temp_mut_or_default::<ThumbDead>(egui::Id::new("sticker-thumb-dead"))
+            .0
+            .contains(path)
+        {
+            return false;
+        }
+        data.get_temp_mut_or_default::<ThumbHeals>(egui::Id::new("sticker-thumb-heal"))
+            .0
+            .insert(path.to_path_buf())
+    })
+}
+
+/// Whether the tile must keep painting the original while the worker
+/// rebuilds the thumbnail. Pure set lookup: no disk, no timestamps.
+fn thumb_heal_pending(ctx: &egui::Context, path: &Path) -> bool {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<ThumbHeals>(egui::Id::new("sticker-thumb-heal"))
+            .0
+            .contains(path)
+    })
+}
+
+/// Applies one worker thumbnail result: drops the pending request, forgets
+/// the cached picture so rebuilt bytes load next frame, and parks failures
+/// where they will not be claimed again.
+fn apply_thumb_result(ctx: &egui::Context, thumbs: &Path, path: &Path, ok: bool) {
+    ctx.data_mut(|data| {
+        data.get_temp_mut_or_default::<ThumbHeals>(egui::Id::new("sticker-thumb-heal"))
+            .0
+            .remove(path);
+        if !ok {
+            data.get_temp_mut_or_default::<ThumbDead>(egui::Id::new("sticker-thumb-dead"))
+                .0
+                .insert(path.to_path_buf());
+        }
+    });
+    if let Some(thumb) = crate::stickers::thumb_path(thumbs, path) {
+        ctx.forget_image(&crate::util::image_uri(&thumb));
+    }
+}
+
+/// Drains worker thumbnail results into the pending/dead sets. Runs at the
+/// top of the picker so every outcome paints on the next frame, whether the
+/// picker was open or not.
+fn drain_thumb_results(app: &mut App, ctx: &egui::Context) {
+    if app.sticker_thumb_results.is_empty() {
+        return;
+    }
+    let thumbs = app.dirs.sticker_thumb_dir();
+    for (path, ok) in std::mem::take(&mut app.sticker_thumb_results) {
+        apply_thumb_result(ctx, &thumbs, &path, ok);
+    }
+    ctx.request_repaint();
+}
+/// Paints the original file for a tile whose thumbnail is being rebuilt.
+fn paint_original_fallback(
+    ui: &egui::Ui,
+    palette: &Palette,
+    path: &Path,
+    rect: Rect,
+    cache: bool,
+    choices: &mut StickerChoices,
+) {
+    let original = egui::Image::new(crate::util::image_uri(path));
+    match original.load_for_size(ui.ctx(), rect.size()) {
+        Ok(egui::load::TexturePoll::Ready { texture }) => {
+            original.paint_at(ui, widgets::picture_rect(rect, texture.size));
+        }
+        Ok(egui::load::TexturePoll::Pending { .. }) => {
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 8.0, palette.surface);
+            }
+        }
+        _ if cache && claim_heal_path(ui, path) => {
+            choices.heal.push(path.to_path_buf());
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 8.0, palette.surface);
+                theme::paint_spinner(ui, rect, 20.0, palette.accent);
+            }
+        }
+        _ => original.paint_at(ui, rect),
+    }
+}
+
 /// Claims the single self-heal for a cache tile that never decodes.
 fn claim_heal_path(ui: &egui::Ui, path: &Path) -> bool {
     ui.ctx().data_mut(|data| {
@@ -817,6 +942,8 @@ fn claim_heal_path(ui: &egui::Ui, path: &Path) -> bool {
 /// fails keeps egui's own warning. Phone and recent copies live in caches
 /// the app owns, so the first persistent failure deletes the broken copy
 /// and asks the worker for a fresh one instead of warning forever.
+/// A thumbnail that never decodes falls back to the original immediately
+/// and is rebuilt locally: the original file is never touched.
 fn sticker_picture(
     ui: &egui::Ui,
     palette: &Palette,
@@ -829,6 +956,12 @@ fn sticker_picture(
     // The grid draws the small preview. A sticker is a 512 px WebP, often
     // animated, and decoding one per tile is what used to stall the picker.
     let preview = thumb.filter(|thumb| thumb.is_file());
+    // While a thumbnail rebuild is pending, paint the original so the tile
+    // never shows a stale error and never re-asks the worker per frame.
+    if preview.is_some_and(|_| thumb_heal_pending(ui.ctx(), path)) {
+        paint_original_fallback(ui, palette, path, rect, cache, choices);
+        return;
+    }
     let source = preview.unwrap_or(path);
     let image = egui::Image::new(crate::util::image_uri(source));
     match image.load_for_size(ui.ctx(), rect.size()) {
@@ -842,7 +975,17 @@ fn sticker_picture(
                 ui.painter().rect_filled(rect, 8.0, palette.surface);
             }
         }
-        _ if preview.is_some() => image.paint_at(ui, rect),
+        _ if preview.is_some() => {
+            // The thumbnail never decodes: show the original right away
+            // and rebuild the thumbnail locally. The original is untouched.
+            let thumb_path = preview.unwrap();
+            paint_original_fallback(ui, palette, path, rect, cache, choices);
+            if cache && claim_thumb_heal(ui.ctx(), path) {
+                choices.heal_thumb.push(path.to_path_buf());
+                ui.ctx().forget_image(&crate::util::image_uri(thumb_path));
+                ui.ctx().request_repaint();
+            }
+        }
         _ if cache && claim_heal_path(ui, path) => {
             choices.heal.push(path.to_path_buf());
             if ui.is_rect_visible(rect) {

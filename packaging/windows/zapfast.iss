@@ -26,6 +26,9 @@
 #endif
 
 #define AppName "ZapExt"
+#ifndef NumericVersion
+  #define NumericVersion Version
+#endif
 #define AppExeName "zapfast.exe"
 
 [Setup]
@@ -55,7 +58,7 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#AppExeName}
-VersionInfoVersion={#Version}.0
+VersionInfoVersion={#NumericVersion}.0
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked

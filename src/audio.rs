@@ -271,7 +271,10 @@ impl Player {
     /// Sets the speed of one clip and applies it right away.
     ///
     /// Rodio speeds a clip up by resampling, so the voice rises in pitch the
-    /// same way WhatsApp's own faster playback does. The change reaches the
+    /// same way a tape would: faster means higher. The phone client instead
+    /// compresses time while keeping the pitch; matching that needs an
+    /// offline time-stretch of the decoded samples before they reach the
+    /// sink (see the WSOLA analysis in .local-roadmap). The change reaches the
     /// clip that is playing at the moment it is made, from where it is.
     pub fn set_speed(&mut self, message: &str, speed: f32) {
         let speed = snap_speed(speed);

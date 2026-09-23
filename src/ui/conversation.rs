@@ -930,21 +930,30 @@ fn composer(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             if !app.selected.is_empty() {
                 selection_strip(app, ui, chat);
             }
-            if chat.read_only {
+            if !crate::model::can_send(chat) {
                 ui.vertical_centered(|ui| {
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        let width = 230.0;
-                        ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
-                        theme::text(ui, "Only", theme::regular(13.5), palette.secondary);
-                        theme::text(ui, "admins", theme::semibold(13.5), palette.accent);
+                    if chat.is_channel() {
                         theme::text(
                             ui,
-                            "can send messages",
+                            "Only channel admins can publish here",
                             theme::regular(13.5),
                             palette.secondary,
                         );
-                    });
+                    } else {
+                        ui.horizontal(|ui| {
+                            let width = 230.0;
+                            ui.add_space((ui.available_width() - width).max(0.0) / 2.0);
+                            theme::text(ui, "Only", theme::regular(13.5), palette.secondary);
+                            theme::text(ui, "admins", theme::semibold(13.5), palette.accent);
+                            theme::text(
+                                ui,
+                                "can send messages",
+                                theme::regular(13.5),
+                                palette.secondary,
+                            );
+                        });
+                    }
                     ui.add_space(8.0);
                 });
                 return;
@@ -1452,6 +1461,8 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
     // Do not animate programmatic scrolling. Pending animations can delay a
     // later request to reach the end.
     let mut edge_scrolled_up = false;
+    let last_body = app.chat_body_height.get(&chat.id).copied().unwrap_or(0.0);
+    let mut top_pad = 0.0f32;
     let output = egui::ScrollArea::vertical()
         .id_salt(("messages", &chat.id))
         .auto_shrink([false, false])
@@ -1461,6 +1472,13 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
             // Scroll while selecting near an edge. `scroll_with_delta` also
             // releases stick-to-bottom; setting the offset directly does not.
             let viewport = ui.clip_rect();
+            // Pin short conversations to the composer: fill unused viewport
+            // height above the messages from the last measured body height.
+            // The stored height excludes this fill, so it converges.
+            top_pad = (viewport.height() - last_body - 24.0).max(0.0);
+            if top_pad > 0.0 {
+                ui.add_space(top_pad);
+            }
             *app.selection_view.lock().unwrap_or_else(|p| p.into_inner()) = Some(viewport);
             let held_inside = ui.input(|input| {
                 input.pointer.primary_down()
@@ -1540,6 +1558,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                     }
                 });
         });
+    let body_h = (output.content_size.y - top_pad).max(0.0);
+    if (body_h - last_body).abs() > 1.0 {
+        app.chat_body_height.insert(chat.id.clone(), body_h);
+        ui.ctx().request_repaint();
+    }
     let at_bottom =
         output.state.offset.y + output.inner_rect.height() >= output.content_size.y - 24.0;
     // Keep the view at the end while initial content expands, until the user
@@ -1548,19 +1571,32 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
         pos2(output.inner_rect.right() - 16.0, output.inner_rect.top()),
         output.inner_rect.right_bottom(),
     );
-    let reader_scrolled = ui.input(|input| {
-        input.smooth_scroll_delta.y != 0.0
+    // Only wheel/scrollbar gestures over the message list release the follow.
+    // Rolling the chat list must not pull the open conversation off its end.
+    let over_messages = ui.input(|input| {
+        input
+            .pointer
+            .hover_pos()
+            .is_some_and(|pos| output.inner_rect.contains(pos) || bar.contains(pos))
             || input
-                .raw
-                .events
-                .iter()
-                .any(|event| matches!(event, egui::Event::MouseWheel { .. }))
-            || (input.pointer.primary_down()
-                && input
-                    .pointer
-                    .interact_pos()
-                    .is_some_and(|pos| bar.contains(pos)))
+                .pointer
+                .latest_pos()
+                .is_some_and(|pos| output.inner_rect.contains(pos) || bar.contains(pos))
     });
+    let reader_scrolled = over_messages
+        && ui.input(|input| {
+            input.smooth_scroll_delta.y != 0.0
+                || input
+                    .raw
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, egui::Event::MouseWheel { .. }))
+                || (input.pointer.primary_down()
+                    && input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| bar.contains(pos)))
+        });
     let complete = conversation.complete;
     let loading = conversation.loading_older;
     let fetching = conversation.fetching_phone;

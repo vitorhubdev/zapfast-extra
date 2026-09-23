@@ -180,6 +180,11 @@ impl Chat {
         self.id.ends_with("@newsletter") || self.community
     }
 
+    /// Whether this chat is a channel (newsletter).
+    pub fn is_channel(&self) -> bool {
+        self.id.ends_with("@newsletter")
+    }
+
     /// Direct-chat phone number as digits.
     pub fn phone(&self) -> Option<&str> {
         phone_of(&self.id)
@@ -187,6 +192,19 @@ impl Chat {
 }
 
 /// Extracts digits from a `<phone>@s.whatsapp.net` id.
+/// Whether the app may start sending to this chat.
+///
+/// Announcement groups stay muted through read_only. Channels deny by
+/// default: the encrypted send path rejects newsletters, and publishing
+/// there needs a proven role-gated path the app does not have yet.
+/// Groups and community containers keep the read_only rule only.
+///
+/// This is the single decision point: the composer and every send action
+/// consult it, and the worker re-checks it for incoming send commands.
+pub fn can_send(chat: &Chat) -> bool {
+    !chat.read_only && !chat.is_channel()
+}
+
 pub fn phone_of(id: &str) -> Option<&str> {
     let (user, server) = id.split_once('@')?;
     (server == "s.whatsapp.net" && user.chars().all(|c| c.is_ascii_digit())).then_some(user)
@@ -902,6 +920,11 @@ pub enum Action {
     HealSticker {
         path: PathBuf,
     },
+    /// Deletes a thumbnail that never decodes so the worker rebuilds it
+    /// from the original file. The original is never touched.
+    HealStickerThumb {
+        path: PathBuf,
+    },
     /// Manual update check from the About dialog.
     CheckUpdatesNow,
     /// Saves a sticker for the picker.
@@ -1059,6 +1082,25 @@ mod tests {
         assert_eq!(ChatKind::from_id("1@lid"), ChatKind::Direct);
         assert_eq!(ChatKind::from_id("1-2@g.us"), ChatKind::Group);
         assert_eq!(ChatKind::from_id("1@newsletter"), ChatKind::Broadcast);
+    }
+
+    #[test]
+    fn sending_is_denied_for_channels_and_muted_groups_only() {
+        let direct = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        assert!(can_send(&direct));
+        let group = Chat::new("1-2@g.us".into(), "Club".into());
+        assert!(can_send(&group));
+        let mut community = Chat::new("9-9@g.us".into(), "Campus".into());
+        community.community = true;
+        assert!(can_send(&community));
+        let channel = Chat::new("1@newsletter".into(), "News".into());
+        assert!(!can_send(&channel));
+        let mut muted = Chat::new("2@s.whatsapp.net".into(), "Bob".into());
+        muted.read_only = true;
+        assert!(!can_send(&muted));
+        let mut admin_channel = Chat::new("2@newsletter".into(), "News".into());
+        admin_channel.read_only = false;
+        assert!(!can_send(&admin_channel));
     }
 
     #[test]

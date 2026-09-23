@@ -6,6 +6,12 @@
 
 **A community mod of ZapFast, native and fast.**
 
+Release candidates are opt-in builds on the GitHub Releases page, marked
+**Pre-release**. They do not replace the stable download or the updater's
+stable channel. The 1.0.61 candidate includes accumulated fixes for testing;
+live phone synchronization and installation rollback are not yet validated.
+Keep a backup of your existing profile before testing with important data.
+
 ZapExt is an independent fork/mod maintained by
 [Vitor (`@vitorhubdev`)](https://github.com/vitorhubdev). It is based on the
 original [ZapFast](https://github.com/crmne/zapfast) project and keeps its MIT
@@ -42,6 +48,9 @@ without embedding a browser engine.
 - **Conversations.** See replies, reactions, edits, deleted messages, read
   receipts, sender names, and group pictures. Older messages load as you
   scroll up, first from the local archive and then from your phone.
+  Deleting or clearing a chat on your phone applies here too: removed
+  messages stay gone even when old history arrives later, while newer
+  messages are kept.
   The magnifier in the chat header searches inside that chat and jumps to any
   hit, and its results show the sender, the time, and the message text.
   Group messages show two gray checks after every recipient has received
@@ -89,7 +98,9 @@ without embedding a browser engine.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
 - **View attachments.** ZapExt downloads files up to 64 MB automatically or
-  on click. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
+  on click. Each download streams to a temporary file with a size budget and
+  a deadline, publishes only after validation, and never overwrites the last
+  valid copy with a failed attempt. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
   polls, and link previews appear in the chat. Videos play in the app with
   their soundtrack: click one to watch it in the viewer, with play and pause
   (click the picture, or Space), a bar that jumps to the exact second with

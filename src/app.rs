@@ -175,6 +175,21 @@ pub struct App {
     avatar_full_requests: HashSet<String>,
     /// Whether files are being dragged over the window.
     pub dropping: bool,
+    /// Paste-gesture state, linked by event order and origin, never by image
+    /// contents or a time window. paste_armed: an image Paste was handled
+    /// and its key release is still to come; that release ends the gesture
+    /// quietly, armed optimistically inside the same event fold so a
+    /// release sharing the Paste frame still sees it. paste_typed_v: a
+    /// plain V press (no command) was seen, so a later bare release is
+    /// typing, not a paste. The integration consumes every Ctrl+V press,
+    /// with or without clipboard text, so no press event ever opens an
+    /// image-only gesture; only the release is delivered. paste_ctrl_held:
+    /// Ctrl latch folded from the ordered modifier/key events; a keyboard
+    /// Paste arms exactly when Ctrl was down for it, while a menu Paste
+    /// never does.
+    paste_armed: bool,
+    paste_typed_v: bool,
+    paste_ctrl_held: bool,
     /// Open emoji, GIF, or sticker picker tab.
     pub picker: Option<PickerTab>,
     /// Full-window viewer over the open chat's pictures and stickers.
@@ -231,6 +246,9 @@ pub struct App {
     pub sticker_packs: Vec<StickerPack>,
     /// Whether the sticker list is loading.
     pub stickers_pending: bool,
+    /// Undrained thumbnail rebuild results from the worker: the sticker
+    /// path and whether its thumbnail is ready. The picker applies them.
+    pub sticker_thumb_results: Vec<(PathBuf, bool)>,
     /// Whether a sticker pack import is active.
     pub sticker_import_pending: bool,
     scroll_lock: Option<(ScrollAxis, Instant)>,
@@ -280,6 +298,9 @@ pub struct App {
     pub at_bottom: bool,
     /// Message id to scroll into view.
     pub scroll_anchor: Option<String>,
+    /// Last measured message-body height per chat, without the top fill.
+    /// Used to pin short conversations to the composer.
+    pub chat_body_height: HashMap<ChatId, f32>,
     pub focus_composer: bool,
     pub focus_search: bool,
     pub quit_requested: bool,
@@ -424,6 +445,9 @@ impl App {
             avatars_full: HashMap::new(),
             avatar_full_requests: HashSet::new(),
             dropping: false,
+            paste_armed: false,
+            paste_typed_v: false,
+            paste_ctrl_held: false,
             picker: None,
             viewer: None,
             chat_search_open: false,
@@ -453,6 +477,7 @@ impl App {
             stickers_favorites: Vec::new(),
             sticker_packs: Vec::new(),
             stickers_pending: false,
+            sticker_thumb_results: Vec::new(),
             sticker_import_pending: false,
             scroll_lock: None,
             scroll_from_trackpad: false,
@@ -489,6 +514,7 @@ impl App {
             scroll_to_bottom: true,
             at_bottom: true,
             scroll_anchor: None,
+            chat_body_height: HashMap::new(),
             focus_composer: false,
             focus_search: false,
             quit_requested: false,
@@ -973,8 +999,13 @@ impl App {
         contacts
     }
 
+    /// Archived chats in the current Chats/Channels tab, so the row count
+    /// matches what opening Archived will list.
     pub fn archived_count(&self) -> usize {
-        self.chats.iter().filter(|chat| chat.archived).count()
+        self.chats
+            .iter()
+            .filter(|chat| chat.archived && chat.is_channel_or_community() == self.show_channels)
+            .count()
     }
 
     pub fn unread_total(&self) -> u32 {
@@ -1294,6 +1325,9 @@ impl App {
                         self.avatars.insert(id, path);
                     }
                 }
+                Event::StickerThumb { path, ok } => {
+                    self.sticker_thumb_results.push((path, ok));
+                }
                 Event::Stickers {
                     saved,
                     packs,
@@ -1314,6 +1348,27 @@ impl App {
                     if self.editing.as_deref() == Some(id.as_str()) {
                         self.editing = None;
                         self.composer.clear();
+                    }
+                }
+                Event::ChatRemoved { chat } => {
+                    self.chats.retain(|row| row.id != chat);
+                    self.conversations.remove(&chat);
+                    self.notifications.clear(&chat);
+                    if self.open_chat.as_deref() == Some(chat.as_str()) {
+                        self.open_chat = None;
+                        self.composer.clear();
+                        self.editing = None;
+                        self.chat_search_open = false;
+                        self.chat_search_hits.clear();
+                    }
+                }
+                Event::ChatCleared { chat, .. } => {
+                    // The archive already dropped the range; forget the cached
+                    // copy so the next open reloads what survived.
+                    self.conversations.remove(&chat);
+                    if self.open_chat.as_deref() == Some(chat.as_str()) {
+                        self.chat_search_hits.clear();
+                        self.ensure_loaded(&chat);
                     }
                 }
                 Event::Media {
@@ -1844,7 +1899,30 @@ impl App {
         self.last_keystroke = None;
     }
 
+    /// Whether a send to this chat must not start. Newsletters are
+    /// refused by address whether or not they are listed. Other chats
+    /// missing from the list keep working (confirm dialogs, races with the
+    /// chat list), and the worker re-checks known chats downstream.
+    fn send_blocked(&self, chat: &ChatId) -> bool {
+        if chat.ends_with("@newsletter") {
+            return true;
+        }
+        self.chat(chat)
+            .is_some_and(|chat| !crate::model::can_send(chat))
+    }
+
+    fn send_blocked_toast(&mut self, chat: &ChatId) -> bool {
+        let blocked = self.send_blocked(chat);
+        if blocked {
+            self.toast_error("This chat cannot send messages");
+        }
+        blocked
+    }
+
     fn send_text(&mut self, chat: ChatId, text: String, quoting: Option<String>) {
+        if self.send_blocked_toast(&chat) {
+            return;
+        }
         let text = text.trim().to_owned();
         if text.is_empty() {
             return;
@@ -1920,8 +1998,11 @@ impl App {
 
     /// Adds files to the open chat's composer.
     fn stage_files(&mut self, paths: Vec<PathBuf>) {
-        if self.open_chat.is_none() {
+        let Some(chat) = self.open_chat.clone() else {
             self.toast_error("Open a chat first");
+            return;
+        };
+        if self.send_blocked_toast(&chat) {
             return;
         }
         for path in paths {
@@ -1932,6 +2013,9 @@ impl App {
 
     /// Sends pending files, attaching the caption to the first.
     fn send_pending(&mut self, chat: ChatId, caption: String) {
+        if self.send_blocked_toast(&chat) {
+            return;
+        }
         let caption = caption.trim().to_owned();
         let (caption, mentions) = self.encode_composer_mentions(&chat, caption);
         let caption = Some(caption).filter(|text| !text.is_empty());
@@ -2542,6 +2626,9 @@ impl App {
                 message,
                 to_chat,
             } => {
+                if self.send_blocked_toast(&to_chat) {
+                    return;
+                }
                 self.backend.send(Command::Forward {
                     from_chat,
                     message,
@@ -2555,10 +2642,18 @@ impl App {
                 messages,
                 to_chats,
             } => {
+                let allowed: Vec<ChatId> = to_chats
+                    .into_iter()
+                    .filter(|id| !self.send_blocked(id))
+                    .collect();
+                if allowed.is_empty() {
+                    self.toast_error("None of these chats can receive forwards");
+                    return;
+                }
                 self.backend.send(Command::ForwardMany {
                     from_chat,
                     messages,
-                    to_chats,
+                    to_chats: allowed,
                 });
                 self.dialog = None;
                 self.forward_search.clear();
@@ -2634,7 +2729,9 @@ impl App {
                 }
             }
             Action::Attach => {
-                if let Some(chat) = self.open_chat.clone() {
+                if let Some(chat) = self.open_chat.clone()
+                    && !self.send_blocked_toast(&chat)
+                {
                     self.backend.send(Command::PickFiles(chat));
                 }
             }
@@ -2657,7 +2754,10 @@ impl App {
                 }
             }
             Action::StartRecording => {
-                if self.open_chat.is_some() && self.recording.is_none() {
+                if let Some(chat) = self.open_chat.clone()
+                    && !self.send_blocked_toast(&chat)
+                    && self.recording.is_none()
+                {
                     self.recording = Some(Recorder::start(self.waker.clone()));
                 }
             }
@@ -2764,6 +2864,9 @@ impl App {
             Action::HealSticker { path } => {
                 self.backend.send(Command::HealSticker { path });
             }
+            Action::HealStickerThumb { path } => {
+                self.backend.send(Command::HealStickerThumb { path });
+            }
             Action::ForgetSticker(path) => {
                 self.backend.send(Command::ForgetSticker { path });
             }
@@ -2788,6 +2891,9 @@ impl App {
             }
             Action::SendSticker(path) => {
                 if let Some(chat) = self.open_chat.clone() {
+                    if self.send_blocked_toast(&chat) {
+                        return;
+                    }
                     let quoting = self.reply_to.take();
                     self.backend.send(Command::SendSticker {
                         chat,
@@ -2807,7 +2913,9 @@ impl App {
                 rgba,
             } => {
                 // Stage the files so the user can add a caption.
-                if self.open_chat.is_some() {
+                if let Some(chat) = self.open_chat.clone()
+                    && !self.send_blocked_toast(&chat)
+                {
                     self.pending.push(Pending::Picture {
                         width,
                         height,
@@ -3182,6 +3290,9 @@ impl App {
         let Some(chat) = self.open_chat.clone() else {
             return;
         };
+        if self.send_blocked_toast(&chat) {
+            return;
+        }
         match recorder.finish() {
             Ok(samples) if samples.len() < crate::voice::RATE as usize / 2 => {}
             Ok(samples) => {
@@ -3276,7 +3387,7 @@ impl App {
 
     /// Handles dropped files and pasted images for the open chat.
     fn take_drops_and_pastes(&mut self, ctx: &egui::Context) {
-        let (dropped, hovering, paste) = ctx.input(|input| {
+        let (dropped, hovering) = ctx.input(|input| {
             let dropped: Vec<PathBuf> = input
                 .raw
                 .dropped_files
@@ -3284,23 +3395,115 @@ impl App {
                 .map(|file| file.path().to_path_buf())
                 .collect();
             let hovering = !input.raw.hovered_files.is_empty();
-            (dropped, hovering, wants_paste(input))
+            (dropped, hovering)
         });
         self.dropping = hovering && self.open_chat.is_some();
         if !dropped.is_empty() {
             self.actions.push(Action::SendFiles(dropped));
         }
+        self.take_image_paste(ctx, clipboard_image);
+    }
+
+    fn take_image_paste(
+        &mut self,
+        ctx: &egui::Context,
+        mut read_image: impl FnMut() -> Option<(usize, usize, Vec<u8>)>,
+    ) {
+        // Fold the frame events in delivery order: a release that shares its
+        // frame with the next Paste must still see the armed flag, and a
+        // Paste must see the Ctrl state from before its own frame churn.
+        // Only origins and counts are decided here; the clipboard is read
+        // once below, and only when an intent survived the guards.
+        let (intents, focused) = ctx.input(|input| {
+            let mut intents: u32 = 0;
+            let mut armed = self.paste_armed;
+            let mut typed = self.paste_typed_v;
+            let mut ctrl = self.paste_ctrl_held;
+            if !input.focused {
+                // A gesture cannot span a focus loss: modifiers may have been
+                // released outside, so no release belongs to an old Paste.
+                self.paste_armed = false;
+                self.paste_typed_v = false;
+                self.paste_ctrl_held = false;
+                return (0, false);
+            }
+            for event in &input.events {
+                match event {
+                    egui::Event::ModifiersChanged(modifiers) => {
+                        ctrl = modifiers.command;
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::V,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if !modifiers.command => {
+                        // A V press without command is typing: the
+                        // integration consumes every Ctrl+V press, so a
+                        // plain press always reaches the field as text. A
+                        // later bare release ends this typing, never a
+                        // paste. Ctrl-first releases lost their command
+                        // by now; the missing typed V tells them apart.
+                        typed = true;
+                    }
+                    egui::Event::Paste(_) => {
+                        // A new gesture epoch: earlier typing cannot leak
+                        // into it. The arm is optimistic inside this fold
+                        // so a release sharing the frame still suppresses.
+                        intents += 1;
+                        typed = false;
+                        armed = ctrl;
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::V,
+                        pressed: false,
+                        ..
+                    } => {
+                        let suppress = armed;
+                        armed = false;
+                        let was_typed = typed;
+                        typed = false;
+                        if !suppress && !was_typed {
+                            intents += 1;
+                        }
+                    }
+                    egui::Event::Key { modifiers, .. } => {
+                        ctrl = modifiers.command;
+                    }
+                    _ => {}
+                }
+            }
+            self.paste_armed = armed;
+            self.paste_typed_v = typed;
+            self.paste_ctrl_held = ctrl;
+            (intents, true)
+        });
         // Handle image paste only when the composer or no field has focus.
         let composing = ctx.memory(|memory| {
             memory.has_focus(egui::Id::new("composer-text")) || memory.focused().is_none()
         });
-        if paste && composing && self.open_chat.is_some() {
-            // egui handles text paste; the app handles clipboard images.
-            if let Some(image) = clipboard_image() {
+        // Decide an image paste before the composer TextEdit sees the
+        // gesture: an accepted image consumes the textual Paste event so
+        // only the attachment lands. Anything else flows through untouched.
+        if intents > 0
+            && focused
+            && composing
+            && let Some(chat) = self.open_chat.clone()
+            && !self.send_blocked(&chat)
+            && let Some(image) = read_image()
+        {
+            // A browser can offer both pixels and its source URL. Consume the
+            // text before the composer sees it, keeping any existing caption.
+            ctx.input_mut(|input| {
+                input
+                    .events
+                    .retain(|event| !matches!(event, egui::Event::Paste(_)))
+            });
+            for _ in 0..intents {
                 self.actions.push(Action::PasteImage {
                     width: image.0,
                     height: image.1,
-                    rgba: image.2,
+                    rgba: image.2.clone(),
                 });
             }
         }
@@ -3469,17 +3672,22 @@ fn mention_refs(ids: &[String]) -> Vec<crate::model::MentionRef> {
         .collect()
 }
 
+/// Whether the clipboard asks for a paste: either the integration delivered
+/// a Paste event (text, or image+text whose Ctrl+V press was consumed) or
+/// the Ctrl+V key release arrived. Image-only presses carry no Paste event;
+/// they attach on the release below instead.
 pub fn wants_paste(input: &egui::InputState) -> bool {
     input.events.iter().any(|event| {
-        matches!(
-            event,
-            egui::Event::Key {
-                key: egui::Key::V,
-                pressed: false,
-                modifiers,
-                ..
-            } if modifiers.command
-        )
+        matches!(event, egui::Event::Paste(_))
+            || matches!(
+                event,
+                egui::Event::Key {
+                    key: egui::Key::V,
+                    pressed: false,
+                    modifiers,
+                    ..
+                } if modifiers.command
+            )
     })
 }
 
@@ -4427,6 +4635,612 @@ mod tests {
             .map(|chat| chat.name.as_str())
             .collect();
         assert_eq!(names, vec!["Ada"]);
+    }
+
+    #[test]
+    fn archived_count_follows_the_current_tab() {
+        let mut app = app();
+        let mut archived_chat = Chat::new("1@s.whatsapp.net".into(), "Ada".into());
+        archived_chat.archived = true;
+        let mut archived_other = Chat::new("2@s.whatsapp.net".into(), "Bob".into());
+        archived_other.archived = true;
+        let mut archived_channel = Chat::new("3@newsletter".into(), "News".into());
+        archived_channel.archived = true;
+        app.chats = vec![archived_chat, archived_other, archived_channel];
+
+        app.show_channels = false;
+        assert_eq!(app.archived_count(), 2);
+        app.show_archived = true;
+        assert_eq!(app.visible_chats().len(), 2);
+
+        app.show_archived = false;
+        app.show_channels = true;
+        assert_eq!(app.archived_count(), 1);
+        app.show_archived = true;
+        assert_eq!(app.visible_chats().len(), 1);
+    }
+
+    #[test]
+    fn channel_sends_are_refused_before_any_command() {
+        let mut app = app();
+        app.chats
+            .push(Chat::new("1@newsletter".into(), "News".into()));
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        let channel: ChatId = "1@newsletter".into();
+        let direct: ChatId = "1@s.whatsapp.net".into();
+        assert!(app.send_blocked(&channel));
+        assert!(!app.send_blocked(&direct));
+        // Chats missing from the list keep working: confirm dialogs and
+        // list races send before the row exists. Unknown newsletters stay
+        // refused by address.
+        assert!(!app.send_blocked(&"unknown@s.whatsapp.net".into()));
+        assert!(app.send_blocked(&"unknown@newsletter".into()));
+    }
+
+    // Intentional pastes are modelled at the application level below:
+    // every Ctrl+V or menu gesture below drives the real
+    // take_image_paste frame by frame, with the system clipboard
+    // replaced by an injected reader.
+    fn paste_release() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }
+    }
+
+    fn paste_press_plain() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn paste_release_plain() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::V,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn ten_by_ten(fill: u8) -> (usize, usize, Vec<u8>) {
+        (10, 10, vec![fill; 10 * 10 * 4])
+    }
+
+    fn paste_app() -> (App, egui::Context) {
+        let mut app = app();
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        app.composer = "caption".into();
+        let ctx = egui::Context::default();
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("composer-text")));
+        paste_frame(&mut app, &ctx, vec![], true, None);
+        (app, ctx)
+    }
+
+    fn paste_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        mut events: Vec<egui::Event>,
+        command: bool,
+        image: Option<(usize, usize, Vec<u8>)>,
+    ) {
+        events.insert(
+            0,
+            egui::Event::ModifiersChanged(if command {
+                egui::Modifiers::COMMAND
+            } else {
+                egui::Modifiers::NONE
+            }),
+        );
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.take_image_paste(ui.ctx(), || image.clone());
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.composer)
+                        .id(egui::Id::new("composer-text")),
+                );
+                app.apply_actions(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn two_ctrl_v_image_gestures_attach_twice() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        // Image-only presses deliver no Key event: empty frames stand in
+        // for them, releases do the attaching.
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 2, "a second Ctrl+V must attach again");
+    }
+
+    #[test]
+    fn paste_event_then_release_attaches_once() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("https://example.com/pic.png".into())],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        assert_eq!(
+            app.composer, "caption",
+            "the source URL must not leak into the draft"
+        );
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            1,
+            "the release of the same gesture must not duplicate"
+        );
+    }
+
+    #[test]
+    fn menu_paste_then_shortcut_attaches_twice() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("https://example.com/pic.png".into())],
+            false,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        // The shortcut press delivers nothing either; only its release
+        // may attach.
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "menu paste must not swallow the next shortcut"
+        );
+    }
+
+    #[test]
+    fn same_edges_different_middle_attaches_twice() {
+        let (mut app, ctx) = paste_app();
+        let mut middle = ten_by_ten(7);
+        middle.2[200] = 9;
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(ten_by_ten(7)),
+        );
+        assert_eq!(app.pending.len(), 1);
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(middle));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "content identity must not gate intent"
+        );
+    }
+
+    #[test]
+    fn consecutive_release_only_pastes_attach_twice() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "a release-only gesture must not arm suppression"
+        );
+    }
+
+    #[test]
+    fn text_search_switch_and_empty_clipboard_stay_correct() {
+        let (mut app, ctx) = paste_app();
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("hello".into())],
+            true,
+            None,
+        );
+        assert!(app.pending.is_empty(), "pure text never stages a picture");
+        assert!(
+            app.composer.contains("hello"),
+            "pure text still reaches the draft"
+        );
+        // Every keyboard Paste is followed by its own key release, which
+        // ends that text gesture and clears the flag for the next one.
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, None);
+        assert!(app.pending.is_empty());
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        app.chats
+            .push(Chat::new("2@s.whatsapp.net".into(), "Bob".into()));
+        app.open_chat = Some("2@s.whatsapp.net".into());
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release()],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "switching chats must not carry suppression over"
+        );
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, None);
+        assert_eq!(app.pending.len(), 2, "an empty clipboard stages nothing");
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("search-field")));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "a focused search field keeps the image out"
+        );
+    }
+
+    #[test]
+    fn newsletter_paste_attaches_nothing() {
+        let (mut app, ctx) = paste_app();
+        app.chats
+            .push(Chat::new("1@newsletter".into(), "News".into()));
+        app.open_chat = Some("1@newsletter".into());
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("https://example.com/pic.png".into())],
+            true,
+            Some(image.clone()),
+        );
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert!(app.pending.is_empty(), "channels refuse pasted pictures");
+    }
+
+    #[test]
+    fn removed_chat_closes_open_state() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-removed-chat-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        app.chats
+            .push(Chat::new("2@s.whatsapp.net".into(), "Bob".into()));
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.composer = "draft".into();
+        app.editing = Some("m1".into());
+        app.chat_search_open = true;
+        app.chat_search_hits = vec![message("1@s.whatsapp.net", "m1", 10)];
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![message("1@s.whatsapp.net", "m1", 10)], false);
+        events
+            .send(Event::ChatRemoved {
+                chat: "1@s.whatsapp.net".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert_eq!(app.chats.len(), 1);
+        assert_eq!(app.chats[0].id, "2@s.whatsapp.net");
+        assert!(app.open_chat.is_none(), "the open chat is gone");
+        assert!(app.composer.is_empty(), "no draft for a missing chat");
+        assert!(app.editing.is_none());
+        assert!(!app.chat_search_open);
+        assert!(app.chat_search_hits.is_empty());
+        assert!(!app.conversations.contains_key("1@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn cleared_chat_drops_cache_and_reloads_open() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-cleared-chat-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![message("1@s.whatsapp.net", "m1", 10)], false);
+        events
+            .send(Event::ChatCleared {
+                chat: "1@s.whatsapp.net".into(),
+                through: 50,
+            })
+            .expect("sends");
+        app.handle_events();
+        assert_eq!(app.chats.len(), 1, "the chat stays listed");
+        assert_eq!(app.open_chat.as_deref(), Some("1@s.whatsapp.net"));
+        assert!(
+            app.conversations
+                .get("1@s.whatsapp.net")
+                .is_none_or(|conversation| conversation.messages.is_empty()),
+            "stale messages are gone; a reload was requested"
+        );
+    }
+
+    #[test]
+    fn ctrl_released_before_v_still_pastes() {
+        // The integration consumes every Ctrl+V press: the press frame
+        // carries nothing, Ctrl goes up, and the release arrives without
+        // command. Only the missing typed V tells it apart from typing.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        assert!(app.pending.is_empty(), "the press frame carries nothing");
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::ModifiersChanged(egui::Modifiers::NONE)],
+            false,
+            Some(image.clone()),
+        );
+        assert!(app.pending.is_empty(), "Ctrl going up pastes nothing yet");
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release_plain()],
+            false,
+            Some(image),
+        );
+        assert_eq!(
+            app.pending.len(),
+            1,
+            "the release without typed V is its own gesture"
+        );
+    }
+
+    #[test]
+    fn release_then_paste_same_frame_counts_once_each() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("https://example.com/first.png".into())],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        // The previous release and the next Paste share one frame: the
+        // release must still see the armed flag before the Paste re-arms.
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![
+                paste_release(),
+                egui::Event::Paste("https://example.com/second.png".into()),
+            ],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 2);
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "the second release ends its own gesture"
+        );
+    }
+
+    #[test]
+    fn paste_and_release_same_frame_counts_once() {
+        // The release belongs to the Paste right before it in the same
+        // frame: the arm must advance inside the fold, not after it.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Paste("https://example.com/pic.png".into()),
+                paste_release(),
+            ],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1, "one gesture, one attachment");
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            2,
+            "the next release is a gesture of its own"
+        );
+    }
+
+    #[test]
+    fn failed_image_read_attaches_nothing() {
+        // A Paste whose clipboard has no image must flow to the draft,
+        // and its release must end the gesture quietly either way.
+        let (mut app, ctx) = paste_app();
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("hello".into())],
+            true,
+            None,
+        );
+        assert!(app.pending.is_empty());
+        assert!(
+            app.composer.contains("hello"),
+            "text still reaches the draft"
+        );
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, None);
+        assert!(app.pending.is_empty(), "no image, no attachment");
+        let image = ten_by_ten(7);
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1, "later pastes still work");
+    }
+
+    #[test]
+    fn typed_v_then_shortcut_still_pastes() {
+        // Typing v completes first: its release ends the typing, so a
+        // later shortcut starts clean and attaches.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_press_plain()],
+            false,
+            Some(image.clone()),
+        );
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release_plain()],
+            false,
+            Some(image.clone()),
+        );
+        assert!(app.pending.is_empty(), "typing alone attaches nothing");
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1, "the shortcut survives typing");
+    }
+
+    #[test]
+    fn held_v_with_late_ctrl_pastes_nothing() {
+        // Press V without Ctrl, hold it, press Ctrl, release V: no V press
+        // ever happened under Ctrl, so the release ends the typing hold
+        // instead of inventing a shortcut.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_press_plain()],
+            false,
+            Some(image.clone()),
+        );
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release_plain()],
+            true,
+            Some(image.clone()),
+        );
+        assert!(
+            app.pending.is_empty(),
+            "no shortcut without a press under Ctrl"
+        );
+        // And the typing flag is spent: a later real shortcut still works.
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1);
+    }
+
+    #[test]
+    fn modifier_churn_inside_frame_keeps_keyboard_origin() {
+        // Ctrl goes up inside the Paste frame, after the Paste event:
+        // the origin is the latch at Paste time, not the end state.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![
+                egui::Event::Paste("https://example.com/pic.png".into()),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+            true,
+            Some(image.clone()),
+        );
+        assert_eq!(app.pending.len(), 1);
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(
+            app.pending.len(),
+            1,
+            "the release belongs to the armed Paste"
+        );
+    }
+
+    #[test]
+    fn plain_v_typing_pastes_nothing() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_press_plain()],
+            false,
+            Some(image.clone()),
+        );
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![paste_release_plain()],
+            false,
+            Some(image.clone()),
+        );
+        assert!(app.pending.is_empty(), "typing v is not a paste gesture");
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1, "a later shortcut still works");
+    }
+
+    #[test]
+    fn switch_between_press_and_release_attaches_in_current_chat() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        // The press itself is consumed by the integration: this frame is
+        // what an image-only Ctrl+V really delivers before the release.
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        app.chats
+            .push(Chat::new("2@s.whatsapp.net".into(), "Bob".into()));
+        app.open_chat = Some("2@s.whatsapp.net".into());
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1, "the release stages for the open chat");
     }
 
     #[test]

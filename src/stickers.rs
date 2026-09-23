@@ -64,7 +64,12 @@ pub fn build_thumb(thumbs: &Path, file: &Path) -> Result<PathBuf, String> {
     let target = thumb_path(thumbs, file)
         .ok_or_else(|| "the sticker is not filed under its content hash".to_owned())?;
     if target.is_file() {
-        return Ok(target);
+        // A previous run may have left a truncated thumbnail behind: only
+        // trust the cached file when it still decodes.
+        if image::open(&target).is_ok() {
+            return Ok(target);
+        }
+        let _ = std::fs::remove_file(&target);
     }
     let bytes = std::fs::read(file).map_err(|error| error.to_string())?;
     let picture = first_frame(&bytes).ok_or_else(|| "could not read the picture".to_owned())?;
@@ -297,6 +302,30 @@ mod tests {
                 .expect("time"),
             stamp
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_truncated_thumbnail_is_rebuilt() {
+        let dir = std::env::temp_dir().join(format!("zapfast-thumb-trunc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let bytes = webp_picture();
+        let file = dir.join(format!("{}.webp", hash_of(&bytes)));
+        std::fs::write(&file, &bytes).expect("writes");
+        let thumbs = dir.join("thumbs");
+        let built = build_thumb(&thumbs, &file).expect("builds");
+        std::fs::write(&built, b"half-png").expect("truncates");
+        let rebuilt = build_thumb(&thumbs, &file).expect("rebuilds");
+        assert_eq!(rebuilt, built);
+        image::open(&rebuilt).expect("reads");
+        // Same-size corruption still rebuilds: only decodability is trusted,
+        // never existence, size, or timestamps.
+        let good = std::fs::read(&rebuilt).expect("reads thumb");
+        std::fs::write(&rebuilt, vec![0xFF; good.len()]).expect("corrupts");
+        let healed = build_thumb(&thumbs, &file).expect("rebuilds");
+        assert_eq!(healed, built);
+        image::open(&healed).expect("reads");
         let _ = std::fs::remove_dir_all(dir);
     }
 

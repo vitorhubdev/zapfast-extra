@@ -650,11 +650,11 @@ pub fn populate(app: &mut App) {
                 true,
                 base + 150,
                 Content::Text {
-                    text: "btw I made my own Spotify app from scratch! https://spotifast.rocks/".into(),
+                    text: "Testing the new link preview with a reserved example address: https://www.example.com/".into(),
                     preview: Some(LinkPreview {
-                        url: "https://spotifast.rocks/".into(),
-                        title: Some("spotifast.rocks".into()),
-                        description: Some("Spotify, native and fast. A lightweight Spotify client written in Rust with egui.".into()),
+                        url: "https://www.example.com/".into(),
+                        title: Some("Example Domain".into()),
+                        description: Some("A neutral synthetic preview for the ZapExt demo. No external fetch.".into()),
                     }),
                 },
             );
@@ -1060,7 +1060,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 };
                 app.update = Some(crate::updates::Release {
                     version: "99.0.0".to_owned(),
-                    url: "https://github.com/crmne/zapfast/releases/latest".to_owned(),
+                    url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".to_owned(),
                 });
                 app.show_update = true;
                 let installation = Installation {
@@ -1424,6 +1424,64 @@ mod tests {
         assert!(avatar.is_file());
         apply_flags(&mut app, Some("voice"));
         assert!(app.dirs.media_cache_dir().join("demo-voice.ogg").is_file());
+    }
+
+    #[test]
+    fn presentation_and_update_links_stay_on_the_fork() {
+        let mut app = app();
+        // Base fixture: a neutral reserved example address, never an upstream product.
+        let ada = sample_ids()[0];
+        let link = app
+            .conversations
+            .get(ada)
+            .expect("first chat")
+            .message("ada-link")
+            .expect("link row");
+        let Content::Text { text, preview } = &link.content else {
+            panic!("ada-link stays a text row");
+        };
+        assert!(
+            text.contains("https://www.example.com/"),
+            "neutral text, got: {text}"
+        );
+        assert!(
+            !text.contains("spotifast"),
+            "no upstream product, got: {text}"
+        );
+        let preview = preview.as_ref().expect("local preview");
+        assert_eq!(preview.url, "https://www.example.com/");
+        // The tour presents the fork, never the upstream site.
+        super::tour::prepare(&mut app);
+        let link = app
+            .conversations
+            .get(ada)
+            .expect("first chat")
+            .message("ada-link")
+            .expect("link row");
+        let Content::Text { text, .. } = &link.content else {
+            panic!("tour keeps a text row");
+        };
+        assert!(
+            text.contains("github.com/vitorhubdev/zapfast-extra"),
+            "fork link, got: {text}"
+        );
+        assert!(
+            !text.contains("zapfast.rocks"),
+            "no upstream site, got: {text}"
+        );
+        // The simulated update advertises the fork releases page.
+        apply_flags(&mut app, Some("update"));
+        let release = app.update.as_ref().expect("demo release");
+        assert!(
+            release.url.contains("vitorhubdev/zapfast-extra"),
+            "fork releases, got: {}",
+            release.url
+        );
+        assert!(
+            !release.url.contains("crmne"),
+            "no upstream releases, got: {}",
+            release.url
+        );
     }
 
     #[test]

@@ -583,6 +583,15 @@ impl Player {
             _ => return self.open(path, Duration::ZERO),
         };
         let target = total.mul_f32(fraction.clamp(0.0, 1.0));
+        // A jump at the very end would start the decoder past the last
+        // sample: it would find no frames and a valid file would read as
+        // undecodable. One millisecond earlier still shows the last picture
+        // and lets the end state arrive.
+        let target = if target >= total && total > Duration::from_millis(1) {
+            total - Duration::from_millis(1)
+        } else {
+            target
+        };
         // Cached sound makes the jump instant; otherwise the file reopens.
         if self
             .active
@@ -915,39 +924,53 @@ impl Player {
         if active.seeking {
             // A jump shows its keyframe still, never a scan.
             let live = active.base.saturating_sub(Duration::from_millis(80));
-            match active
+            let landed = active
                 .buffered
                 .iter()
                 .find(|frame| frame.pts >= live)
-                .map(|frame| frame.pts)
-            {
-                Some(pts) => {
-                    active.seeking = false;
-                    // Live picture and clock resume together from the
-                    // target: without this the sound would start ahead by
-                    // however long the jump took to decode.
-                    active.started = Instant::now();
-                    if let Some((_, sink)) = &active.audio {
-                        active.anchor = sink.get_pos();
-                    }
-                    show_frame(active, ctx, path, pts, position, total)
+                .map(|frame| frame.pts);
+            if landed.is_none() && active.decode_done {
+                // The decoder is exhausted without a live frame: the jump
+                // ran past the last sample, or the file ends mid-jump. At
+                // the very end that is the finished state on the last
+                // picture; anywhere else the file cannot be played.
+                active.playing = false;
+                active.seeking = false;
+                if let Some((_, sink)) = &active.audio {
+                    sink.pause();
                 }
-                None => {
-                    // Work is in flight whether paused or playing: the
-                    // window must wake when the jump lands, with no mouse
-                    // needed.
-                    ctx.request_repaint_after(Duration::from_millis(100));
-                    match active.buffered.front().map(|frame| frame.pts) {
+                if active.base >= total.saturating_sub(Duration::from_millis(80)) {
+                    active.base = total;
+                    active.finished = true;
+                    match active.buffered.back().map(|frame| frame.pts) {
                         Some(pts) => show_frame(active, ctx, path, pts, position, total),
-                        None if active.decode_done => {
-                            active.playing = false;
-                            active.seeking = false;
-                            if let Some((_, sink)) = &active.audio {
-                                sink.pause();
-                            }
-                            State::Unsupported("This video could not be decoded.".to_owned())
+                        None => State::Unsupported("This video could not be decoded.".to_owned()),
+                    }
+                } else {
+                    State::Unsupported("This video could not be decoded.".to_owned())
+                }
+            } else {
+                match landed {
+                    Some(pts) => {
+                        active.seeking = false;
+                        // Live picture and clock resume together from the
+                        // target: without this the sound would start ahead by
+                        // however long the jump took to decode.
+                        active.started = Instant::now();
+                        if let Some((_, sink)) = &active.audio {
+                            active.anchor = sink.get_pos();
                         }
-                        None => State::Loading,
+                        show_frame(active, ctx, path, pts, position, total)
+                    }
+                    None => {
+                        // Work is in flight whether paused or playing: the
+                        // window must wake when the jump lands, with no mouse
+                        // needed.
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        match active.buffered.front().map(|frame| frame.pts) {
+                            Some(pts) => show_frame(active, ctx, path, pts, position, total),
+                            None => State::Loading,
+                        }
                     }
                 }
             }
@@ -1660,6 +1683,10 @@ fn decode(
     let mut sent = target;
     // Presentation times queue in decode order, which matches the decoder's
     // output order for the baseline encodes WhatsApp sends (no B-frames).
+    // The pre-roll floor keeps stale frames from flooding the viewer, but
+    // the final sample always passes: a jump at the very end would
+    // otherwise decode zero frames and read as a broken file.
+    let floor = target.saturating_sub(Duration::from_millis(80));
     for sample_id in start_sample..=count {
         if !alive() {
             return;
@@ -1676,7 +1703,7 @@ fn decode(
         if let Some(yuv) = decoded
             && let Some(delay) = pending.pop_front()
             && let Some(frame) = frame_of(&yuv, delay)
-            && delay >= target.saturating_sub(Duration::from_millis(80))
+            && (delay >= floor || sample_id == count)
         {
             sent = sent.max(delay);
             if send_frame(out, alive, frame).is_err() {
@@ -1688,13 +1715,17 @@ fn decode(
         return;
     }
     if let Ok(rest) = decoder.flush_remaining() {
-        for yuv in &rest {
+        let mut rest = rest.iter().peekable();
+        while let Some(yuv) = rest.next() {
             if !alive() {
                 return;
             }
             let delay = pending.pop_front().unwrap_or(sent);
+            // The very last picture still goes out when the jump aimed
+            // past it; the viewer settles it as the finished state.
+            let last = rest.peek().is_none() && pending.is_empty();
             if let Some(frame) = frame_of(yuv, delay)
-                && delay >= target.saturating_sub(Duration::from_millis(80))
+                && (delay >= floor || last)
                 && send_frame(out, alive, frame).is_err()
             {
                 return;
@@ -2555,6 +2586,201 @@ mod tests {
         assert_eq!(made, 3, "all three layouts are made");
         let _ = std::fs::remove_dir_all(dir);
     }
+    /// Makes a two-second video-only clip, or nothing without ffmpeg.
+    fn sample_silent(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        std::fs::create_dir_all(dir).ok()?;
+        let path = dir.join("clip-silent.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "color=c=green:s=64x64:d=2:r=10"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .args(["-profile:v", "baseline", "-bf", "0", "-an"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        made.then_some(path)
+    }
+
+    fn player_position(player: &Player) -> Option<Duration> {
+        player.active.as_ref().map(|active| active.position())
+    }
+
+    #[test]
+    fn pause_freezes_and_resume_continues() {
+        let dir = std::env::temp_dir().join(format!("zapfast-pause-{}", std::process::id()));
+        let Some(path) = sample_silent(&dir) else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        player.toggle(&path, &mut || {}).expect("opens");
+        player.seek(&path, 0.5).expect("seeks");
+        // Let the jump land first: the clock only runs once live frames
+        // arrive and clear the seeking flag, like in the viewer.
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let landed = player.active.as_ref().is_none_or(|active| !active.seeking);
+            if landed {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the jump lands");
+            player.poll(&ctx, &path);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        player.toggle(&path, &mut || {}).expect("pauses");
+        let frozen = player_position(&player).expect("a clock");
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(player_position(&player), Some(frozen), "paused holds base");
+        player.toggle(&path, &mut || {}).expect("resumes");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            player_position(&player).expect("a clock") > frozen,
+            "resumed advances"
+        );
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn replay_from_end_restarts_playing() {
+        // Its own folder: replaying_a_finished_video_starts_playing owns
+        // zapfast-replay in this process and both remove their folder.
+        let dir = std::env::temp_dir().join(format!("zapfast-replay-end-{}", std::process::id()));
+        let Some(path) = sample_silent(&dir) else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        player.toggle(&path, &mut || {}).expect("opens");
+        player.seek(&path, 1.0).expect("seeks to the end");
+        let mut finished = false;
+        for _ in 0..100 {
+            if let State::Showing { finished: done, .. } = player.poll(&ctx, &path) {
+                finished = done;
+                if done {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(finished, "the end state arrives");
+        player.toggle(&path, &mut || {}).expect("replays");
+        let position = player_position(&player).expect("a clock");
+        assert!(
+            position < Duration::from_secs(2),
+            "replay restarts from the beginning: {position:?}"
+        );
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn seek_drops_the_old_soundtrack_without_doubling() {
+        let dir = std::env::temp_dir().join(format!("zapfast-seeksound-{}", std::process::id()));
+        let Some(path) = sample_clip(&dir) else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let mut player = Player::default();
+        player.toggle(&path, &mut || {}).expect("opens");
+        player.seek(&path, 0.5).expect("seeks");
+        // One soundtrack at most: the jump either attached the cached one
+        // or dropped the old one while the new opens beside it.
+        let sounding = player
+            .active
+            .as_ref()
+            .map(|active| active.audio.is_some())
+            .unwrap_or(false);
+        let extracting = player
+            .active
+            .as_ref()
+            .map(|active| active.audio_rx.is_some() || active.audio_task.is_some())
+            .unwrap_or(false);
+        assert!(!sounding || !extracting, "no old sink beside a new opening");
+        // Switching files retires the whole previous playback.
+        let other = dir.join("other.mp4");
+        std::fs::copy(&path, &other).expect("copies");
+        player.toggle(&other, &mut || {}).expect("switches");
+        assert!(!player.is_active(&path), "the old clip is gone");
+        assert!(player.is_active(&other));
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn silent_clip_plays_without_soundtrack() {
+        let dir = std::env::temp_dir().join(format!("zapfast-silent-{}", std::process::id()));
+        let Some(path) = sample_silent(&dir) else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let clip = probe(&path).expect("the header reads");
+        assert!(!clip.has_audio, "video only");
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        player.toggle(&path, &mut || {}).expect("opens");
+        assert!(
+            player
+                .active
+                .as_ref()
+                .is_some_and(|active| active.audio.is_none()),
+            "nothing to attach"
+        );
+        let mut first = None;
+        for _ in 0..50 {
+            if let State::Showing { position, .. } = player.poll(&ctx, &path) {
+                first = Some(position);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let first = first.expect("frames show");
+        std::thread::sleep(Duration::from_millis(300));
+        let later = player_position(&player).expect("a clock");
+        assert!(
+            later >= first,
+            "the wall clock drives on: {first:?} then {later:?}"
+        );
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_file_refuses_once() {
+        let dir = std::env::temp_dir().join(format!("zapfast-badclip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("bad.mp4");
+        std::fs::write(&path, b"not a video").expect("writes");
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        assert!(player.toggle(&path, &mut || {}).is_err());
+        assert!(player.refusal(&path).is_some(), "complains once");
+        assert!(matches!(player.poll(&ctx, &path), State::Unsupported(_)));
+        assert!(player.toggle(&path, &mut || {}).is_err(), "still refused");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn output_level_follows_without_reopening() {
+        // State-level routing only: levels apply without reopening and
+        // reach the sink on attach. Audible output still needs a live
+        // listening check and is not claimed here.
+        let dir = std::env::temp_dir().join(format!("zapfast-volume-{}", std::process::id()));
+        let Some(path) = sample_silent(&dir) else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let mut player = Player::default();
+        player.set_output(0.3, false);
+        player.toggle(&path, &mut || {}).expect("opens");
+        player.set_output(0.0, true);
+        assert!(player.is_active(&path), "level changes never reopen");
+        player.stop();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn fragments_fall_back_to_ffmpeg_for_their_length() {
         if !ffmpeg_present() {

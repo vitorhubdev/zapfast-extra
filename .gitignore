@@ -15,3 +15,6 @@ __pycache__/
 /packaging/flatpak/flatpak-cargo-generator.py
 /.flatpak-builder/
 /build-dir/
+
+# Private planning documents, never included in releases.
+/.local-roadmap/
