@@ -3579,6 +3579,34 @@ mod tests {
         assert_eq!(resample_linear(&input, PCM_RATE, PCM_RATE), input);
     }
     #[test]
+    fn chat_video_sound_lasts_the_whole_clip() {
+        // Interleaved MP4s carry picture packets among the sound ones. rodio
+        // 0.22.2 stops the sound at the first packet of another track (about
+        // a tenth of a second), which the listener hears as silence; the fix
+        // skips packets of every track but the selected one (upstream
+        // RustAudio/rodio#833).
+        use rodio::Source;
+        let dir = std::env::temp_dir().join(format!("zapfast-video-sound-{}", std::process::id()));
+        let Some(path) =
+            sample_clip_sized(&dir, "sound.mp4", "64x64", 3, "baseline", "0", "10", true)
+        else {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        };
+        let file = std::fs::File::open(&path).expect("opens");
+        let mut decoder = rodio::Decoder::new(std::io::BufReader::new(file)).expect("decodes");
+        let rate = decoder.sample_rate().get();
+        let channels = usize::from(decoder.channels().get());
+        let frames = decoder.by_ref().count() / channels;
+        let sound = Duration::from_secs_f64(frames as f64 / f64::from(rate));
+        assert!(
+            sound > Duration::from_millis(2900),
+            "a three second clip plays about three seconds of sound, not {sound:?}"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn soundtrack_decodes_in_process_without_ffmpeg() {
         let dir = std::env::temp_dir().join(format!("zapfast-symphonia-{}", std::process::id()));
         let Some(path) = sample_clip(&dir) else {

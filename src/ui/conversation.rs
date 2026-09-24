@@ -3248,6 +3248,25 @@ pub(crate) fn thumb_revision(bytes: &[u8]) -> u64 {
     revision.finish()
 }
 
+/// Last drawn pixel size of a file picture, so a texture released while
+/// away reloads at its old size instead of the 4:3 fallback, which would
+/// move the whole chat (upstream #179 pattern, adapted to this picture flow).
+fn pixels_id(path: &Path) -> egui::Id {
+    egui::Id::new(("picture-pixels", path))
+}
+/// Records the size a file picture was drawn at.
+fn remember_pixels(ctx: &egui::Context, path: &Path, size: Vec2) {
+    let id = pixels_id(path);
+    let known = ctx.data(|data| data.get_temp::<Vec2>(id));
+    if known != Some(size) {
+        ctx.data_mut(|data| data.insert_temp(id, size));
+    }
+}
+/// Size a file picture was last drawn at, if any.
+fn drawn_pixels(ctx: &egui::Context, path: &Path) -> Option<Vec2> {
+    ctx.data(|data| data.get_temp::<Vec2>(pixels_id(path)))
+}
+
 fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String {
     // The revision pins the bytes: when analysis upgrades a poster, the
     // new bytes register under a new address instead of losing to the
@@ -3562,6 +3581,9 @@ fn picture(
         return match image.load_for_size(ui.ctx(), vec2(max_width, max_height)) {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
                 forget_retries(ui, message);
+                if sticker.is_none() {
+                    remember_pixels(ui.ctx(), path, texture.size);
+                }
                 let size = if sticker.is_some() {
                     fit_sticker(texture.size.x, texture.size.y)
                 } else {
@@ -3589,8 +3611,11 @@ fn picture(
                 size.x
             }
             Ok(egui::load::TexturePoll::Pending { .. }) => {
+                // A picture released while away loads again at its old size.
                 let size = if sticker.is_some() {
                     Vec2::splat(STICKER_SIDE)
+                } else if let Some(pixels) = drawn_pixels(ui.ctx(), path) {
+                    fit_picture(pixels.x, pixels.y, max_width, max_height)
                 } else {
                     frame_size(media, None, max_width)
                 };
@@ -4298,9 +4323,11 @@ fn recording_strip(app: &mut App, ui: &mut egui::Ui) {
             let pitch = 3.0;
             let count = (rect.width() / pitch).floor() as usize;
             let start = levels.len().saturating_sub(count);
-            for (index, level) in levels[start..].iter().enumerate() {
+            // Short takes hug the right edge, growing toward Send as time passes.
+            let shown = &levels[start..];
+            for (index, level) in shown.iter().enumerate() {
                 let height = 2.0_f32 + (level * 4.0).min(1.0) * 24.0;
-                let x = rect.left() + index as f32 * pitch + 1.0;
+                let x = rect.right() - (shown.len() - index) as f32 * pitch;
                 ui.painter().rect_filled(
                     Rect::from_center_size(egui::pos2(x, rect.center().y), vec2(2.0, height)),
                     1.0,
@@ -4402,6 +4429,19 @@ mod tests {
         let again = thumbnail_uri(&ctx, "chat", "m1", &[1, 2, 3]);
         assert_eq!(uri, again, "same bytes keep their address");
         assert!(ctx.try_load_bytes(&uri).is_ok(), "bytes register again");
+    }
+
+    #[test]
+    fn drawn_picture_size_feeds_pending_layout() {
+        // A portrait photo without message dimensions must reload at its old
+        // size after a cache sweep, not at the 4:3 fallback that moved chats.
+        let ctx = egui::Context::default();
+        let path = std::path::Path::new("chat/photo.jpg");
+        assert_eq!(drawn_pixels(&ctx, path), None);
+        remember_pixels(&ctx, path, egui::vec2(1080.0, 1920.0));
+        assert_eq!(drawn_pixels(&ctx, path), Some(egui::vec2(1080.0, 1920.0)));
+        remember_pixels(&ctx, path, egui::vec2(1080.0, 1920.0));
+        assert_eq!(drawn_pixels(&ctx, path), Some(egui::vec2(1080.0, 1920.0)));
     }
 
     #[test]

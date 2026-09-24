@@ -134,24 +134,22 @@ fn checksum(text: &str, name: &str) -> Result<String> {
 pub fn download(
     release: &Release,
     source: &Source,
+    channel: super::Channel,
     progress: impl Fn(u64, u64),
 ) -> Result<install::Prepared> {
     let installation = install::detect()?;
-    download_for(release, source, installation, progress)
+    download_for(release, source, channel, installation, progress)
 }
 
 pub fn download_for(
     release: &Release,
     source: &Source,
+    channel: super::Channel,
     installation: install::Installation,
     progress: impl Fn(u64, u64),
 ) -> Result<install::Prepared> {
     ensure!(
-        super::parse(&release.version).is_some_and(|(_, pre)| !pre)
-            && release
-                .version
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || byte == b'.'),
+        super::installable(channel, &release.version),
         "Invalid release version"
     );
     let policy = source.clone();
@@ -175,7 +173,7 @@ pub fn download_for(
     )?;
     ensure!(
         !metadata.draft
-            && !metadata.prerelease
+            && (!metadata.prerelease || channel == super::Channel::Testing)
             && metadata.tag_name == format!("v{}", release.version),
         "The release changed. Check for updates again."
     );
@@ -389,6 +387,7 @@ mod tests {
             let error = download_for(
                 &release,
                 &Source::local(&base).unwrap(),
+                crate::updates::Channel::Stable,
                 installation,
                 |_, _| {},
             )
@@ -408,6 +407,118 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "demo", any(target_os = "windows", target_os = "linux")))]
+    #[test]
+    fn testing_channel_installs_candidates_stable_still_refuses() {
+        use std::net::TcpListener;
+        // A release candidate behind Testing must sail past the version and
+        // metadata gates and only fail on integrity, like a stable build;
+        // the same candidate behind Stable must be refused at the gate.
+        let version = "0.8.0-rc.1";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let platform = if cfg!(windows) {
+            "pc-windows-msvc.zip"
+        } else {
+            "unknown-linux-gnu.tar.gz"
+        };
+        let name = format!("zapfast-v{version}-{}-{platform}", std::env::consts::ARCH);
+        let payload = b"damaged download";
+        let checksums = format!("{}  {name}\n", "0".repeat(64));
+        let metadata = serde_json::json!({"tag_name":format!("v{version}"),"prerelease":true,"assets":[
+            {"name":name,"size":payload.len(),"browser_download_url":format!("{base}/package")},
+            {"name":"checksums.txt","size":checksums.len(),"browser_download_url":format!("{base}/checksums")}
+        ]})
+        .to_string();
+        let expected_urls =
+            ["latest.json", "checksums", "package"].map(|path| format!("GET /{path} HTTP/1.1"));
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            for body in [
+                metadata.into_bytes(),
+                checksums.into_bytes(),
+                payload.to_vec(),
+            ]
+            .into_iter()
+            .zip(expected_urls)
+            {
+                let (body, expected_request) = body;
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                std::time::Instant::now() < deadline,
+                                "update did not reach its route"
+                            );
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("fixture listener: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0; 4096];
+                let size = stream.read(&mut request).unwrap();
+                assert!(String::from_utf8_lossy(&request[..size]).starts_with(&expected_request));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        let directory =
+            std::env::temp_dir().join(format!("zapfast-rc-test-{}", rand::random::<u64>()));
+        fs::create_dir(&directory).unwrap();
+        let target = directory.join("zapfast");
+        fs::write(&target, b"original").unwrap();
+        let installation = install::Installation {
+            executable: target.clone(),
+            kind: install::Kind::Portable,
+        };
+        let release = Release {
+            version: version.into(),
+            url: base.clone(),
+        };
+        // Stable refuses the candidate at the version gate, before any download.
+        let stable = download_for(
+            &release,
+            &Source::local(&base).unwrap(),
+            crate::updates::Channel::Stable,
+            install::Installation {
+                executable: target.clone(),
+                kind: install::Kind::Portable,
+            },
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(
+            stable.to_string().contains("Invalid release version"),
+            "stable refuses candidates: {stable:#}"
+        );
+        let error = download_for(
+            &release,
+            &Source::local(&base).unwrap(),
+            crate::updates::Channel::Testing,
+            installation,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("verified"),
+            "candidate reaches integrity: {error:#}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+        server.join().unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
+    // rc download test end
     #[test]
     fn checksums_must_be_unique_valid_and_for_the_exact_asset() {
         let digest = "a".repeat(64);

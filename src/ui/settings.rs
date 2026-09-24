@@ -136,6 +136,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     toggle(ui, app, "Notify about new messages", "Show desktop notifications when the window is hidden, in the background, or showing another chat. Muted chats do not notify you.", |settings| &mut settings.notifications);
                     toggle(ui, app, "Download updates automatically", "Download and verify new releases in the background. You choose when to restart. Native packages and Flatpak update through their package manager.", |settings| &mut settings.download_updates_automatically);
                     toggle(ui, app, "Check for updates", "Ask GitHub once a day whether a newer ZapExt release exists. The request identifies only ZapExt and its version.", |settings| &mut settings.check_for_updates);
+                    widgets::setting_row(ui, &palette, "Update channel", "Stable is the default. Testing also offers release candidates, which may be unfinished. A newer finished release always wins on either channel.", |ui| {
+                        ui.horizontal(|ui| {
+                            for (choice, label) in [(crate::updates::Channel::Stable, "Stable"), (crate::updates::Channel::Testing, "Testing")] {
+                                if ui.selectable_label(app.settings.update_channel == choice, label).clicked() {
+                                    app.settings.update_channel = choice;
+                                    app.actions.push(Action::SettingsChanged);
+                                }
+                            }
+                        });
+                    });
 
                     section(ui, app, "Account");
                     let name = app.me_name.clone().unwrap_or_default();

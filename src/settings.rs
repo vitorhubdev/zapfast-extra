@@ -72,6 +72,10 @@ pub struct Settings {
     pub notifications: bool,
     /// Ask GitHub once a day whether a newer release exists.
     pub check_for_updates: bool,
+    /// Which release stream the updater follows. Stable is the default;
+    /// Testing also offers release candidates. Unknown values read as Stable.
+    #[serde(default, deserialize_with = "channel_from_name")]
+    pub update_channel: crate::updates::Channel,
     /// Download verified updates in the background; restarting remains explicit.
     pub download_updates_automatically: bool,
     /// Prefer address-book names over public profile names.
@@ -112,6 +116,7 @@ impl Default for Settings {
             keep_running_in_background: true,
             notifications: true,
             check_for_updates: true,
+            update_channel: crate::updates::Channel::Stable,
             download_updates_automatically: false,
             names_from_contacts: true,
             save_contacts_to_phone: true,
@@ -190,6 +195,19 @@ where
     })
 }
 
+/// Release stream by name; anything unknown stays on Stable so a typo
+/// or a future value never disables update checks.
+fn channel_from_name<'de, D>(deserializer: D) -> Result<crate::updates::Channel, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let name: Option<String> = serde::Deserialize::deserialize(deserializer)?;
+    Ok(match name.as_deref() {
+        Some("Testing") => crate::updates::Channel::Testing,
+        _ => crate::updates::Channel::Stable,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +220,12 @@ mod tests {
         assert!(parsed.enter_sends);
         assert!(parsed.check_for_updates);
         assert!(!parsed.download_updates_automatically);
+        assert_eq!(parsed.update_channel, crate::updates::Channel::Stable);
+        let testing: Settings =
+            serde_json::from_str(r#"{"update_channel":"Testing"}"#).expect("parses");
+        assert_eq!(testing.update_channel, crate::updates::Channel::Testing);
+        let bogus: Settings = serde_json::from_str(r#"{"update_channel":"Beta"}"#).expect("parses");
+        assert_eq!(bogus.update_channel, crate::updates::Channel::Stable);
     }
 
     #[test]

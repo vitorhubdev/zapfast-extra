@@ -32,6 +32,7 @@ use whatsapp_rust::wacore_binary::jid::JidExt;
 use whatsapp_rust::waproto::buffa::Message as _;
 use whatsapp_rust::{MediaRetryResult, MediaReuploadRequest};
 
+mod link_watch;
 mod poll_history;
 mod polls;
 
@@ -382,6 +383,8 @@ pub async fn run(
         sticker_downloads: HashSet::new(),
         sticker_give_up: HashSet::new(),
         download_retries: HashMap::new(),
+        update_checker: crate::updates::Checker::new(),
+        link_watch: Default::default(),
         sync_attempts: HashMap::new(),
         sync_in_flight: HashMap::new(),
         sync_aliases: HashMap::new(),
@@ -441,6 +444,7 @@ pub async fn run(
                 worker.emit_chats();
             }
             _ = tick.tick() => {
+                worker.watch_link();
                 worker.pump_chat_sync();
                 worker.expire_older_requests();
                 worker.retry_avatars();
@@ -508,6 +512,11 @@ struct Worker {
     sticker_give_up: HashSet<(ChatId, String)>,
     /// Silent media retries per chat and message id.
     download_retries: HashMap<(ChatId, String), u32>,
+    /// Notices a link that stays open after a sleep but carries nothing.
+    link_watch: link_watch::LinkWatch,
+    /// Update-listing checks: timeout, one flight at a time and an ETag
+    /// cache shared across automatic and manual checks.
+    update_checker: crate::updates::Checker,
     /// Failed archive-sync rounds per chat and revision. A fresh user intent
     /// drops every key of its chat; the fourth quiet failure of one revision
     /// surfaces a visible error once.
@@ -901,6 +910,41 @@ impl Worker {
             self.polish(&mut message);
             self.emit(Event::MessageUpdated(Box::new(message)));
         }
+    }
+
+    /// Reconnects a link that the machine slept under, or that has received
+    /// nothing for longer than a working one can. See `link_watch`.
+    fn watch_link(&mut self) {
+        let client = self
+            .client
+            .clone()
+            .filter(|_| matches!(self.status, LinkStatus::Connected));
+        let frames = client.as_ref().map(|client| client.stats().frames_received);
+        let verdict = self.link_watch.check(
+            std::time::Instant::now(),
+            std::time::SystemTime::now(),
+            frames,
+        );
+        let Some(client) = client else {
+            return;
+        };
+        match verdict {
+            link_watch::Verdict::Healthy => return,
+            link_watch::Verdict::Slept(asleep) => {
+                log::info!(
+                    "link: resumed after {} s asleep, reconnecting",
+                    asleep.as_secs()
+                );
+            }
+            link_watch::Verdict::Silent(quiet) => {
+                log::warn!(
+                    "link: nothing received for {} s, reconnecting",
+                    quiet.as_secs()
+                );
+            }
+        }
+        self.set_status(LinkStatus::Connecting);
+        tokio::spawn(async move { client.reconnect_immediately().await });
     }
 
     fn set_status(&mut self, status: LinkStatus) {
@@ -3576,16 +3620,21 @@ impl Worker {
                     waker.wake();
                 });
             }
-            Command::DownloadUpdate { release, source } => {
+            Command::DownloadUpdate {
+                release,
+                source,
+                channel,
+            } => {
                 let events = self.events.clone();
                 let waker = self.waker.clone();
                 tokio::task::spawn_blocking(move || {
-                    let result = crate::updates::download(&release, &source, |received, total| {
-                        let _ = events.send(Event::UpdateProgress { received, total });
-                        waker.wake();
-                    })
-                    .map(Box::new)
-                    .map_err(|error| format!("{error:#}"));
+                    let result =
+                        crate::updates::download(&release, &source, channel, |received, total| {
+                            let _ = events.send(Event::UpdateProgress { received, total });
+                            waker.wake();
+                        })
+                        .map(Box::new)
+                        .map_err(|error| format!("{error:#}"));
                     let _ = events.send(Event::UpdateDownloaded(result));
                     waker.wake();
                 });
@@ -3603,44 +3652,56 @@ impl Worker {
                     waker.wake();
                 });
             }
-            Command::CheckForUpdates => {
-                let events = self.events.clone();
-                let waker = self.waker.clone();
-                tokio::task::spawn_blocking(move || match crate::updates::newer_release() {
-                    Ok(Some(release)) => {
-                        let _ = events.send(Event::UpdateAvailable {
-                            version: release.version,
-                            url: release.url,
-                        });
-                        waker.wake();
-                    }
-                    Ok(None) => log::debug!("this is the newest release"),
-                    Err(error) => {
-                        log::debug!("could not check for a newer release: {error:#}")
-                    }
-                });
-            }
-            Command::CheckUpdatesNow => {
+            Command::CheckForUpdates { channel } => {
+                let checker = self.update_checker.clone();
                 let events = self.events.clone();
                 let waker = self.waker.clone();
                 tokio::task::spawn_blocking(move || {
-                    match crate::updates::newer_release() {
-                        Ok(Some(release)) => {
+                    let endpoints = crate::updates::Source::GitHub.endpoints();
+                    match checker.check(&endpoints, channel, crate::updates::zapext_version()) {
+                        Some(crate::updates::CheckOutcome::Available(release)) => {
+                            let _ = events.send(Event::UpdateAvailable {
+                                version: release.version,
+                                url: release.url,
+                            });
+                            waker.wake();
+                        }
+                        Some(_) => log::debug!("no newer release on this channel"),
+                        None => log::debug!("update check already running"),
+                    }
+                });
+            }
+            Command::CheckUpdatesNow { channel } => {
+                let checker = self.update_checker.clone();
+                let events = self.events.clone();
+                let waker = self.waker.clone();
+                tokio::task::spawn_blocking(move || {
+                    let endpoints = crate::updates::Source::GitHub.endpoints();
+                    let outcome = checker
+                        .check(&endpoints, channel, crate::updates::zapext_version())
+                        .unwrap_or(crate::updates::CheckOutcome::Unavailable(
+                            crate::updates::FetchError::Unexpected(
+                                "An update check is already running".into(),
+                            ),
+                        ));
+                    match outcome {
+                        crate::updates::CheckOutcome::Available(release) => {
                             let _ = events.send(Event::UpdateAvailable {
                                 version: release.version,
                                 url: release.url,
                             });
                         }
-                        Ok(None) => {
+                        crate::updates::CheckOutcome::UpToDate => {
                             let _ = events.send(Event::UpdateUpToDate);
                         }
-                        Err(error) => {
+                        crate::updates::CheckOutcome::Unavailable(error) => {
                             let _ = events.send(Event::UpdateCheckFailed(error.to_string()));
                         }
                     }
                     waker.wake();
                 });
             }
+            // handlers end
             Command::RecentStickers => {
                 // Opening the picker is a fresh ask: failures get their
                 // attempts back.
@@ -10060,6 +10121,8 @@ mod receipt_tests {
             sticker_downloads: HashSet::new(),
             sticker_give_up: HashSet::new(),
             download_retries: HashMap::new(),
+            update_checker: crate::updates::Checker::new(),
+            link_watch: Default::default(),
             sync_attempts: HashMap::new(),
             sync_in_flight: HashMap::new(),
             sync_aliases: HashMap::new(),

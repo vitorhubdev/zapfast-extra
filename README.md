@@ -417,7 +417,7 @@ light/dark preference and does not read host theme files or install desktop hook
 
 ZapExt uses the fork's GitHub Releases API at
 `https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest`.
-It checks once a day when **Check for updates** is enabled. The current fork
+It checks once a day when **Check for updates** is enabled. **Update channel** selects Stable (finished releases, the default) or Testing (also release candidates, never older builds). The current fork
 version has one canonical source in the repository root: [`VERSION`](VERSION).
 Release tags are validated against that file before binaries are built.
 Click **Update** in the banner to download and verify a newer release, then

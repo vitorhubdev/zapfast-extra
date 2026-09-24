@@ -2,6 +2,46 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.79] - 2026-09-24
+
+### Fixed
+
+- Chat videos with picture and sound tracks play the whole soundtrack instead of a tenth of a second of audio: rodio is pinned to the revision carrying upstream RustAudio/rodio#833 (same pin as upstream ZapFast 0.16.2), which skips packets of every track but the selected one.
+
+### Tests
+
+- New whole-sound test proving a three-second clip played 209 ms before the pin and its full sound after.
+
+## [1.0.78] - 2026-09-24
+
+### Added
+
+- Link watchdog: after sleep or two silent minutes on a connected link, the worker reconnects through the library instead of showing connected forever.
+- Chat photos remember their drawn size, so a texture released while away reloads at its old height instead of the fallback that moved the chat.
+
+### Fixed
+
+- Voice-recording bars grow toward Send from the right edge.
+- The crate version now matches VERSION, so the built binary no longer reports itself as 1.0.61.
+
+### Tests
+
+- Ported link-watch coverage (health, silence limit with fresh allowance, sleep detection, slow-worker tolerance) plus a drawn-size round trip for pending layout.
+
+## [1.0.77] - 2026-09-24
+
+### Added
+
+- Update channel in Settings: Stable (finished releases, the default) or Testing (also release candidates, never older builds). Release candidates install only on Testing, with the same checksum and backup guarantees.
+
+### Fixed
+
+- Update checks now run with a 20-second timeout, one flight at a time, and an ETag cache, so a stalled listing fails fast, concurrent checks never stack, and repeat checks revalidate instead of re-downloading. Rate limits, offline hosts and unexpected listings report distinct messages.
+
+### Tests
+
+- Channel compare matrix (including release-candidate ordering and no-downgrade rules), listing selection over drafts and mislabeled entries, ETag replay, rate-limit mapping, busy-skip, stalled-listing timeout, candidate install behind Testing with Stable refusal, and channel setting round trips.
+
 ## [1.0.76] - 2026-09-24
 
 ### Fixed

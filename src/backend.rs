@@ -348,7 +348,9 @@ pub enum Command {
     },
     /// Manual update check from the About dialog. Unlike the daily check it
     /// always reports back, so the button never spins forever.
-    CheckUpdatesNow,
+    CheckUpdatesNow {
+        channel: crate::updates::Channel,
+    },
     /// Evicts a cached file that never decodes, clears its archive record
     /// and fetches it again. Saved stickers and imported packs are the
     /// user's own files and are never touched.
@@ -483,11 +485,14 @@ pub enum Command {
         disabled: bool,
     },
     /// Ask GitHub whether a newer release exists.
-    CheckForUpdates,
+    CheckForUpdates {
+        channel: crate::updates::Channel,
+    },
     InspectUpdate,
     DownloadUpdate {
         release: crate::updates::Release,
         source: crate::updates::Source,
+        channel: crate::updates::Channel,
     },
     InstallUpdate {
         prepared: Box<crate::updates::install::Prepared>,
@@ -852,6 +857,7 @@ mod tests {
         backend.send(Command::DownloadUpdate {
             release: release(),
             source: Source::GitHub,
+            channel: crate::updates::Channel::Stable,
         });
         backend.send(Command::InstallUpdate {
             prepared: prepared(),
@@ -863,6 +869,7 @@ mod tests {
         backend.send(Command::DownloadUpdate {
             release: release(),
             source: Source::GitHub,
+            channel: crate::updates::Channel::Stable,
         });
         backend.send(Command::InstallUpdate {
             prepared: prepared(),
