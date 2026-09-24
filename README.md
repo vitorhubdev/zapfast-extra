@@ -10,6 +10,8 @@ Release candidates are opt-in builds on the GitHub Releases page, marked
 **Pre-release**. They do not replace the stable download or the updater's
 stable channel. The 1.0.61 candidate includes accumulated fixes for testing;
 live phone synchronization and installation rollback are not yet validated.
+Archive and unarchive between this computer and the phone are covered only by
+synthetic tests so far: live two-device validation is still pending.
 Keep a backup of your existing profile before testing with important data.
 
 ZapExt is an independent fork/mod maintained by
@@ -50,7 +52,8 @@ without embedding a browser engine.
   scroll up, first from the local archive and then from your phone.
   Deleting or clearing a chat on your phone applies here too: removed
   messages stay gone even when old history arrives later, while newer
-  messages are kept.
+  messages are kept. Each fresh connection also asks the phone for chat
+  changes committed while this device was offline.
   The magnifier in the chat header searches inside that chat and jumps to any
   hit, and its results show the sender, the time, and the message text.
   Group messages show two gray checks after every recipient has received
@@ -73,7 +76,7 @@ without embedding a browser engine.
 - **Voice messages.** Play, seek, record, reply with, and send voice messages
   in the chat. The app normalizes quiet recordings and handles OGG/Opus
   without external tools. A chip on every audio bubble walks that clip through
-  1x, 1.5x and 2x, taking effect at once and from where the clip already is,
+  1x, 1.5x and 2x with the pitch kept, taking effect at once and from where the clip already is,
   and the choice stays with that clip. When one ends, the next clip in the chat
   plays on its own unless you turn that off (Settings, Audio).
 - **Send messages.** Press Enter to send text and Shift+Enter for a new line.
@@ -106,12 +109,19 @@ without embedding a browser engine.
   (click the picture, or Space), a bar that jumps to the exact second with
   the keyframe still on screen while it catches up, a mute button with a
   level slider and the M key, and the true length on screen. A video shows
-  the sender's poster until its first frame decodes. Arrow keys step
+  the sender's poster until its first frame decodes. Dragging the progress
+  bar holds playback and previews the destination with its time, then jumps
+  once on release; Escape cancels the drag with no jump. Arrow keys step
   between files, or adjust the progress and volume sliders while one of
   them has focus. The soundtrack plays from the app itself, with no other
   program needed. A codec the player
   cannot read (HEVC from an iPhone, say) says which one it is and opens in
-  the default desktop app instead. Other documents open
+  the default desktop app instead. Some files only play through an ffmpeg
+  fallback: the app looks for an ffmpeg executable on PATH (installed and
+  portable builds alike; nothing is bundled and nothing is downloaded
+  automatically). Without it those files refuse with a message saying so,
+  next to the same button that opens them in the default desktop app.
+  Other documents open
   in their default desktop apps, and a PDF opens in the viewer built into this
   app, page by page: turn pages with the arrows or the buttons, type a page
   number in the top bar to jump to it, PageUp and PageDown walk ten pages at a
@@ -167,9 +177,14 @@ without embedding a browser engine.
   sticking on an error, and a page fills in a few tiles at a time instead of
   asking the server for everything at once. Emoji autocomplete and picker
   search select their first match; use the arrow keys and Enter to choose it.
-  A sticker that is saved or marked as a favourite is not offered again under
-  the phone recents, and clicking one in a chat shows it bigger with a Save
-  button instead of the full viewer.
+ A sticker that is saved or marked as a favourite is not offered again under
+ the phone recents, and clicking one in a chat shows it bigger with a Save
+ button instead of the full viewer.
+  Search the sticker tab by emoji, word, or pack name. Favourites are kept by
+  content hash, so the same picture marked from a pack, the recents, or the
+  saved stickers stays one favourite, and favourite changes sync toward the
+  phone with retries. A sticker pack shared in a chat opens for preview from
+  its card and can be kept as a new pack.
 - **Sticker packs.** Open a .wastickers or zip file as a new pack, from the
   button at the top of the sticker tab. Animated packs remain animated. Packs
   are stored as WebP files on your computer, one folder per pack.
@@ -439,7 +454,7 @@ WhatsApp, or register a tray icon. You can run it alongside your regular app.
 
 ```sh
 cargo build --locked --features demo
-./target/debug/zapfast --demo-tour --demo-size 1280x800
+./target/debug/zapext --demo-tour --demo-size 1280x800
 ```
 
 The **ZapExt Demo** window waits for **Space**. The 35-second tour starts with

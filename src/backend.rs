@@ -156,6 +156,14 @@ pub enum Command {
     SearchMessages {
         query: String,
     },
+    /// A finished background search, applied only when no newer query
+    /// replaced it. Keeps slow queries off the serial worker loop.
+    SearchReady {
+        generation: u64,
+        query: String,
+        chat: Option<ChatId>,
+        hits: Result<Vec<Message>, String>,
+    },
     /// Creates an archive chat before its first message is sent.
     EnsureChat {
         chat: ChatId,
@@ -243,6 +251,20 @@ pub enum Command {
     StickerPackImported {
         result: Result<String, String>,
     },
+    /// Downloads a sticker pack shared in a chat for preview.
+    ViewStickerPack {
+        chat: ChatId,
+        message: String,
+    },
+    /// Internal received-pack preview result.
+    StickerPackViewed {
+        result: Result<(StickerPack, String), String>,
+    },
+    /// Copies a previewed pack into the packs folder.
+    AddStickerPack {
+        dir: PathBuf,
+        name: String,
+    },
     /// Saves a name through contact sync. `first_name` is the short display
     /// name; `to_phone` also adds it to the phone's address book.
     SaveContact {
@@ -279,6 +301,19 @@ pub enum Command {
     /// Marks a sticker as a favourite, or clears the mark.
     FavoriteSticker {
         path: PathBuf,
+    },
+    /// Internal result of pushing one favorite change to the phone.
+    FavoritePushed {
+        hash: String,
+        updated_at: i64,
+        result: Result<Vec<u8>, String>,
+    },
+    /// Internal notice that the favorite push queue drained.
+    FavoritesPushed,
+    /// Internal result of fetching a phone favorite file.
+    FavoriteFetched {
+        hash: String,
+        result: Result<PathBuf, String>,
     },
     /// Searches the open chat's messages.
     SearchChat {
@@ -557,7 +592,11 @@ pub enum Event {
         recent: Vec<PathBuf>,
         /// Sticker files the reader marked as favourites, newest first.
         favorites: Vec<PathBuf>,
+        /// Emoji tags read from sticker files, for search.
+        emojis: Vec<(PathBuf, Vec<String>)>,
     },
+    /// A sticker pack shared in a chat, downloaded for preview, or why not.
+    StickerPackPreview(Result<(StickerPack, String), String>),
     /// In-chat search hits, or why the search failed.
     ChatSearch {
         chat: ChatId,

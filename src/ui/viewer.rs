@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use egui::{Align, Color32, CornerRadius, CursorIcon, Key, Layout, Rect, Sense, Vec2, pos2, vec2};
 
 use crate::app::App;
-use crate::model::{Action, ViewerKind};
+use crate::model::{Action, VideoScrub, ViewerKind};
 use crate::theme::{self, Icon, Palette};
 
 use super::conversation::thumb_revision;
@@ -97,7 +97,10 @@ fn video_view(
                         area.center(),
                         *natural * fit_scale(*natural, area.size()),
                     );
-                    if ui.is_rect_visible(placed) {
+                    // A fresh scrub preview takes the picture while the
+                    // drag lasts; otherwise the live frame stays put.
+                    let previewed = paint_scrub_preview(app, ui, ctx, path, placed);
+                    if ui.is_rect_visible(placed) && !previewed {
                         ui.painter().image(
                             texture.id(),
                             placed,
@@ -203,19 +206,8 @@ fn poster_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> String
             .collect::<String>(),
         thumb_revision(bytes)
     );
-    let seen = ctx.data_mut(|data| {
-        let mut known = data
-            .get_temp_mut_or_default::<std::collections::HashSet<String>>(egui::Id::new(
-                "video-posters",
-            ))
-            .clone();
-        let fresh = known.insert(uri.clone());
-        data.insert_temp(egui::Id::new("video-posters"), known);
-        fresh
-    });
-    if seen {
-        ctx.include_bytes(uri.clone(), bytes.to_vec());
-    }
+    // Budgeted registration like chat thumbnails: re-registers after a sweep.
+    crate::image_cache::include(ctx, uri.clone(), bytes);
     uri
 }
 fn video_head(
@@ -272,6 +264,170 @@ pub(crate) fn seek_fraction(position: Duration, total: Duration) -> f32 {
 }
 
 /// Playback controls under the playing video.
+/// What one slider frame means during a scrub drag. Preview and the
+/// definitive jump stay separate: motion only previews, release jumps
+/// once, Escape jumps nowhere.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum BarSeek {
+    None,
+    BeginDrag,
+    Preview(f32),
+    Commit(f32),
+    Click(f32),
+}
+
+/// Reads one slider frame: release commits exactly once, motion
+/// previews, a click jumps at once. Pure so drag sequencing stays
+/// testable without a window.
+pub(crate) fn bar_seek_action(
+    started: bool,
+    dragged: bool,
+    stopped: bool,
+    changed: bool,
+    scrubbing: bool,
+    fraction: f32,
+) -> BarSeek {
+    if stopped && scrubbing {
+        return BarSeek::Commit(fraction);
+    }
+    if stopped {
+        return BarSeek::Click(fraction);
+    }
+    if changed && !dragged && scrubbing {
+        return BarSeek::Preview(fraction);
+    }
+    if changed && !dragged {
+        return BarSeek::Click(fraction);
+    }
+    if started && !scrubbing {
+        return BarSeek::BeginDrag;
+    }
+    if dragged && scrubbing {
+        return BarSeek::Preview(fraction);
+    }
+    BarSeek::None
+}
+
+/// Paints the scrub preview over the live picture when it shows the
+/// drag destination. Anything else keeps the last live frame: no black
+/// screen while the new preview travels. Returns whether it painted.
+fn paint_scrub_preview(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    path: &Path,
+    placed: Rect,
+) -> bool {
+    let Some(scrub) = app.video_scrub.as_ref().filter(|scrub| scrub.path == path) else {
+        return false;
+    };
+    if let Some(ready) = app.previewer.poll(path, scrub.generation) {
+        let upload = app.video_preview.as_ref().is_none_or(|slot| {
+            slot.path != ready.path
+                || slot.generation != ready.generation
+                || slot.seq != ready.seq
+                || slot.approximate != ready.approximate
+        });
+        if upload {
+            let texture = match app.video_preview.as_mut() {
+                Some(slot) => {
+                    slot.texture
+                        .set(ready.image.clone(), egui::TextureOptions::LINEAR);
+                    slot.texture.clone()
+                }
+                None => ctx.load_texture(
+                    "video-preview",
+                    ready.image.clone(),
+                    egui::TextureOptions::LINEAR,
+                ),
+            };
+            app.video_preview = Some(crate::app::PreviewSlot {
+                path: ready.path.clone(),
+                generation: ready.generation,
+                seq: ready.seq,
+                fraction: ready.fraction,
+                pts: ready.pts,
+                approximate: ready.approximate,
+                texture,
+            });
+        }
+    }
+    let fresh = app.video_preview.as_ref().is_some_and(|slot| {
+        slot.path == *path
+            && slot.generation == scrub.generation
+            && (slot.fraction - scrub.target).abs() <= 0.015
+    });
+    if fresh
+        && ui.is_rect_visible(placed)
+        && let Some(slot) = app.video_preview.as_ref()
+    {
+        ui.painter().image(
+            slot.texture.id(),
+            placed,
+            Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+        return true;
+    }
+    false
+}
+
+/// Thumbnail with the drag time above the bar, never over the controls.
+/// A stale or missing picture shows the time with a quiet standby mark.
+fn paint_preview_thumb(app: &mut App, ui: &mut egui::Ui, bar: Rect, path: &Path, total: Duration) {
+    let Some(scrub) = app.video_scrub.as_ref().filter(|scrub| scrub.path == path) else {
+        return;
+    };
+    let palette = app.palette;
+    let x = (bar.min.x + scrub.target * bar.width()).clamp(bar.min.x + 60.0, bar.max.x - 60.0);
+    let thumb = Rect::from_center_size(pos2(x, bar.min.y - 52.0), vec2(120.0, 68.0));
+    let target = total.mul_f32(scrub.target);
+    let fresh = app.video_preview.as_ref().is_some_and(|slot| {
+        slot.path == *path
+            && slot.generation == scrub.generation
+            && (slot.fraction - scrub.target).abs() <= 0.015
+    });
+    if fresh && let Some(slot) = app.video_preview.as_ref() {
+        ui.painter().rect_filled(thumb, 6.0, Color32::BLACK);
+        ui.painter().image(
+            slot.texture.id(),
+            thumb.shrink(2.0),
+            Rect::from_min_max(egui::Pos2::ZERO, pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
+    // The knob and clock follow the drag target at once; the thumbnail names
+    // both the chosen destination and the decoded frame instant. An early
+    // keyframe approximate shows both times so an approximate never reads as
+    // exact. The definitive jump still uses the target through VideoSeek.
+    let slot_info = app.video_preview.as_ref().filter(|slot| {
+        slot.path == *path
+            && slot.generation == scrub.generation
+            && (slot.fraction - scrub.target).abs() <= 0.015
+    });
+    let target_text = crate::util::duration(target.as_secs().min(u64::from(u32::MAX)) as u32);
+    let label = match slot_info {
+        Some(slot)
+            if !slot.approximate && slot.pts.abs_diff(target) <= Duration::from_millis(500) =>
+        {
+            target_text
+        }
+        Some(slot) => {
+            let frame_text =
+                crate::util::duration(slot.pts.as_secs().min(u64::from(u32::MAX)) as u32);
+            format!("{target_text} · frame {frame_text}")
+        }
+        None => format!("{target_text} …"),
+    };
+    ui.painter().text(
+        pos2(x, bar.min.y - 8.0),
+        egui::Align2::CENTER_CENTER,
+        label,
+        theme::regular(12.0),
+        palette.text,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn video_bar(
     app: &mut App,
@@ -283,88 +439,163 @@ fn video_bar(
     playing: bool,
     finished: bool,
     actions: &mut Vec<Action>,
-) {
+) -> egui::Response {
     let palette = app.palette;
     let bar = Rect::from_center_size(
         pos2(rect.center().x, rect.bottom() - 46.0),
         vec2((rect.width() - 56.0).min(560.0), 40.0),
     );
-    ui.scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
-        ui.horizontal(|ui| {
-            let icon = if playing { Icon::Pause } else { Icon::Play };
-            let hint = if finished {
-                "Play again"
-            } else if playing {
-                "Pause (Space)"
-            } else {
-                "Play (Space)"
-            };
-            if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, hint).clicked() {
-                actions.push(Action::VideoToggle);
-            }
-            theme::text(
-                ui,
-                crate::util::duration(position.as_secs().min(u64::from(u32::MAX)) as u32),
-                theme::regular(13.0),
-                palette.secondary,
-            );
-            let mut fraction = seek_fraction(position, total);
-            let slider = ui.add_sized(
-                vec2((ui.available_width() - 300.0).max(60.0), 22.0),
-                egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
-            );
-            // A drag seeks on release; a click or arrow keys seek at once.
-            if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
-                actions.push(Action::VideoSeek(fraction));
-            }
-            theme::text(
-                ui,
-                crate::util::duration(total.as_secs().max(1).min(u64::from(u32::MAX)) as u32),
-                theme::regular(13.0),
-                palette.secondary,
-            );
-            // The output level lives here, beside the picture it belongs to.
-            let (mut volume, muted) = (app.settings.video_volume, app.settings.video_muted);
-            let icon = if muted || volume <= 0.01 {
-                Icon::VolumeX
-            } else {
-                Icon::Volume
-            };
-            if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, "Mute (M)").clicked() {
-                actions.push(Action::VideoMuteToggle);
-            }
-            let loud = ui.add_sized(
-                vec2(90.0, 22.0),
-                egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
-            );
-            if loud.changed() {
-                actions.push(Action::VideoVolume(volume.clamp(0.0, 1.0)));
-                // Clicks and arrow keys have no drag to stop on: save at once.
-                if !loud.dragged() {
+    let progress = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(bar), |ui| {
+            ui.horizontal(|ui| {
+                let icon = if playing { Icon::Pause } else { Icon::Play };
+                let hint = if finished {
+                    "Play again"
+                } else if playing {
+                    "Pause (Space)"
+                } else {
+                    "Play (Space)"
+                };
+                if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, hint).clicked() {
+                    actions.push(Action::VideoToggle);
+                }
+                // The ball and the clock follow the drag destination at once,
+                // while the held player underneath stays where it was.
+                let scrubbing = app
+                    .video_scrub
+                    .as_ref()
+                    .is_some_and(|scrub| scrub.path == path);
+                let mut fraction = app
+                    .video_scrub
+                    .as_ref()
+                    .filter(|scrub| scrub.path == path)
+                    .map(|scrub| scrub.target)
+                    .unwrap_or_else(|| seek_fraction(position, total));
+                let shown = app
+                    .video_scrub
+                    .as_ref()
+                    .filter(|scrub| scrub.path == path)
+                    .map(|scrub| total.mul_f32(scrub.target))
+                    .unwrap_or(position);
+                theme::text(
+                    ui,
+                    crate::util::duration(shown.as_secs().min(u64::from(u32::MAX)) as u32),
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+                let slider = ui.add_sized(
+                    vec2((ui.available_width() - 300.0).max(60.0), 22.0),
+                    egui::Slider::new(&mut fraction, 0.0..=1.0).show_value(false),
+                );
+                // Motion previews, release jumps once, a click jumps at once.
+                match bar_seek_action(
+                    slider.drag_started(),
+                    slider.dragged(),
+                    slider.drag_stopped(),
+                    slider.changed(),
+                    scrubbing,
+                    fraction,
+                ) {
+                    BarSeek::None => {}
+                    BarSeek::BeginDrag => {
+                        let was_playing = playing && !finished;
+                        if was_playing {
+                            actions.push(Action::VideoToggle);
+                        }
+                        let generation = app.previewer.begin(path);
+                        app.video_scrub = Some(VideoScrub {
+                            path: path.to_path_buf(),
+                            generation,
+                            was_playing,
+                            target: fraction,
+                        });
+                        app.previewer.request(path, generation, fraction, total);
+                    }
+                    BarSeek::Preview(target) => {
+                        if let Some(scrub) =
+                            app.video_scrub.as_mut().filter(|scrub| scrub.path == path)
+                        {
+                            scrub.target = target;
+                        }
+                        if let Some(scrub) =
+                            app.video_scrub.as_ref().filter(|scrub| scrub.path == path)
+                        {
+                            app.previewer.request(path, scrub.generation, target, total);
+                        }
+                    }
+                    BarSeek::Commit(target) => {
+                        let held = app
+                            .video_scrub
+                            .as_ref()
+                            .filter(|scrub| scrub.path == path)
+                            .map(|scrub| (scrub.target, scrub.was_playing));
+                        let (target, resume) = held.unwrap_or((target, false));
+                        app.video_scrub = None;
+                        app.previewer.cancel(path);
+                        app.video_preview = None;
+                        actions.push(Action::VideoSeek(target));
+                        if resume {
+                            actions.push(Action::VideoToggle);
+                        }
+                    }
+                    BarSeek::Click(target) => {
+                        actions.push(Action::VideoSeek(target));
+                    }
+                }
+                paint_preview_thumb(app, ui, bar, path, total);
+                theme::text(
+                    ui,
+                    crate::util::duration(total.as_secs().max(1).min(u64::from(u32::MAX)) as u32),
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+                // The output level lives here, beside the picture it belongs to.
+                let (mut volume, muted) = (app.settings.video_volume, app.settings.video_muted);
+                let icon = if muted || volume <= 0.01 {
+                    Icon::VolumeX
+                } else {
+                    Icon::Volume
+                };
+                if theme::icon_button(ui, icon, 16.0, palette.dim, palette.text, "Mute (M)")
+                    .clicked()
+                {
+                    actions.push(Action::VideoMuteToggle);
+                }
+                let loud = ui.add_sized(
+                    vec2(90.0, 22.0),
+                    egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false),
+                );
+                if loud.changed() {
+                    actions.push(Action::VideoVolume(volume.clamp(0.0, 1.0)));
+                    // Clicks and arrow keys have no drag to stop on: save at once.
+                    if !loud.dragged() {
+                        actions.push(Action::SettingsChanged);
+                    }
+                }
+                if loud.drag_stopped() {
                     actions.push(Action::SettingsChanged);
                 }
-            }
-            if loud.drag_stopped() {
-                actions.push(Action::SettingsChanged);
-            }
-            // A focused slider owns the arrow keys: flag it so media
-            // browsing yields until focus moves on.
-            if slider.has_focus() || loud.has_focus() {
-                ui.data_mut(|data| data.insert_temp(control_focus_id(), true));
-            }
-            if theme::soft_button(ui, &palette, Some(Icon::Download), "Save a copy", false)
-                .clicked()
-            {
-                actions.push(Action::SaveCopy(path.to_path_buf()));
-            }
-            if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), "Default app", false)
-                .on_hover_text("Open in the default app")
-                .clicked()
-            {
-                actions.push(Action::OpenFile(path.to_path_buf()));
-            }
-        });
-    });
+                // A focused slider owns the arrow keys: flag it so media
+                // browsing yields until focus moves on.
+                if slider.has_focus() || loud.has_focus() {
+                    ui.data_mut(|data| data.insert_temp(control_focus_id(), true));
+                }
+                if theme::soft_button(ui, &palette, Some(Icon::Download), "Save a copy", false)
+                    .clicked()
+                {
+                    actions.push(Action::SaveCopy(path.to_path_buf()));
+                }
+                if theme::soft_button(ui, &palette, Some(Icon::ExternalLink), "Default app", false)
+                    .on_hover_text("Open in the default app")
+                    .clicked()
+                {
+                    actions.push(Action::OpenFile(path.to_path_buf()));
+                }
+                slider
+            })
+            .inner
+        })
+        .inner;
     let hint = Rect::from_min_max(
         rect.min + vec2(28.0, 0.0),
         pos2(rect.right() - 28.0, rect.bottom() - 12.0),
@@ -382,6 +613,7 @@ fn video_bar(
             );
         },
     );
+    progress
 }
 
 /// What the viewer shows for a video it cannot play in-process.
@@ -673,6 +905,7 @@ fn pdf_surface(app: &App, path: &Path, page: usize) -> Surface {
 /// Loads a picture or sticker through the image loader.
 fn image_surface(_ui: &mut egui::Ui, ctx: &egui::Context, path: &Path, size: Vec2) -> Surface {
     let uri = crate::util::image_uri(path);
+    crate::image_cache::touch(ctx, &uri);
     // A permanently broken file stays failed for a while instead of burning
     // a decode on every frame; the cooldown retries quietly on its own.
     if let Some(left) = image_cooling_down(ctx, &uri) {
@@ -850,6 +1083,7 @@ fn pdf_area(
                             );
                         }
                         let inner = tile.shrink(5.0);
+                        crate::image_cache::touch(ui.ctx(), &crate::util::image_uri(file));
                         let image = egui::Image::new(crate::util::image_uri(file));
                         if let Ok(egui::load::TexturePoll::Ready { texture }) =
                             image.load_for_size(ui.ctx(), inner.size())
@@ -1164,6 +1398,46 @@ mod tests {
     }
 
     #[test]
+    fn drag_previews_motion_and_commits_once_on_release() {
+        // Press starts the hold, motion only previews, release jumps
+        // once, Escape jumps nowhere.
+        assert_eq!(
+            bar_seek_action(false, false, false, false, false, 0.2),
+            BarSeek::None
+        );
+        assert_eq!(
+            bar_seek_action(true, false, false, false, false, 0.2),
+            BarSeek::BeginDrag
+        );
+        assert_eq!(
+            bar_seek_action(false, true, false, true, true, 0.5),
+            BarSeek::Preview(0.5)
+        );
+        assert_eq!(
+            bar_seek_action(false, false, true, true, true, 0.8),
+            BarSeek::Commit(0.8)
+        );
+    }
+
+    #[test]
+    fn click_and_keys_jump_at_once_without_a_hold() {
+        assert_eq!(
+            bar_seek_action(false, false, false, true, false, 0.7),
+            BarSeek::Click(0.7)
+        );
+        // A release nobody held behaves like the old direct jump.
+        assert_eq!(
+            bar_seek_action(false, false, true, true, false, 0.7),
+            BarSeek::Click(0.7)
+        );
+        // Arrow nudges during a hold adjust the preview, never jump.
+        assert_eq!(
+            bar_seek_action(false, false, false, true, true, 0.4),
+            BarSeek::Preview(0.4)
+        );
+    }
+
+    #[test]
     fn a_fixed_picture_gets_a_real_retry() {
         let mut failures = std::collections::HashMap::new();
         let now = Instant::now();
@@ -1243,5 +1517,286 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(tag.get(), 0, "the swapped file paints");
+    }
+
+    #[test]
+    fn real_slider_drag_previews_then_commits_once() {
+        use crate::paths::AppDirs;
+        use crate::settings::Settings;
+
+        let root = std::env::temp_dir().join(format!("zapfast-scrub-{}", std::process::id()));
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let path = root.join("clip.mp4");
+        let total = Duration::from_secs(100);
+        let start = Duration::from_secs(10);
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |bar: egui::Rect, fraction: f32| {
+            egui::pos2(bar.min.x + fraction * bar.width(), bar.center().y)
+        };
+        let seeks = |actions: &[Action]| {
+            actions
+                .iter()
+                .filter(|action| matches!(action, Action::VideoSeek(_)))
+                .count()
+        };
+        let toggles = |actions: &[Action]| {
+            actions
+                .iter()
+                .filter(|action| matches!(action, Action::VideoToggle))
+                .count()
+        };
+        let mut run = |events: Vec<egui::Event>| {
+            let mut out: Option<(egui::Rect, Vec<Action>, Option<VideoScrub>)> = None;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut actions = Vec::new();
+                let response = video_bar(
+                    &mut app,
+                    ui,
+                    screen,
+                    &path,
+                    start,
+                    total,
+                    true,
+                    false,
+                    &mut actions,
+                );
+                out = Some((response.rect, actions, app.video_scrub.clone()));
+            });
+            output.textures_delta.clear();
+            out.expect("the bar draws every frame")
+        };
+        let (bar, first, scrub) = run(Vec::new());
+        assert!(first.is_empty(), "an idle bar queues nothing");
+        assert!(scrub.is_none(), "no drag is held yet");
+        let ball = at(bar, 0.1);
+        let (_, pressed, scrub) = run(vec![egui::Event::PointerMoved(ball), press(ball, true)]);
+        assert_eq!(seeks(&pressed), 0, "grabbing the ball never jumps");
+        assert_eq!(toggles(&pressed), 1, "the drag holds playback");
+        let held = scrub.expect("a drag is held");
+        assert!(held.was_playing, "resume stays armed");
+        assert!(held.target >= 0.0, "the hold starts near the ball");
+        assert!(held.target < 0.3, "grabbing never jumps across the bar");
+        for fraction in [0.7f32, 0.3, 0.8] {
+            let (_, moved, scrub) = run(vec![egui::Event::PointerMoved(at(bar, fraction))]);
+            assert_eq!(seeks(&moved), 0, "motion only previews");
+            assert_eq!(toggles(&moved), 0, "motion holds quietly");
+            let target = scrub.expect("the hold lasts").target;
+            assert!(
+                (target - fraction).abs() < 0.06,
+                "the ball follows the pointer"
+            );
+        }
+        let outside = screen.min + egui::vec2(10.0, 10.0);
+        let release = vec![egui::Event::PointerMoved(outside), press(outside, false)];
+        let (_, released, scrub) = run(release);
+        assert_eq!(seeks(&released), 1, "release jumps exactly once");
+        assert_eq!(toggles(&released), 1, "playback resumes after the jump");
+        let target = released
+            .iter()
+            .find_map(|action| match action {
+                Action::VideoSeek(target) => Some(*target),
+                _ => None,
+            })
+            .expect("release jumps");
+        assert!(
+            (target - 0.8).abs() < 0.06,
+            "the jump lands where the drag ended"
+        );
+        assert!(scrub.is_none(), "the drag retires on release");
+    }
+
+    #[test]
+    fn click_jumps_at_once_without_a_hold() {
+        use crate::paths::AppDirs;
+        use crate::settings::Settings;
+
+        let root = std::env::temp_dir().join(format!("zapfast-click-{}", std::process::id()));
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let path = root.join("clip.mp4");
+        let total = Duration::from_secs(100);
+        let start = Duration::from_secs(10);
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut run = |events: Vec<egui::Event>| {
+            let mut out: Option<(egui::Rect, Vec<Action>, Option<VideoScrub>)> = None;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut actions = Vec::new();
+                let response = video_bar(
+                    &mut app,
+                    ui,
+                    screen,
+                    &path,
+                    start,
+                    total,
+                    false,
+                    false,
+                    &mut actions,
+                );
+                out = Some((response.rect, actions, app.video_scrub.clone()));
+            });
+            output.textures_delta.clear();
+            out.expect("the bar draws every frame")
+        };
+        let (bar, _, _) = run(Vec::new());
+        let spot = egui::pos2(bar.min.x + 0.7 * bar.width(), bar.center().y);
+        let (_, down, held) = run(vec![egui::Event::PointerMoved(spot), press(spot, true)]);
+        let (_, up, kept) = run(vec![egui::Event::PointerMoved(spot), press(spot, false)]);
+        assert!(
+            down.iter()
+                .filter(|action| matches!(action, Action::VideoSeek(_)))
+                .count()
+                == 0,
+            "a click jumps on release"
+        );
+        assert!(held.is_some(), "a press parks a transient drag");
+        assert!(kept.is_none(), "no drag survives the release");
+        let mut jumps = down
+            .iter()
+            .chain(up.iter())
+            .filter_map(|action| match action {
+                Action::VideoSeek(target) => Some(*target),
+                _ => None,
+            });
+        let mut count = 0;
+        for jump in jumps.by_ref() {
+            count += 1;
+            assert!((jump - 0.7).abs() < 0.1, "the click lands where asked");
+        }
+        assert_eq!(count, 1, "a click jumps exactly once");
+        assert!(
+            !down
+                .iter()
+                .any(|action| matches!(action, Action::VideoToggle))
+        );
+        assert!(
+            !up.iter()
+                .any(|action| matches!(action, Action::VideoToggle))
+        );
+    }
+    #[test]
+    fn pointer_move_to_displayed_preview_reports_latency() {
+        use crate::paths::AppDirs;
+        use crate::settings::Settings;
+        let root =
+            std::env::temp_dir().join(format!("zapfast-previewshown-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let path = root.join("shown.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc2=s=320x240:d=6:r=10"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .args(["-profile:v", "baseline", "-bf", "0"])
+            .args(["-g", "10", "-keyint_min", "10", "-sc_threshold", "0"])
+            .args(["-an", "-movflags", "+faststart"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            eprintln!("skipped: ffmpeg unavailable for fixtures");
+            return;
+        }
+        let total = Duration::from_secs(6);
+        let start_at = Duration::from_millis(600);
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let picture = egui::Rect::from_center_size(screen.center(), egui::vec2(400.0, 300.0));
+        let press = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let at = |bar: egui::Rect, fraction: f32| {
+            egui::pos2(bar.min.x + fraction * bar.width(), bar.center().y)
+        };
+        let mut run = |events: Vec<egui::Event>| {
+            let mut out: Option<(egui::Rect, Vec<Action>, Option<VideoScrub>, bool)> = None;
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                let mut actions = Vec::new();
+                let response = video_bar(
+                    &mut app,
+                    ui,
+                    screen,
+                    &path,
+                    start_at,
+                    total,
+                    false,
+                    false,
+                    &mut actions,
+                );
+                let shown = paint_scrub_preview(&mut app, ui, &ctx, &path, picture);
+                out = Some((response.rect, actions, app.video_scrub.clone(), shown));
+            });
+            output.textures_delta.clear();
+            out.expect("the bar draws every frame")
+        };
+        let (bar, _, _, _) = run(Vec::new());
+        let ball = at(bar, 0.1);
+        let (_, pressed, scrub, _) = run(vec![egui::Event::PointerMoved(ball), press(ball, true)]);
+        assert!(pressed.is_empty(), "grabbing parks without jumping");
+        assert!(scrub.is_some(), "a drag is held");
+        let mut times_ms: Vec<u128> = Vec::new();
+        for fraction in [0.2f32, 0.8, 0.4, 0.6] {
+            let start = Instant::now();
+            let (_, moved, scrub, _) = run(vec![egui::Event::PointerMoved(at(bar, fraction))]);
+            assert!(moved.is_empty(), "motion only previews");
+            assert!(scrub.is_some(), "the hold lasts");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let (_, _, scrub, shown) = run(Vec::new());
+                let held = scrub.expect("the hold lasts");
+                assert!(
+                    (held.target - fraction).abs() < 0.06,
+                    "the knob leads the picture"
+                );
+                if shown {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "the preview shows");
+            }
+            times_ms.push(start.elapsed().as_millis());
+        }
+        times_ms.sort_unstable();
+        let pct = |q: f64| {
+            times_ms[((times_ms.len() as f64 * q).floor() as usize).min(times_ms.len() - 1)]
+        };
+        eprintln!(
+            "move-to-displayed samples={} p50={}ms p95={}ms raw={times_ms:?}",
+            times_ms.len(),
+            pct(0.5),
+            pct(0.95)
+        );
     }
 }

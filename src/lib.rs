@@ -9,7 +9,9 @@ pub mod bidi;
 pub mod cache;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
+pub mod diagnostics;
 pub mod emoji;
+pub mod image_cache;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod markup;
@@ -20,6 +22,8 @@ pub mod pdf;
 pub mod qr;
 pub mod settings;
 pub mod single_instance;
+pub mod sticker_meta;
+pub mod sticker_search;
 pub mod stickers;
 pub mod system_fonts;
 pub mod theme;

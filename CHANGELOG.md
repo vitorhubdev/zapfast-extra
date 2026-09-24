@@ -2,6 +2,251 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.76] - 2026-09-24
+
+### Fixed
+
+- Dragging the video bar fast over slow clips no longer drops the early keyframe picture: a superseded decode still hands over its approximate while only the stale exact is skipped. The release jump stays exact, single and through the full player path.
+- Keyframe search measured on a 60-second file (600 samples, distant keyframes): index stays at 0 to 1 ms cold, so no index change was needed; the worst-case wide-window path remains documented for very large files.
+
+### Tests
+
+- New stacked-targets test proving the superseded approximate paints (fails on the old skip path, passes with the fix), plus the 60-second ladder fixture reporting open, index, decode and resize stages.
+
+## [1.0.75] - 2026-09-24
+
+### Added
+
+- Chat photos, thumbnails, video posters, sticker tiles and avatars now share a budgeted image cache (96 resident): pictures that scroll away release their bytes, pixels and GPU textures, and re-register when they come back.
+- Screen-reader and keyboard-navigation support through the accesskit integration in the UI framework.
+
+### Fixed
+
+- Protocol errors in the log file no longer repeat private details (contacts, message contents, keys, QR payloads): recognized failures keep their category, everything else becomes a generic note.
+
+### Tests
+
+- Ported cache eviction coverage (current frame never released, scrolled-away images freed with their textures, released images re-registered on return) plus a chat-thumbnail round trip through sweep and sanitized protocol-error cases.
+
+## [1.0.74] - 2026-09-24
+
+### Added
+
+- Dragging the video bar now shows a fast keyframe picture first, then refines to the exact spot. The thumbnail names both the chosen time and the shown frame time, so an early picture never reads as exact.
+
+### Fixed
+
+- Video previews decode much faster on 480p, 720p and 1080p by using smaller thumbnails, a faster downscale, and skipping work for frames that never paint. A newer drag target now aborts a stale decode instead of queueing behind it.
+- Releasing the bar still jumps exactly once to the last previewed spot, with pause and volume preserved. The jump uses the full player path, never a thumbnail as a decoder shortcut.
+
+### Tests
+
+- Staged preview (approximate before exact), abort yielding to newer targets, and a resolution ladder reporting open, index, decode and resize stages with cold, warm and cache-hit splits across baseline, distant keyframes, B-frames and VFR.
+
+## [1.0.73] - 2026-09-24
+
+### Added
+
+ - Search the sticker tab by emoji, word, or pack name, using the emoji
+   tags carried inside sticker files.
+ - Sticker packs shared in chats open for preview from their card and can
+   be kept as a new pack, with the listed emoji tags preserved.
+ - Favourite stickers sync toward the phone: the intent is persisted with
+   its time, retried across restarts and connections, and a late phone
+   receipt never claims a newer change still waiting.
+
+### Fixed
+
+ - The same picture favourited from a pack, the recents, or the saved
+   stickers is one favourite instead of one entry per path, resolved from
+   whichever copy still exists; old path lists migrate without losing files.
+
+### Tests
+
+ - Hash bridge across base64 flavors, EXIF read/write round trip, search
+   by emoji/word/pack, intent collapse and late receipts, migration and
+   copy-following resolution, restart persistence, phone-change ordering,
+   pack unpacking order with hostile entry names, pack classification,
+   keeping a viewed pack, and one favourite sharing a pack with a remainder.
+
+## [1.0.72] - 2026-09-23
+
+### Added
+
+- Dragging the video progress bar now previews the destination: playback
+  holds, the knob and clock follow the pointer at once, and a thumbnail
+  with the target time appears above the bar while the decoded frame loads.
+  Releasing jumps exactly once to the last previewed spot, even when the
+  pointer leaves the bar; Escape cancels with no jump and restores playback.
+  Previews decode off the interface thread with a bounded worker and cache,
+  never spawn ffmpeg per movement, and retire when the video is switched
+  or closed.
+
+### Fixed
+
+- Releasing a scrub outside the bar no longer jumps to the pointer spot:
+  the release confirms the last previewed destination. Stepping to another
+  file or opening a new viewer retires an active drag with no jump.
+
+### Tests
+
+- Real slider drag across frames (press, back-and-forth moves, release
+  outside the bar), click without a hold, cancel/step/close through the
+  production action path, plus preview coverage for B-frames, VFR, wide
+  keyframe gaps, silent clips and refusals, stale generations, latest-wins,
+  cache budgets and p50/p95 preview latency on representative fixtures.
+
+## [1.0.71] - 2026-09-23
+
+### Fixed
+
+- Voice messages at 1.5x and 2x now compress time while keeping the
+  pitch instead of resampling the voice higher. The sink always runs at
+  1x; a streaming time-stretch shortens memory and spool sources with
+  constant state, keeping position, pause, seek, volume and replay.
+
+### Tests
+
+- Tone, synthetic-speech pitch, durations, silence, short and long
+  clips, restart offsets and spool sources through the production PCM
+  path, plus listening samples of the same speech at every speed.
+
+## [1.0.70] - 2026-09-23
+
+### Fixed
+
+- Late history can no longer resurrect a message deleted for everyone:
+  the revocation sticks across replays on every ingestion path.
+- Each fresh connection now asks the phone chat collections for changes
+  committed while offline, so deletions done on the phone still apply.
+
+### Tests
+
+- Offline delete then history, duplicate deletes, offline batch filing,
+  tombstone migration across privacy ids with restart, same-second paging
+  and deletion across open, closed and archived views.
+
+## [1.0.69] - 2026-09-23
+
+### Tests
+
+- Print-screen freeze diagnosis: unfocused frames never touch the
+  clipboard and attach nothing; a release outside the window cannot arm
+  a later duplicate; a 4K paste costs milliseconds on the interface
+  thread; a stalled reader stalls the frame by the same amount. No
+  application behavior changed.
+
+## [1.0.68] - 2026-09-23
+
+### Changed
+
+- The built executable is now named zapext instead of zapfast on every
+  platform, including the installer, portable build, app bundle and Linux
+  packages. The internal crate, storage paths, app ids and sync wire
+  identity stay unchanged for compatibility with existing installations.
+
+## [1.0.67] - 2026-09-23
+
+### Fixed
+
+- Videos that decode to zero pictures now fail loudly and take the single
+  controlled ffmpeg fallback instead of refusing a playable file.
+- Background search results cleared or deleted while flying no longer
+  repaint the panel: clear barriers and missing rows filter with tombstones.
+- Refusals after a decode failure name ffmpeg with PATH guidance when it
+  is missing; the README documents the external fallback requirement.
+- Switching or closing during a fallback retires the old engine by
+  generation without leaking its pictures into the new file.
+
+### Tests
+
+- Synthetic VFR clip (10fps joined to 5fps) plays and seeks in process:
+  forward, back, paused and rapid jumps.
+- The same join through a filter re-encode proves fallback after a silent
+  decode miss, with engine change and seek landing.
+- Release seek benchmark reports frame-available and landed p50 and p95.
+
+## [1.0.66] - 2026-09-23
+
+### Fixed
+
+- Local deletes drop the resident id as well as the row, so a removed
+  message can no longer linger in the id set while gone from the screen.
+- The PDF forget is generation-guarded: a cleanup started before a new
+  document opens can no longer clear the new reader.
+- Background search runs at most two at once with the newest waiting query
+  coalesced, and only the newest answer paints; hits deleted in flight are
+  filtered by tombstone.
+- Stale archive echoes below the accepted order are ignored, and the
+  accepted order survives a restart.
+- Same-second pages, overlapping pages and clear-during-load keep every
+  surviving message with a consistent id set.
+- Switching files never shows the old clip, and BMP viewing decodes while
+  the send path reencodes to JPEG.
+- README now states that archive sync between devices is covered only by
+  synthetic tests pending live two-device validation.
+
+## [1.0.65] - 2026-09-24
+
+### Fixed
+
+- Archive and unarchive racing each other now converge on the last tap:
+  a late phone echo of an older revision can no longer flip the chat back
+  or discard the newer queued intent.
+- Scrolling through deleted messages no longer skips same-second history:
+  pages after a removed cursor still bring every surviving message.
+- Closing the PDF viewer never stalls the backend waiting for a slow page.
+- Open chats keep full history while inactive ones shrink to recent pages
+  and leave memory past ten, reloading from the archive on reopen.
+- History pages merge in linear time with a persistent id set instead of
+  resorting everything per page.
+- Search runs on its own database connection off the worker loop, and only
+  the newest query paints.
+- The image-dimension test uses a structurally valid BMP on every system
+  now that the decoder ships on all platforms.
+
+## [1.0.64] - 2026-09-24
+
+### Fixed
+
+- Videos that reorder frames now play through ffmpeg with correct timing
+  instead of silently mistiming the in-process decoder; files the decoder
+  stops on fall back automatically once, then refuse with the real reason.
+- Seeking holds picture and sound together: audio waits paused until the
+  landing frame arrives, then both resume from the target.
+- Deleting a playing video or voice really stops it, and the viewer keeps
+  the open item by identity instead of sliding to a neighbour.
+- Removed attachment files are collected at most 64 per tick with
+  deduplication and a second chance before the startup sweep owns orphans.
+- Clearing a huge selection stays linear through set membership.
+
+## [1.0.63] - 2026-09-23
+
+### Fixed
+
+- Deleted messages now vanish from every screen at once: conversation,
+  global and in-chat search, reply/edit/selection, media viewer, and
+  pending notifications go through one invalidation layer.
+- A repeated delete or clear still cleans the screen even when the archive
+  is already right, so a stale view can never outlive its deletion.
+- Clearing a chat keeps newer messages in memory instead of reloading the
+  whole conversation, and history arriving late can no longer resurrect
+  anything below a deletion barrier on any ingestion path.
+- Removed attachment files are reclaimed in batches on the worker tick
+  instead of during the delete event.
+
+## [1.0.62] - 2026-09-23
+
+### Fixed
+
+- The Windows installer license page now credits both the upstream ZapFast
+  author and the ZapExt fork instead of the upstream author alone.
+- Release tags build the macOS universal app again and attach its DMG to
+  the release; the temporary macOS skip is gone.
+- The image-dimension test no longer depends on a BMP decoder the app only
+  carries on Windows: oversized-dimension fixtures are header-only PNGs,
+  so Ubuntu and macOS run the same assertions.
+
 ## [1.0.61] - 2026-09-23
 
 ### Changed

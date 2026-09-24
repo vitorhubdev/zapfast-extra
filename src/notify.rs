@@ -32,7 +32,9 @@ fn macos_application_ready() -> bool {
 /// its notification is still being delivered cannot leave a stale notification.
 #[derive(Default)]
 pub struct Notifications {
-    pending: std::collections::HashMap<String, Vec<tokio::sync::oneshot::Sender<()>>>,
+    /// Pending deliveries per chat, each tagged with its message id so one
+    /// deleted message cancels only its own notification.
+    pending: std::collections::HashMap<String, Vec<(String, tokio::sync::oneshot::Sender<()>)>>,
 }
 
 /// Identifies which chat/message a notification opens when clicked.
@@ -55,23 +57,37 @@ impl NotificationTarget {
 }
 
 impl Notifications {
-    fn register(&mut self, chat: &str) -> tokio::sync::oneshot::Receiver<()> {
+    fn register(&mut self, chat: &str, message: &str) -> tokio::sync::oneshot::Receiver<()> {
         self.pending.retain(|_, entries| {
-            entries.retain(|entry| !entry.is_closed());
+            entries.retain(|(_, entry)| !entry.is_closed());
             !entries.is_empty()
         });
         let (cancel, cancelled) = tokio::sync::oneshot::channel();
         self.pending
             .entry(chat.to_owned())
             .or_default()
-            .push(cancel);
+            .push((message.to_owned(), cancel));
         cancelled
     }
 
     pub fn clear(&mut self, chat: &str) {
         if let Some(entries) = self.pending.remove(chat) {
-            for cancel in entries {
+            for (_, cancel) in entries {
                 let _ = cancel.send(());
+            }
+        }
+    }
+
+    /// Cancels the pending notification of one deleted message, if any.
+    /// Delivered OS notifications cannot be retracted; this only stops
+    /// one that has not gone out yet.
+    pub fn clear_message(&mut self, chat: &str, message: &str) {
+        if let Some(entries) = self.pending.get_mut(chat) {
+            // Dropping the sender resolves the delivery wait, which closes
+            // an already shown notification or stops a pending one.
+            entries.retain(|(id, _)| id != message);
+            if entries.is_empty() {
+                self.pending.remove(chat);
             }
         }
     }
@@ -89,7 +105,7 @@ impl Notifications {
         target: NotificationTarget,
         wake: impl Fn() + Send + 'static,
     ) {
-        let cancelled = self.register(&target.chat);
+        let cancelled = self.register(&target.chat, &target.message);
         let spawned = std::thread::Builder::new()
             .name("notification".into())
             .spawn(move || deliver(&title, &body, picture.as_deref(), target, wake, cancelled));
@@ -250,9 +266,9 @@ mod tests {
     #[test]
     fn reading_cancels_delivered_and_pending_notifications_for_only_that_chat() {
         let mut notifications = Notifications::default();
-        let mut first = notifications.register("a");
-        let mut second = notifications.register("a");
-        let mut other = notifications.register("b");
+        let mut first = notifications.register("a", "m1");
+        let mut second = notifications.register("a", "m2");
+        let mut other = notifications.register("b", "m3");
         notifications.clear("a");
         assert_eq!(first.try_recv(), Ok(()));
         assert_eq!(second.try_recv(), Ok(()));
@@ -260,7 +276,7 @@ mod tests {
             other.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         );
-        let mut next = notifications.register("a");
+        let mut next = notifications.register("a", "m4");
         assert_eq!(
             next.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
@@ -276,9 +292,27 @@ mod tests {
     #[test]
     fn expired_notifications_do_not_accumulate() {
         let mut notifications = Notifications::default();
-        drop(notifications.register("a"));
-        let _next = notifications.register("b");
+        drop(notifications.register("a", "m1"));
+        let _next = notifications.register("b", "m2");
         assert!(!notifications.pending.contains_key("a"));
+    }
+
+    #[test]
+    fn deleting_one_message_cancels_only_its_notification() {
+        let mut notifications = Notifications::default();
+        let mut first = notifications.register("a", "m1");
+        let mut second = notifications.register("a", "m2");
+        notifications.clear_message("a", "m1");
+        assert_eq!(
+            first.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        );
+        assert_eq!(
+            second.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        notifications.clear_message("missing", "m1");
+        notifications.clear_message("a", "missing");
     }
 
     /// Shows a test notification with an optional cached picture:

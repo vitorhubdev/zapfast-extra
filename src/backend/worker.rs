@@ -19,6 +19,7 @@ use whatsapp_rust::prelude::{
     Bot, BotHandle, Client, Jid, MessageBuilderExt, MessageExt, MessageField, SendOptions,
     SqliteStore, wa,
 };
+use whatsapp_rust::schemas;
 use whatsapp_rust::send::RevokeType;
 use whatsapp_rust::types::events as wa_events;
 use whatsapp_rust::types::message::{MessageInfo, MessageSource};
@@ -151,6 +152,11 @@ const MAX_SYNC_DISPATCH_PER_ROUND: usize = 4;
 /// Bounds simultaneous archive-sync flights across every chat. Direct
 /// callers share this ceiling with the pump through prepare_sync.
 const MAX_SYNC_IN_FLIGHT_TOTAL: usize = 8;
+
+/// Background searches running at once. A third query waits coalesced:
+/// the panel only ever shows the newest answer, so intermediate queries
+/// die by generation instead of spawning unbounded blocking tasks.
+const MAX_SEARCH_IN_FLIGHT: usize = 2;
 
 /// A reserved archive-sync dispatch: decided centrally, then launched.
 #[derive(Debug, Clone)]
@@ -379,12 +385,23 @@ pub async fn run(
         sync_attempts: HashMap::new(),
         sync_in_flight: HashMap::new(),
         sync_aliases: HashMap::new(),
+        sync_dispatched: HashMap::new(),
+        search_generation: 0,
+        search_in_flight: 0,
+        search_pending: None,
         sync_retry_at: HashMap::new(),
+        media_gc: Vec::new(),
+        media_gc_retry: Vec::new(),
         #[cfg(any(test, feature = "demo"))]
         sync_sink: None,
         inflight_downloads: HashSet::new(),
         download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
         sticker_tries: HashMap::new(),
+        favorites_pushing: false,
+        favorites_again: false,
+        favorite_fetches: HashSet::new(),
+        emoji_cache: HashMap::new(),
+        favorites_migrated: false,
         thumb_tries: HashMap::new(),
         thumb_heals: HashMap::new(),
         cache_swept: false,
@@ -433,12 +450,15 @@ pub async fn run(
                 worker.pump_poll_votes();
                 worker.pump_poll_history();
                 worker.pump_cache();
+                worker.pump_media_gc();
             }
         }
     }
     worker.stop_bot().await;
 }
 
+/// Sticker emoji tags by file, with the size and time they were read at.
+type EmojiTags = HashMap<PathBuf, ((u64, Option<std::time::SystemTime>), Vec<String>)>;
 struct Worker {
     read_sync: ReadSync,
     poll_decrypting: usize,
@@ -504,8 +524,29 @@ struct Worker {
     /// Completions resolve through it without consuming it, so a second
     /// task reporting under the same old id still finds its way home.
     sync_aliases: HashMap<String, String>,
+    /// Newest search query issued: older background answers die on arrival
+    /// instead of repainting the panel with stale hits.
+    search_generation: u64,
+    /// Background searches running now. At most two run at once; a third
+    /// query waits coalesced instead of spawning unbounded tasks.
+    search_in_flight: usize,
+    /// Newest query that arrived while two searches already flew.
+    search_pending: Option<(Option<ChatId>, String, usize)>,
+    /// What each flying task was sent to do: (value, intent time) by
+    /// (chat, revision). An echo carrying the dispatched value is the
+    /// acknowledgement of that revision, never proof about a newer
+    /// queued intent; only the echo own revision may settle it.
+    sync_dispatched: HashMap<(String, i64), (bool, i64)>,
     /// Next retry time per chat for unconfirmed archive intents.
     sync_retry_at: HashMap<String, Instant>,
+    /// Attachment files freed by deletions, reclaimed in batches on the
+    /// tick instead of on the delete path. A path queued here belonged to
+    /// a removed row, so no new message can reference it again; the flush
+    /// still re-checks the live references before deleting anything.
+    media_gc: Vec<std::path::PathBuf>,
+    /// Files whose removal failed once: one more round, then the startup
+    /// sweep owns the orphan instead of the tick warning forever.
+    media_gc_retry: Vec<std::path::PathBuf>,
     /// Downloads already running per chat and message id. A second request
     /// for the same file does not spawn another fetch; the first
     /// completion notifies the bubble through the Downloaded command.
@@ -514,6 +555,16 @@ struct Worker {
     download_slots: Arc<tokio::sync::Semaphore>,
     /// Failed sticker fetches by hash, so a hopeless one is left alone.
     sticker_tries: HashMap<String, u32>,
+    /// Favorite sync pushes in flight: a new change waits for the drain.
+    favorites_pushing: bool,
+    /// Another favorite change arrived while one pushed.
+    favorites_again: bool,
+    /// Favorite stickers being fetched from the phone, by content hash.
+    favorite_fetches: HashSet<String>,
+    /// Sticker emoji tags by file, with the size and time they were read at.
+    emoji_cache: EmojiTags,
+    /// Whether path-based favorites were migrated to content hashes.
+    favorites_migrated: bool,
     /// Sticker previews that failed to build, so they are not retried forever.
     thumb_tries: HashMap<PathBuf, u32>,
     /// Requested thumbnail rebuilds with their retry state.
@@ -659,6 +710,9 @@ impl Worker {
         match self.archive.apply_remote_archive(chat, remote, remote_ms) {
             Ok(()) => {
                 self.purge_sync_budget(chat);
+                // The queue is gone: no flying task may claim its echo
+                // against a future intent anymore.
+                self.sync_dispatched.retain(|(id, _), _| id != chat);
                 self.emit_chat(chat);
             }
             Err(error) => {
@@ -684,8 +738,22 @@ impl Worker {
     /// Central dispatch decision for every caller: queued revision, one task
     /// per chat, intent budget, deadline unless forced, and a global ceiling
     /// on simultaneous flights. Reserves the winner in flight without sending.
+    /// What the task flying for one chat was sent to do: its revision with
+    /// the dispatched (value, intent time). Nothing when the bookkeeping
+    /// never saw a dispatch, like tasks tests fly by hand.
+    fn dispatched_sync(&self, chat: &str) -> Option<(i64, bool, i64)> {
+        self.sync_in_flight
+            .keys()
+            .find(|(id, _)| id == chat)
+            .and_then(|key| {
+                self.sync_dispatched
+                    .get(key)
+                    .map(|(value, updated)| (key.1, *value, *updated))
+            })
+    }
     fn prepare_sync(&mut self, chat: &str, now: Instant, force: bool) -> Option<SyncJob> {
-        let Ok(Some((archived, _, rev))) = self.archive.queued_chat_sync(chat, "archived") else {
+        let Ok(Some((archived, updated, rev))) = self.archive.queued_chat_sync(chat, "archived")
+        else {
             return None;
         };
         if self.sync_in_flight.keys().any(|(id, _)| id == chat) {
@@ -704,6 +772,11 @@ impl Worker {
             return None;
         }
         self.sync_in_flight.insert((chat.to_owned(), rev), ());
+        // Bind the acknowledgement to the revision actually sent: its echo
+        // may be stamped later than a newer local intent without outranking
+        // it, and only its own completion may settle it.
+        self.sync_dispatched
+            .insert((chat.to_owned(), rev), (archived, updated));
         Some(SyncJob {
             chat: chat.to_owned(),
             archived,
@@ -725,6 +798,7 @@ impl Worker {
         }
         let (Some(client), Some(jid)) = (self.client.clone(), Self::jid_of(&job.chat)) else {
             self.sync_in_flight.remove(&(job.chat.clone(), job.rev));
+            self.sync_dispatched.remove(&(job.chat.clone(), job.rev));
             self.sync_retry_at
                 .insert(job.chat, now + OFFLINE_SYNC_RETRY);
             return false;
@@ -1133,6 +1207,11 @@ impl Worker {
         for rev in flying.iter() {
             self.sync_in_flight.remove(&(from.to_owned(), *rev));
             self.sync_in_flight.insert((to.to_owned(), *rev), ());
+            // The acknowledgement binding rides along: an echo of the moved
+            // task still settles only its own revision under the new id.
+            if let Some(sent) = self.sync_dispatched.remove(&(from.to_owned(), *rev)) {
+                self.sync_dispatched.insert((to.to_owned(), *rev), sent);
+            }
         }
         if !flying.is_empty() {
             self.sync_aliases.insert(from.to_owned(), to.to_owned());
@@ -1550,6 +1629,10 @@ impl Worker {
                 // Reconcile archive intents the phone never confirmed, bounded
                 // per round like every other pump caller.
                 self.pump_chat_sync();
+                // Favorite changes the phone has not seen go out, and phone
+                // favorites whose files never arrived are fetched again.
+                self.push_favorites();
+                self.fetch_missing_favorites();
                 if let Some(client) = self.client.clone() {
                     let me = self.me_pn.clone().and_then(|pn| Self::jid_of(&pn));
                     let commands = self.commands.clone();
@@ -1580,6 +1663,35 @@ impl Worker {
                                 }
                                 Err(error) => log::debug!("own info not fetched: {error}"),
                             }
+                        }
+                    });
+                    // Mutations committed while offline (delete-for-me,
+                    // clears, archive) have no other way back: each fresh
+                    // connection asks the chat collections incrementally.
+                    // Version-based, so an empty answer costs one handshake;
+                    // failures stay a log line, retries belong to the next
+                    // connection, never to a loop here.
+                    let resync = self.client.clone();
+                    tokio::spawn(async move {
+                        let Some(resync) = resync else { return };
+                        use whatsapp_rust::{AppStateResyncMode, WAPatchName};
+                        match resync
+                            .resync_app_state(
+                                [
+                                    WAPatchName::RegularHigh,
+                                    WAPatchName::RegularLow,
+                                    WAPatchName::Regular,
+                                ],
+                                AppStateResyncMode::Incremental,
+                            )
+                            .await
+                        {
+                            Ok(report) => {
+                                if !report.all_synced() {
+                                    log::warn!("app-state resync incomplete");
+                                }
+                            }
+                            Err(error) => log::debug!("app-state resync skipped: {error}"),
                         }
                     });
                 }
@@ -1705,7 +1817,23 @@ impl Worker {
                     // quiet, but a newer genuine phone change is applied now so
                     // the completion cannot silently keep the old state.
                     (Some((value, updated, _)), true) if value != remote && remote_ms > updated => {
-                        self.accept_remote_archive(&chat, remote, remote_ms);
+                        // A mutation is stamped when the phone runs it, which
+                        // may postdate a newer local intent: the echo of our
+                        // own in-flight revision settles only that revision.
+                        // It marks the order observed without flipping the
+                        // flag or dropping the surviving queued intent.
+                        if self
+                            .dispatched_sync(&chat)
+                            .is_some_and(|(_, dispatched, _)| remote == dispatched)
+                        {
+                            if let Err(error) =
+                                self.archive.record_sync_order(&chat, remote_ms, value)
+                            {
+                                log::warn!("could not record an archive echo order: {error}");
+                            }
+                        } else {
+                            self.accept_remote_archive(&chat, remote, remote_ms);
+                        }
                     }
                     // An agreeing echo while our operation flies: remember its
                     // order so a delayed older echo cannot win later. The queue
@@ -1883,15 +2011,19 @@ impl Worker {
                     .delete_message_for_me(&chat, &update.message_id, now)
                 {
                     Ok((deleted, media)) => {
-                        if !media.is_empty() {
-                            Self::drop_cached_media(&self.archive, &media);
-                        }
-                        if deleted {
-                            self.emit(Event::MessageDeleted {
-                                chat: chat.clone(),
-                                id: update.message_id.clone(),
-                            });
-                            self.emit_chat(&chat);
+                        // Files leave the critical path: the row is already
+                        // gone and the tick reclaims what nothing references.
+                        self.queue_media_gc(media);
+                        // Idempotent invalidation: the archive may already be
+                        // right while the interface still shows the message,
+                        // so a repeated delete still clears the screen.
+                        self.emit(Event::MessageDeleted {
+                            chat: chat.clone(),
+                            id: update.message_id.clone(),
+                        });
+                        self.emit_chat(&chat);
+                        if !deleted {
+                            log::info!("chat removal: repeated delete, interface invalidated");
                         }
                     }
                     Err(_error) => log::warn!("could not delete a message"),
@@ -1912,27 +2044,34 @@ impl Worker {
         match self.archive.remove_chat_through(chat, through, true) {
             Ok(removed) => {
                 self.pending_older.remove(chat);
+                // Files leave the critical path; the tick reclaims whatever
+                // the phone allowed to drop once nothing references it.
                 if delete_media {
-                    Self::drop_cached_media(&self.archive, &removed.media);
+                    self.queue_media_gc(removed.media);
                 }
-                // A replay that deletes nothing stays quiet; the barrier in
-                // the archive already guards against old history.
-                if removed.existed && removed.changed {
-                    if self.archive.chat(chat).ok().flatten().is_none() {
-                        log::info!("chat removal: deleted cached chat");
-                        self.emit(Event::ChatRemoved {
-                            chat: chat.to_owned(),
-                        });
-                    } else {
-                        log::info!("chat removal: retained messages newer than deletion boundary");
-                        self.emit(Event::ChatCleared {
-                            chat: chat.to_owned(),
-                            through,
-                        });
-                        self.emit_chat(chat);
-                    }
+                // Idempotent invalidation against the authoritative state:
+                // a replayed removal still clears a stale screen, while the
+                // archive barrier keeps old history from coming back.
+                if self.archive.chat(chat).ok().flatten().is_none() {
+                    log::info!("chat removal: deleted cached chat");
+                    self.emit(Event::ChatRemoved {
+                        chat: chat.to_owned(),
+                    });
                 } else {
-                    log::info!("chat removal: nothing new to remove");
+                    // Newer messages survived: clear the screen through the
+                    // stored boundary, which never moves backwards.
+                    let through = self
+                        .archive
+                        .removal_point(chat)
+                        .ok()
+                        .flatten()
+                        .unwrap_or(through);
+                    log::info!("chat removal: retained messages newer than deletion boundary");
+                    self.emit(Event::ChatCleared {
+                        chat: chat.to_owned(),
+                        through,
+                    });
+                    self.emit_chat(chat);
                 }
             }
             Err(_error) => log::warn!("could not delete a chat"),
@@ -1944,43 +2083,86 @@ impl Worker {
         match self.archive.remove_chat_through(chat, through, false) {
             Ok(removed) => {
                 self.pending_older.remove(chat);
+                // Files leave the critical path; the tick reclaims whatever
+                // the phone allowed to drop once nothing references it.
                 if delete_media {
-                    Self::drop_cached_media(&self.archive, &removed.media);
+                    self.queue_media_gc(removed.media);
                 }
-                if removed.existed && removed.changed {
-                    self.emit(Event::ChatCleared {
-                        chat: chat.to_owned(),
-                        through,
-                    });
-                    self.emit_chat(chat);
-                }
+                // Idempotent invalidation through the stored boundary, which
+                // never moves backwards: a replayed clear still clears a
+                // stale screen.
+                let through = self
+                    .archive
+                    .removal_point(chat)
+                    .ok()
+                    .flatten()
+                    .unwrap_or(through);
+                self.emit(Event::ChatCleared {
+                    chat: chat.to_owned(),
+                    through,
+                });
+                self.emit_chat(chat);
             }
             Err(_error) => log::warn!("could not clear a chat"),
         }
     }
 
-    /// Deletes removed attachment files that no surviving message references
-    /// anymore. Best-effort and synchronous: a handful of files at most, and
-    /// the last valid copy is never touched while still referenced.
-    fn drop_cached_media(archive: &Archive, media: &[std::path::PathBuf]) {
-        if media.is_empty() {
+    /// Defers freed attachment files to the tick: the message is already
+    /// gone from the interface and the archive, and file deletion never
+    /// blocks a delete event.
+    /// Files reclaimed per tick: deletions stay off the event path, and one
+    /// slow disk cannot stall the worker behind an unbounded queue.
+    const MEDIA_GC_PER_TICK: usize = 64;
+    fn queue_media_gc(&mut self, media: Vec<std::path::PathBuf>) {
+        for path in media {
+            // One entry per file: repeats from double deletes must not
+            // grow the queue or pay the lookup twice.
+            if !self.media_gc.contains(&path) {
+                self.media_gc.push(path);
+            }
+        }
+    }
+
+    /// Reclaims queued attachment files whose references are all gone.
+    /// One protection lookup per flush no matter how many deletes queued
+    /// it, and a file still referenced by any survivor is never touched.
+    /// Unprovable means keep everything: the startup cache sweep retries
+    /// the orphans on a later run.
+    fn pump_media_gc(&mut self) {
+        if self.media_gc.is_empty() && self.media_gc_retry.is_empty() {
             return;
         }
+        // A second chance first, then fresh work up to the round budget:
+        // one slow disk cannot stall the worker behind an unbounded queue.
+        let mut batch = std::mem::take(&mut self.media_gc_retry);
+        let retried = batch.len();
+        let fresh = self
+            .media_gc
+            .len()
+            .min(Self::MEDIA_GC_PER_TICK.saturating_sub(retried));
+        batch.extend(self.media_gc.drain(..fresh));
         // Unprovable means keep everything: a failed lookup or a damaged
         // favorites list is not evidence of absence, and the startup cache
         // sweep retries the orphans on a later run.
-        let Some(live) = archive.protected_files() else {
+        let Some(live) = self.archive.protected_files() else {
             log::warn!("attachments: keeping removed files, references unprovable");
+            batch.extend(std::mem::take(&mut self.media_gc));
+            self.media_gc = batch;
             return;
         };
-        for path in media {
-            if live.contains(path) {
+        for (index, path) in batch.into_iter().enumerate() {
+            if live.contains(&path) {
                 continue;
             }
-            if let Err(error) = std::fs::remove_file(path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                log::warn!("could not remove a cached attachment");
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if index < retried => {
+                    // Already failed once: drop it and let the startup
+                    // sweep own the orphan instead of warning forever.
+                    log::warn!("could not remove a cached attachment: {error}");
+                }
+                Err(_) => self.media_gc_retry.push(path),
             }
         }
     }
@@ -3073,7 +3255,13 @@ impl Worker {
             Command::LoadChat { chat, before } => self.load_chat(chat, before),
             Command::FetchOlder(chat) => self.fetch_older(chat),
             Command::LoadUntil { chat, id, before } => self.load_until(chat, id, before),
-            Command::SearchMessages { query } => self.search_messages(query),
+            Command::SearchMessages { query } => self.spawn_search(None, query, 50),
+            Command::SearchReady {
+                generation,
+                query,
+                chat,
+                hits,
+            } => self.apply_search(generation, query, chat, hits),
             Command::EnsureChat { chat, name } => {
                 let is_new = self.archive.chat(&chat).ok().flatten().is_none();
                 if let Err(error) = self.archive.ensure_chat(&chat, &name) {
@@ -3351,6 +3539,15 @@ impl Worker {
                     self.emit_stickers();
                 }
             }
+            Command::ViewStickerPack { chat, message } => {
+                self.view_sticker_pack(&chat, &message);
+            }
+            Command::StickerPackViewed { result } => {
+                self.emit(Event::StickerPackPreview(result));
+            }
+            Command::AddStickerPack { dir, name } => {
+                self.add_sticker_pack(&dir, &name);
+            }
             Command::SendVoice {
                 chat,
                 samples,
@@ -3468,17 +3665,26 @@ impl Worker {
             }
             Command::StickerThumbsReady => self.emit_stickers(),
             Command::FavoriteSticker { path } => {
-                if let Err(error) = self.archive.toggle_sticker_favorite(&path) {
-                    log::warn!("could not store the sticker favourite: {error}");
+                self.toggle_favorite_sticker(&path);
+            }
+            Command::FavoritePushed {
+                hash,
+                updated_at,
+                result,
+            } => {
+                self.favorite_pushed(&hash, updated_at, result);
+            }
+            Command::FavoritesPushed => {
+                self.favorites_pushing = false;
+                if std::mem::take(&mut self.favorites_again) {
+                    self.push_favorites();
                 }
-                self.emit_stickers();
+            }
+            Command::FavoriteFetched { hash, result } => {
+                self.favorite_fetched(&hash, result);
             }
             Command::SearchChat { chat, query } => {
-                let hits = self
-                    .archive
-                    .search_messages_in(Some(&chat), &query, CHAT_SEARCH_LIMIT)
-                    .map_err(|error| error.to_string());
-                self.emit(Event::ChatSearch { chat, query, hits });
+                self.spawn_search(Some(chat), query, CHAT_SEARCH_LIMIT);
             }
             Command::RenderPdfPage { path, page, width } => {
                 let commands = self.commands.clone();
@@ -3504,12 +3710,30 @@ impl Worker {
             Command::ForgetPdf => {
                 // Nothing of the document stays in memory once the viewer is
                 // closed, and a render still on its way will not refill it.
-                self.pdf_generation
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                self.pdf
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear();
+                // Generation-guarded: an older forget never clears a newer
+                // document opened after it. The pass is captured now; the
+                // blocking task clears only when no newer render or forget
+                // moved the generation meanwhile.
+                let pass = self
+                    .pdf_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                // Invalidation stays synchronous and immediate: newer renders
+                // die by generation. The mutex wait and the clear itself
+                // leave the main loop for a blocking task, so a slow
+                // rasterization never stalls messages, sync, downloads or
+                // retries behind it. The same Reader is reused while the
+                // document stays open.
+                let reader = self.pdf.clone();
+                let generation = self.pdf_generation.clone();
+                tokio::task::spawn_blocking(move || {
+                    if generation.load(std::sync::atomic::Ordering::SeqCst) == pass {
+                        reader
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clear();
+                    }
+                });
             }
             Command::PdfPage {
                 path,
@@ -3640,6 +3864,9 @@ impl Worker {
                 // The alias persists while either id may still report, so one
                 // completion never consumes another revision way home.
                 let chat = self.sync_aliases.get(&chat).cloned().unwrap_or(chat);
+                // The acknowledgement binding dies with its task, settled or
+                // stale: a later echo is judged by the persisted order.
+                self.sync_dispatched.remove(&(chat.clone(), rev));
                 // A completion only settles the revision it attempted: older
                 // responses cannot erase or punish a newer intent.
                 if !self.sync_in_flight.contains_key(&(chat.clone(), rev)) {
@@ -5162,7 +5389,657 @@ impl Worker {
         }
         filed
     }
+    /// Moves path-based favorites to content hashes once: the same picture
+    /// favorited from a pack, the recents, or the saved stickers becomes one
+    /// favorite instead of one entry per path. Missing files simply drop.
+    fn migrate_sticker_favorites(&mut self) {
+        if self.favorites_migrated {
+            return;
+        }
+        self.favorites_migrated = true;
+        if self
+            .archive
+            .meta("sticker_favorites_migrated_v1")
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return;
+        }
+        for path in self.archive.sticker_favorites().unwrap_or_default() {
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let hash = crate::stickers::hash_of(&bytes);
+            if self
+                .archive
+                .favorite_sticker(&hash)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                continue;
+            }
+            let when = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |age| age.as_millis() as i64);
+            let _ = self
+                .archive
+                .set_favorite_sticker(&hash, true, when, None, false);
+        }
+        let _ = self
+            .archive
+            .set_meta("sticker_favorites_migrated_v1", "complete");
+    }
+    /// Favorite hashes, newest first.
+    fn favorite_hashes(&self) -> Vec<String> {
+        self.archive.favorite_hashes().unwrap_or_default()
+    }
+    /// Where a favorite hash shows from: the saved copy, a pack member, a
+    /// recent file, or the legacy path, whichever still exists. One picture
+    /// stays one favorite however many copies exist, and losing one copy
+    /// never hides the others.
+    fn resolve_favorite(
+        &self,
+        hash: &str,
+        packs: &[crate::model::StickerPack],
+        recent: &[PathBuf],
+    ) -> Option<PathBuf> {
+        let saved = self.dirs.saved_sticker_dir().join(format!("{hash}.webp"));
+        if saved.is_file() {
+            return Some(saved);
+        }
+        if let Some(found) = packs
+            .iter()
+            .flat_map(|pack| &pack.stickers)
+            .find(|path| crate::stickers::id_of(path).as_deref() == Some(hash))
+            .filter(|path| path.is_file())
+        {
+            return Some(found.clone());
+        }
+        if let Some(found) = recent
+            .iter()
+            .find(|path| crate::stickers::id_of(path).as_deref() == Some(hash))
+            .filter(|path| path.is_file())
+        {
+            return Some(found.clone());
+        }
+        self.archive
+            .sticker_favorites()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|path| {
+                path.is_file()
+                    && std::fs::read(path)
+                        .is_ok_and(|bytes| crate::stickers::hash_of(&bytes) == hash)
+            })
+    }
+    /// Marks a sticker as a favorite, or clears the mark, by content hash.
+    /// Files never move: packs keep their members and nothing is deleted.
+    fn toggle_favorite_sticker(&mut self, path: &Path) {
+        self.migrate_sticker_favorites();
+        let Ok(bytes) = std::fs::read(path) else {
+            log::warn!("could not favorite a sticker without its file");
+            return;
+        };
+        let hash = crate::stickers::hash_of(&bytes);
+        let favorite = !self
+            .archive
+            .favorite_sticker(&hash)
+            .ok()
+            .flatten()
+            .is_some_and(|known| known.favorite);
+        let now = crate::util::now().saturating_mul(1000);
+        if let Err(error) = self
+            .archive
+            .set_favorite_sticker(&hash, favorite, now, None, false)
+        {
+            log::warn!("could not store the sticker favorite: {error}");
+        }
+        self.emit_stickers();
+        self.push_favorites();
+    }
+    /// The emojis each sticker file is tagged with, read from its metadata
+    /// once per file version.
+    fn sticker_emojis(&mut self, paths: &[PathBuf]) -> HashMap<PathBuf, Vec<String>> {
+        let mut found = HashMap::new();
+        for path in paths {
+            let Ok(metadata) = std::fs::metadata(path) else {
+                continue;
+            };
+            let stamp = (metadata.len(), metadata.modified().ok());
+            let emojis = match self.emoji_cache.get(path) {
+                Some((seen, emojis)) if *seen == stamp => emojis.clone(),
+                _ => {
+                    let emojis = std::fs::read(path)
+                        .map(|bytes| crate::sticker_meta::emojis(&bytes))
+                        .unwrap_or_default();
+                    self.emoji_cache
+                        .insert(path.clone(), (stamp, emojis.clone()));
+                    emojis
+                }
+            };
+            if !emojis.is_empty() {
+                found.insert(path.clone(), emojis);
+            }
+        }
+        found
+    }
+    /// Sends every favorite change the phone has not seen, one at a time.
+    /// Favorites saved before sync existed, or while offline, count too, so
+    /// they reach the phone once after linking.
+    fn push_favorites(&mut self) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.favorites_pushing {
+            self.favorites_again = true;
+            return;
+        }
+        let waiting = match self.archive.unpushed_favorite_stickers() {
+            Ok(waiting) => waiting,
+            Err(error) => {
+                log::warn!("could not list favorite stickers to sync: {error}");
+                return;
+            }
+        };
+        if waiting.is_empty() {
+            return;
+        }
+        let pushes: Vec<FavoritePush> = waiting
+            .into_iter()
+            .map(|(hash, state)| {
+                let action = state
+                    .action
+                    .and_then(|raw| {
+                        wa::sync_action_value::StickerAction::decode_from_slice(&raw).ok()
+                    })
+                    .or_else(|| self.sticker_references(&hash));
+                let file = self
+                    .resolve_favorite(&hash, &self.sticker_packs(), &[])
+                    .filter(|path| path.is_file())
+                    .or((!state.favorite)
+                        .then(|| self.dirs.saved_sticker_dir().join(format!("{hash}.webp"))));
+                FavoritePush {
+                    file,
+                    hash,
+                    favorite: state.favorite,
+                    updated_at: state.updated_at,
+                    action,
+                }
+            })
+            .collect();
+        if pushes.is_empty() {
+            return;
+        }
+        self.favorites_pushing = true;
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            for push in pushes {
+                let (hash, updated_at) = (push.hash.clone(), push.updated_at);
+                let result = Self::push_favorite(&client, push).await;
+                let _ = commands.send(Command::FavoritePushed {
+                    hash,
+                    updated_at,
+                    result,
+                });
+            }
+            let _ = commands.send(Command::FavoritesPushed);
+        });
+    }
+    /// Records the phone receipt of a favorite change. A late receipt for
+    /// an older change never claims a newer one still waiting.
+    fn favorite_pushed(&mut self, hash: &str, updated_at: i64, result: Result<Vec<u8>, String>) {
+        match result {
+            Ok(action) => {
+                let _ = self
+                    .archive
+                    .favorite_sticker_pushed(hash, updated_at, Some(&action));
+            }
+            Err(error) => log::warn!("could not sync a favorite sticker: {error}"),
+        }
+    }
+    /// CDN references for a sticker seen in a chat, so a favorite need not
+    /// be uploaded again.
+    fn sticker_references(&self, hash: &str) -> Option<wa::sync_action_value::StickerAction> {
+        if let Ok(phone) = self.archive.phone_stickers()
+            && let Some(sticker) = phone.into_iter().find(|sticker| sticker.hash == hash)
+            && let Ok(meta) = wa::StickerMetadata::decode_from_slice(&sticker.raw)
+            && meta.direct_path.is_some()
+        {
+            return Some(Self::action_of_metadata(&meta));
+        }
+        self.archive
+            .sticker_message_raws(2000)
+            .ok()?
+            .into_iter()
+            .filter_map(|raw| wa::Message::decode_from_slice(&raw).ok())
+            .find_map(|message| {
+                let sticker = message.get_base_message().sticker_message.as_option()?;
+                let matches = sticker_hash(
+                    sticker.file_sha256.as_deref(),
+                    sticker.file_enc_sha256.as_deref(),
+                )
+                .as_deref()
+                    == Some(hash);
+                (matches && sticker.direct_path.is_some()).then(|| Self::action_of_message(sticker))
+            })
+    }
+    /// Applies a favorite added or removed on the phone side: the phone
+    /// change wins unless a change made here is still on its way to the
+    /// phone and is newer. Ready for phone events and replayed syncs.
+    /// No caller yet: the library does not deliver phone favorite events in
+    /// this revision, so this waits for that support with its tests green.
+    #[allow(dead_code)]
+    fn apply_phone_favorite(
+        &mut self,
+        hash: &str,
+        favorite: bool,
+        stamped: i64,
+        action: Option<Vec<u8>>,
+    ) {
+        if let Ok(Some(known)) = self.archive.favorite_sticker(hash)
+            && !known.pushed
+            && known.updated_at > stamped
+        {
+            log::info!("kept a newer favorite sticker change made here");
+            return;
+        }
+        let at = if stamped > 0 {
+            stamped
+        } else {
+            crate::util::now().saturating_mul(1000)
+        };
+        if let Err(error) =
+            self.archive
+                .set_favorite_sticker(hash, favorite, at, action.as_deref(), true)
+        {
+            log::warn!("could not record a favorite sticker: {error}");
+        }
+        self.emit_stickers();
+        if favorite {
+            self.fetch_favorite(hash.to_owned());
+        }
+    }
+    /// Brings a favorite file in: from a copy of the same sticker already
+    /// here, otherwise from the CDN. Missing references wait for the next
+    /// connection instead of failing loudly.
+    fn fetch_favorite(&mut self, hash: String) {
+        let dir = self.dirs.saved_sticker_dir();
+        let path = dir.join(format!("{hash}.webp"));
+        if path.exists() || self.favorite_fetches.contains(&hash) {
+            return;
+        }
+        if let Some(source) = self.local_sticker_copy(&hash) {
+            match std::fs::read(&source) {
+                Ok(bytes) if crate::stickers::hash_of(&bytes) == hash => {
+                    if std::fs::write(&path, &bytes).is_ok() {
+                        log::info!("favorite sticker copied from a local copy");
+                        self.emit_stickers();
+                        return;
+                    }
+                }
+                Ok(_) => log::warn!("a favorite sticker copy did not match its hash"),
+                Err(error) => log::warn!("could not copy a favorite sticker: {error}"),
+            }
+        }
+        let Some(file_sha256) = crate::stickers::filehash_bytes(&hash) else {
+            return;
+        };
+        let stored = self
+            .archive
+            .favorite_sticker(&hash)
+            .ok()
+            .flatten()
+            .and_then(|known| known.action)
+            .and_then(|raw| wa::sync_action_value::StickerAction::decode_from_slice(&raw).ok());
+        let candidates: Vec<FavoriteDownload> = stored
+            .into_iter()
+            .chain(self.sticker_references(&hash))
+            .filter(Self::fetchable)
+            .map(|action| FavoriteDownload {
+                action,
+                file_sha256: file_sha256.clone(),
+            })
+            .collect();
+        if candidates.is_empty() {
+            log::warn!(
+                "could not fetch a favorite sticker: no download references and no local copy"
+            );
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            log::info!("a favorite sticker will be fetched once connected");
+            return;
+        };
+        self.favorite_fetches.insert(hash.clone());
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let mut result = Err("no download references".to_owned());
+            for download in &candidates {
+                result = Self::download_favorite(&client, download, &dir, &path).await;
+                if result.is_ok() {
+                    break;
+                }
+            }
+            let _ = commands.send(Command::FavoriteFetched { hash, result });
+        });
+    }
+    /// Keeps a fetched favorite only when it is the sticker the phone named.
+    fn favorite_fetched(&mut self, hash: &str, result: Result<PathBuf, String>) {
+        self.favorite_fetches.remove(hash);
+        match result {
+            Ok(path) => {
+                let matches = std::fs::read(&path)
+                    .is_ok_and(|bytes| crate::stickers::hash_of(&bytes) == hash);
+                if matches {
+                    log::info!("favorite sticker fetched");
+                } else {
+                    log::warn!("a favorite sticker did not match its hash");
+                    let _ = std::fs::remove_file(&path);
+                }
+                self.emit_stickers();
+            }
+            Err(error) => log::warn!(
+                "could not fetch a favorite sticker; retrying on the next connection: {error}"
+            ),
+        }
+    }
+    /// Fetches phone favorites whose files never arrived, such as one whose
+    /// download failed or that came while offline.
+    fn fetch_missing_favorites(&mut self) {
+        let dir = self.dirs.saved_sticker_dir();
+        let missing: Vec<String> = match self.archive.favorite_hashes() {
+            Ok(hashes) => hashes
+                .into_iter()
+                .filter(|hash| !dir.join(format!("{hash}.webp")).exists())
+                .collect(),
+            Err(error) => {
+                log::warn!("could not list favorite stickers to fetch: {error}");
+                return;
+            }
+        };
+        if !missing.is_empty() {
+            log::info!("fetching {} favorite stickers", missing.len());
+        }
+        for hash in missing {
+            self.fetch_favorite(hash);
+        }
+    }
+    /// A file here holding the sticker with this content hash: the phone
+    /// recents, chat stickers, or a pack. Bytes always decide.
+    fn local_sticker_copy(&self, hash: &str) -> Option<PathBuf> {
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(phone) = self.archive.phone_stickers() {
+            candidates.extend(
+                phone
+                    .into_iter()
+                    .filter(|sticker| sticker.hash == hash)
+                    .filter_map(|sticker| sticker.path),
+            );
+        }
+        candidates.extend(
+            self.sticker_packs()
+                .into_iter()
+                .flat_map(|pack| pack.stickers)
+                .filter(|path| {
+                    path.file_stem()
+                        .is_some_and(|stem| stem.to_string_lossy() == hash)
+                }),
+        );
+        candidates.into_iter().find(|path| {
+            std::fs::read(path).is_ok_and(|bytes| crate::stickers::hash_of(&bytes) == hash)
+        })
+    }
+    /// Downloads a pack shared in a chat into the cache and shows it. A pack
+    /// opened before shows again without downloading.
+    fn view_sticker_pack(&mut self, chat: &str, message: &str) {
+        let pack = self
+            .archive
+            .raw(chat, message)
+            .ok()
+            .flatten()
+            .and_then(|raw| wa::Message::decode_from_slice(&raw).ok())
+            .and_then(|message| {
+                message
+                    .get_base_message()
+                    .sticker_pack_message
+                    .as_option()
+                    .cloned()
+            });
+        let Some(pack) = pack else {
+            self.emit(Event::StickerPackPreview(Err(
+                "This sticker pack is no longer available".to_owned(),
+            )));
+            return;
+        };
+        let name = pack.name.clone().unwrap_or_default();
+        let publisher = pack.publisher.clone().unwrap_or_default();
+        let id = pack
+            .sticker_pack_id
+            .clone()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| message.to_owned());
+        let dir = self
+            .dirs
+            .sticker_cache_dir()
+            .join("shared")
+            .join(sanitize(&id));
+        if let Some(cached) = self
+            .sticker_packs()
+            .into_iter()
+            .find(|listed| listed.dir == dir)
+        {
+            self.emit(Event::StickerPackPreview(Ok((cached, publisher))));
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            self.emit(Event::StickerPackPreview(Err(
+                "Connect to WhatsApp to open this sticker pack".to_owned(),
+            )));
+            return;
+        };
+        if pack.file_length.unwrap_or(0) > 64 * 1024 * 1024 {
+            self.emit(Event::StickerPackPreview(Err(
+                "This sticker pack is too large to open".to_owned(),
+            )));
+            return;
+        }
+        let commands = self.commands.clone();
+        tokio::spawn(async move {
+            let result = Self::download_shared_pack(&client, &pack, &name, &publisher, &dir).await;
+            let _ = commands.send(Command::StickerPackViewed { result });
+        });
+    }
+    /// Copies a viewed pack into the packs folder, under its own name.
+    fn add_sticker_pack(&mut self, dir: &Path, name: &str) {
+        if !dir.starts_with(self.dirs.sticker_cache_dir()) {
+            return;
+        }
+        match super::sticker_import::copy_pack(dir, &self.packs_dir(), name) {
+            Ok(name) => {
+                self.emit_stickers();
+                self.emit(Event::Info(format!("Added sticker pack \"{name}\"")));
+            }
+            Err(error) => self.emit(Event::Error(format!("Could not add sticker pack: {error}"))),
+        }
+    }
+    /// References from a sticker message, as a favorite action carries them.
+    fn action_of_message(
+        sticker: &wa::message::StickerMessage,
+    ) -> wa::sync_action_value::StickerAction {
+        wa::sync_action_value::StickerAction {
+            url: sticker.url.clone(),
+            file_enc_sha256: sticker.file_enc_sha256.clone(),
+            media_key: sticker.media_key.clone(),
+            mimetype: sticker.mimetype.clone(),
+            height: sticker.height,
+            width: sticker.width,
+            direct_path: sticker.direct_path.clone(),
+            file_length: sticker.file_length,
+            is_lottie: sticker.is_lottie,
+            is_avatar_sticker: sticker.is_avatar,
+            ..Default::default()
+        }
+    }
+    /// References from the phone recent-sticker list.
+    fn action_of_metadata(sticker: &wa::StickerMetadata) -> wa::sync_action_value::StickerAction {
+        wa::sync_action_value::StickerAction {
+            url: sticker.url.clone(),
+            file_enc_sha256: sticker.file_enc_sha256.clone(),
+            media_key: sticker.media_key.clone(),
+            mimetype: sticker.mimetype.clone(),
+            height: sticker.height,
+            width: sticker.width,
+            direct_path: sticker.direct_path.clone(),
+            file_length: sticker.file_length,
+            is_lottie: sticker.is_lottie,
+            is_avatar_sticker: sticker.is_avatar_sticker,
+            ..Default::default()
+        }
+    }
+    /// Whether an action carries enough to fetch the sticker from the CDN.
+    fn fetchable(action: &wa::sync_action_value::StickerAction) -> bool {
+        action
+            .direct_path
+            .as_deref()
+            .is_some_and(|path| !path.is_empty())
+            || (action.media_key.is_none()
+                && action.url.as_deref().is_some_and(|url| !url.is_empty()))
+    }
+    /// A download error without the CDN paths and tokens it may quote.
+    fn redacted(error: &str) -> String {
+        error
+            .split_whitespace()
+            .map(|word| {
+                if word.contains("://") || word.contains("/v/") || word.contains("oh=") {
+                    "<link>"
+                } else {
+                    word
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+    /// Tells the phone about one favorite change, uploading the sticker first
+    /// when the phone could not fetch it otherwise. Returns the references sent.
+    async fn push_favorite(client: &Client, push: FavoritePush) -> Result<Vec<u8>, String> {
+        let filehash = crate::stickers::filehash_of_hash(&push.hash).ok_or("not a sticker hash")?;
+        let mut action = push.action.unwrap_or_default();
+        if push.favorite && action.direct_path.is_none() {
+            let Some(path) = push.file else {
+                return Err("no file to upload for a new favorite".to_owned());
+            };
+            let bytes = tokio::fs::read(&path)
+                .await
+                .map_err(|error| error.to_string())?;
+            if crate::stickers::hash_of(&bytes) != push.hash {
+                return Err("the favorite file changed under its hash".to_owned());
+            }
+            let size = image::ImageReader::new(std::io::Cursor::new(&bytes))
+                .with_guessed_format()
+                .ok()
+                .and_then(|reader| reader.into_dimensions().ok());
+            let upload = client
+                .upload(bytes, MediaType::Sticker, UploadOptions::default())
+                .await
+                .map_err(|error| error.to_string())?;
+            action = wa::sync_action_value::StickerAction {
+                url: Some(upload.url),
+                file_enc_sha256: Some(upload.file_enc_sha256.to_vec()),
+                media_key: Some(upload.media_key.to_vec()),
+                mimetype: Some("image/webp".to_owned()),
+                width: size.map(|(width, _)| width),
+                height: size.map(|(_, height)| height),
+                direct_path: Some(upload.direct_path),
+                file_length: Some(upload.file_length),
+                ..Default::default()
+            };
+        }
+        action.is_favorite = Some(push.favorite);
+        let encoded = action.encode_to_vec();
+        let value = wa::SyncActionValue {
+            sticker_action: MessageField::some(action),
+            timestamp: Some(push.updated_at),
+            ..Default::default()
+        };
+        client
+            .send_app_state_action(&schemas::FAVORITE_STICKER, &[&filehash], &value)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(encoded)
+    }
+    /// Downloads one favorite into place, proving the bytes the phone named.
+    async fn download_favorite(
+        client: &Client,
+        download: &FavoriteDownload,
+        dir: &Path,
+        path: &Path,
+    ) -> Result<PathBuf, String> {
+        let bytes = client
+            .download(download)
+            .await
+            .map_err(|error| Self::redacted(&error.to_string()))?;
+        if crate::stickers::hash_of(&bytes)
+            != path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default()
+        {
+            return Err("a favorite sticker did not match its hash".to_owned());
+        }
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|error| error.to_string())?;
+        let staging = path.with_extension("part");
+        tokio::fs::write(&staging, &bytes)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::fs::rename(&staging, path)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(path.to_path_buf())
+    }
 
+    /// Downloads a shared pack zip and unpacks it into the folder, stamping the listed emoji tags. Returns the pack and its publisher.
+    async fn download_shared_pack(
+        client: &Client,
+        pack: &wa::message::StickerPackMessage,
+        name: &str,
+        publisher: &str,
+        dir: &Path,
+    ) -> Result<(crate::model::StickerPack, String), String> {
+        let zip = client
+            .download(&PackDownload {
+                message: pack.clone(),
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        let stickers: Vec<(String, Vec<String>)> = pack
+            .stickers
+            .iter()
+            .filter_map(|sticker| Some((sticker.file_name.clone()?, sticker.emojis.clone())))
+            .collect();
+        let tray = pack.tray_icon_file_name.clone();
+        let files = super::sticker_import::extract_whatsapp_pack(
+            &zip,
+            &stickers,
+            tray.as_deref(),
+            name,
+            dir,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok((
+            crate::model::StickerPack {
+                name: name.to_owned(),
+                dir: dir.to_path_buf(),
+                stickers: files,
+            },
+            publisher.to_owned(),
+        ))
+    }
     /// Returns distinct downloaded stickers by most recent use.
     fn emit_stickers(&mut self) {
         // Saved stickers from older versions carry plain file names, which
@@ -5171,17 +6048,16 @@ impl Worker {
         for (before, after) in crate::stickers::adopt_dir(&self.dirs.saved_sticker_dir()) {
             let _ = self.archive.rename_sticker_favorite(&before, &after);
         }
+        self.migrate_sticker_favorites();
         let saved = self.saved_stickers();
-        let mut favorites = self.archive.sticker_favorites().unwrap_or_default();
-        // One picture, one place: a sticker already listed under favourites or
-        // saved stickers is not offered again in a pack or under recents.
-        // The key is the content hash of the file on disk whenever it exists,
-        // so the phone's list and the chat history agree even when one of them
-        // arrived without its hash.
+        let fav_hashes = self.favorite_hashes();
+        // One picture, one place: a sticker already saved or favorited is not
+        // offered again in a pack or under recents. The key is the content
+        // hash, so every origin agrees on one identity per picture.
         let mut shown: HashSet<String> = saved
             .iter()
-            .chain(favorites.iter())
             .filter_map(|path| crate::stickers::id_of(path))
+            .chain(fav_hashes.iter().cloned())
             .collect();
         let mut packs = Vec::new();
         for pack in self.sticker_packs() {
@@ -5218,14 +6094,6 @@ impl Worker {
                 for sticker in rows {
                     let before = sticker.path.clone();
                     let path = self.adopt_sticker_file(&before);
-                    if path != before {
-                        // The list in hand still names the old file.
-                        for favorite in &mut favorites {
-                            if *favorite == before {
-                                *favorite = path.clone();
-                            }
-                        }
-                    }
                     // The adopted file carries the content hash in its name, so
                     // prefer it: our own sends have no raw message to read a
                     // hash from, and the stored one may be missing as well.
@@ -5255,12 +6123,25 @@ impl Worker {
         }
         list.sort_by_key(|(when, _)| std::cmp::Reverse(*when));
         let recent: Vec<PathBuf> = list.into_iter().map(|(_, path)| path).collect();
-        self.build_missing_thumbs(&saved, &packs, &recent);
+        let favorites: Vec<PathBuf> = fav_hashes
+            .iter()
+            .filter_map(|hash| self.resolve_favorite(hash, &self.sticker_packs(), &recent))
+            .collect();
+        self.build_missing_thumbs(&saved, &packs, &recent, &favorites);
+        let listed: Vec<PathBuf> = saved
+            .iter()
+            .chain(packs.iter().flat_map(|pack| &pack.stickers))
+            .chain(recent.iter())
+            .chain(favorites.iter())
+            .cloned()
+            .collect();
+        let emojis = self.sticker_emojis(&listed);
         self.emit(Event::Stickers {
             saved,
             packs,
             recent,
             favorites,
+            emojis: emojis.into_iter().collect(),
         });
     }
 
@@ -5274,6 +6155,7 @@ impl Worker {
         saved: &[PathBuf],
         packs: &[crate::model::StickerPack],
         recent: &[PathBuf],
+        favorites: &[PathBuf],
     ) {
         let thumbs = self.dirs.sticker_thumb_dir();
         let files: Vec<PathBuf> = saved
@@ -5281,6 +6163,7 @@ impl Worker {
             .cloned()
             .chain(packs.iter().flat_map(|pack| pack.stickers.iter().cloned()))
             .chain(recent.iter().cloned())
+            .chain(favorites.iter().cloned())
             .filter(|path| {
                 // Paths with an explicit heal request are rebuilt by the heal
                 // pump, which reports each result, instead of this batch.
@@ -5677,19 +6560,142 @@ impl Worker {
         });
     }
 
-    /// Loads archived messages needed to scroll to a quote.
-    fn search_messages(&mut self, query: String) {
-        match self.archive.search_messages(&query, 50) {
-            Ok(mut messages) => {
-                for message in &mut messages {
-                    self.polish(message);
+    /// Searches visible archived message text on a dedicated read
+    /// connection, off the serial loop: the loop keeps consuming
+    /// messages, receipts, syncs and timers while the query runs.
+    /// Only the newest query applies; older answers die by generation.
+    /// The ceiling counts running blocking tasks, not stored answers:
+    /// at most two queries execute at once, a third waits coalesced,
+    /// and the generation gate drops every stale delivery.
+    fn spawn_search(&mut self, chat: Option<ChatId>, query: String, limit: usize) {
+        self.search_generation = self.search_generation.wrapping_add(1);
+        let generation = self.search_generation;
+        if self.search_in_flight >= MAX_SEARCH_IN_FLIGHT {
+            // Coalesce: only the newest waiting query survives; its
+            // generation already outranks everything in flight.
+            self.search_pending = Some((chat, query, limit));
+            return;
+        }
+        self.launch_search(chat, query, limit, generation);
+    }
+
+    /// Starts one background search task for an already-numbered
+    /// generation. Callers bumped the generation; pending relaunches reuse
+    /// the newest number instead of bumping again.
+    fn launch_search(
+        &mut self,
+        chat: Option<ChatId>,
+        query: String,
+        limit: usize,
+        generation: u64,
+    ) {
+        self.search_in_flight = self.search_in_flight.saturating_add(1);
+        let commands = self.commands.clone();
+        let path = self.dirs.archive_db();
+        tokio::task::spawn_blocking(move || {
+            let hits = Self::search_archive(&path, chat.as_deref(), &query, limit);
+            let _ = commands.send(Command::SearchReady {
+                generation,
+                query,
+                chat,
+                hits,
+            });
+        });
+    }
+
+    /// Applies one finished background search, unless a newer query already
+    /// replaced it. Sender names resolve here, on the loop, exactly like the
+    /// serial path did for global search; chat search never polished.
+    fn apply_search(
+        &mut self,
+        generation: u64,
+        query: String,
+        chat: Option<ChatId>,
+        hits: Result<Vec<Message>, String>,
+    ) {
+        // One background task finished: free its slot, then run the newest
+        // waiting query if any. Stale answers also free a slot, so the
+        // pending newest still launches even when an older task lands last.
+        self.search_in_flight = self.search_in_flight.saturating_sub(1);
+        if let Some((pending_chat, pending_query, pending_limit)) = self.search_pending.take() {
+            let pending_generation = self.search_generation;
+            self.launch_search(
+                pending_chat,
+                pending_query,
+                pending_limit,
+                pending_generation,
+            );
+        }
+        if generation != self.search_generation {
+            return;
+        }
+        match chat {
+            None => match hits {
+                Ok(mut messages) => {
+                    // A message removed while the query flew must not
+                    // repaint the panel: tombstones, clear barriers and
+                    // missing rows all win over stale hits.
+                    messages.retain(|message| self.search_hit_alive(message));
+                    for message in &mut messages {
+                        self.polish(message);
+                    }
+                    self.emit(Event::SearchHits { query, messages });
                 }
-                self.emit(Event::SearchHits { query, messages });
+                Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
+            },
+            Some(chat) => {
+                let hits = hits.map(|mut messages| {
+                    messages.retain(|message| self.search_hit_alive(message));
+                    messages
+                });
+                self.emit(Event::ChatSearch { chat, query, hits })
             }
-            Err(error) => self.emit(Event::Error(format!("Could not search: {error}"))),
         }
     }
 
+    /// Whether one search hit may still paint: dropped when its message
+    /// was tombstoned, cleared below the removal barrier, or deleted from
+    /// the archive after the database query ran but before this answer
+    /// applied. Database errors keep the hit rather than hiding a live
+    /// message over a transient failure.
+    fn search_hit_alive(&self, message: &Message) -> bool {
+        if self
+            .archive
+            .is_tombstoned(&message.chat, &message.id)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Ok(Some(through)) = self.archive.removal_point(&message.chat)
+            && message.timestamp <= through
+        {
+            return false;
+        }
+        match self.archive.message(&message.chat, &message.id) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(_) => true,
+        }
+    }
+
+    /// Runs one search on a dedicated read connection, off the serial loop.
+    /// Same database, same keyring configuration, same fields, escaping,
+    /// ordering and limits as the serial path it replaces.
+    fn search_archive(
+        path: &std::path::Path,
+        chat: Option<&str>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<Message>, String> {
+        let archive = Archive::open(path).map_err(|error| format!("{error:#}"))?;
+        match chat {
+            Some(chat) => archive.search_messages_in(Some(chat), query, limit),
+            None => archive.search_messages(query, limit),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    /// Loads archived messages needed to scroll to a quote.
     fn load_until(&mut self, chat: ChatId, id: String, before: super::PageKey) {
         let Ok(Some(target)) = self.archive.message(&chat, &id) else {
             self.emit(Event::Messages {
@@ -6980,6 +7986,17 @@ fn classify(base: &wa::Message) -> Option<Content> {
         return unsupported("event");
     }
     if base.sticker_pack_message.is_set() {
+        if let Some(pack) = base.sticker_pack_message.as_option() {
+            return Some(Content::StickerPack {
+                name: pack.name.clone().unwrap_or_default(),
+                publisher: pack.publisher.clone().unwrap_or_default(),
+                count: pack.stickers.len() as u32,
+                caption: pack
+                    .caption
+                    .clone()
+                    .filter(|caption| !caption.trim().is_empty()),
+            });
+        }
         return unsupported("sticker pack");
     }
     if base.interactive_message.is_set()
@@ -7600,6 +8617,66 @@ fn parse_conversation(conversation: wa::Conversation) -> ParsedChat {
         messages,
         revoked,
         poll_updates,
+    }
+}
+/// A sticker pack zip shared in a chat, downloaded by its message references.
+struct PackDownload {
+    message: wa::message::StickerPackMessage,
+}
+impl Downloadable for PackDownload {
+    fn direct_path(&self) -> Option<&str> {
+        self.message.direct_path.as_deref()
+    }
+    fn media_key(&self) -> Option<&[u8]> {
+        self.message.media_key.as_deref()
+    }
+    fn file_enc_sha256(&self) -> Option<&[u8]> {
+        self.message.file_enc_sha256.as_deref()
+    }
+    fn file_sha256(&self) -> Option<&[u8]> {
+        self.message.file_sha256.as_deref()
+    }
+    fn file_length(&self) -> Option<u64> {
+        self.message.file_length
+    }
+    fn app_info(&self) -> MediaType {
+        MediaType::StickerPack
+    }
+}
+
+/// A favorite change on its way to the phone.
+struct FavoritePush {
+    hash: String,
+    favorite: bool,
+    updated_at: i64,
+    /// Known CDN references, or none when the file must be uploaded first.
+    action: Option<wa::sync_action_value::StickerAction>,
+    /// The favorite file, uploaded when no references are known.
+    file: Option<PathBuf>,
+}
+/// A favorite sticker the phone told us about, fetched by its references.
+struct FavoriteDownload {
+    action: wa::sync_action_value::StickerAction,
+    file_sha256: Vec<u8>,
+}
+impl Downloadable for FavoriteDownload {
+    fn direct_path(&self) -> Option<&str> {
+        self.action.direct_path.as_deref()
+    }
+    fn media_key(&self) -> Option<&[u8]> {
+        self.action.media_key.as_deref()
+    }
+    fn file_enc_sha256(&self) -> Option<&[u8]> {
+        self.action.file_enc_sha256.as_deref()
+    }
+    fn file_sha256(&self) -> Option<&[u8]> {
+        Some(&self.file_sha256)
+    }
+    fn file_length(&self) -> Option<u64> {
+        self.action.file_length
+    }
+    fn app_info(&self) -> MediaType {
+        MediaType::Sticker
     }
 }
 
@@ -8232,6 +9309,185 @@ mod tests {
             path,
         }
     }
+    #[tokio::test]
+    async fn rapid_favorite_changes_collapse_to_one_unpushed_intent() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let dir = worker.dirs.saved_sticker_dir();
+        std::fs::create_dir_all(&dir).expect("creates");
+        let file = dir.join("loose.webp");
+        std::fs::write(&file, b"sun").expect("writes");
+        let hash = crate::stickers::hash_of(b"sun");
+        worker.toggle_favorite_sticker(&file);
+        worker.toggle_favorite_sticker(&file);
+        worker.toggle_favorite_sticker(&file);
+        let stored = worker
+            .archive
+            .favorite_sticker(&hash)
+            .expect("reads")
+            .expect("row");
+        assert!(stored.favorite, "three quick taps end favorited");
+        assert!(!stored.pushed, "nothing told the phone yet");
+        let waiting = worker.archive.unpushed_favorite_stickers().expect("lists");
+        assert_eq!(waiting.len(), 1, "one intent, not three");
+        assert_eq!(waiting[0].0, hash);
+        worker.push_favorites();
+        assert!(
+            !worker.favorites_pushing,
+            "offline pushes wait instead of failing"
+        );
+        let waiting = worker.archive.unpushed_favorite_stickers().expect("lists");
+        assert_eq!(
+            waiting.len(),
+            1,
+            "the intent survives for the next connection"
+        );
+    }
+    #[tokio::test]
+    async fn a_newer_local_change_beats_an_older_phone_change() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker
+            .archive
+            .set_favorite_sticker("aa", true, 30, None, false)
+            .expect("stores");
+        worker.apply_phone_favorite("aa", false, 10, None);
+        let stored = worker
+            .archive
+            .favorite_sticker("aa")
+            .expect("reads")
+            .expect("row");
+        assert!(
+            stored.favorite && !stored.pushed,
+            "the newer local change stands"
+        );
+        worker.apply_phone_favorite("aa", false, 40, None);
+        let stored = worker
+            .archive
+            .favorite_sticker("aa")
+            .expect("reads")
+            .expect("row");
+        assert!(
+            !stored.favorite && stored.pushed,
+            "the newer phone change applies"
+        );
+    }
+    #[test]
+    fn path_favorites_migrate_to_one_hash_and_follow_copies() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let pack_dir = worker.packs_dir().join("frogs");
+        std::fs::create_dir_all(&pack_dir).expect("creates");
+        let cache = worker.dirs.sticker_cache_dir();
+        std::fs::create_dir_all(&cache).expect("creates");
+        let packed = pack_dir.join("000.webp");
+        let cached = cache.join("msg-1.webp");
+        std::fs::write(&packed, b"sun").expect("writes");
+        std::fs::write(&cached, b"sun").expect("writes");
+        let legacy = serde_json::to_string(&vec![packed.clone(), cached.clone()]).expect("json");
+        worker
+            .archive
+            .set_meta("sticker_favorites", &legacy)
+            .expect("seeds");
+        worker.migrate_sticker_favorites();
+        let hashes = worker.favorite_hashes();
+        assert_eq!(hashes.len(), 1, "one picture is one favorite");
+        let hash = &hashes[0];
+        assert_eq!(hash, &crate::stickers::hash_of(b"sun"));
+        std::fs::remove_file(&cached).expect("clears the cache copy");
+        let resolved = worker.resolve_favorite(hash, &worker.sticker_packs(), &[]);
+        let adopted = pack_dir.join(format!("{hash}.webp"));
+        assert_eq!(
+            resolved,
+            Some(adopted),
+            "the pack copy keeps the favorite alive"
+        );
+        worker.migrate_sticker_favorites();
+        assert_eq!(worker.favorite_hashes().len(), 1, "migration runs once");
+    }
+    #[tokio::test]
+    async fn emit_lists_one_favorite_with_pack_remainder_and_emojis() {
+        let (mut worker, events_rx, _inbox, _wa) = worker();
+        let pack_dir = worker.packs_dir().join("frogs");
+        std::fs::create_dir_all(&pack_dir).expect("creates");
+        let webp_of = |seed: u8| {
+            let mut out = Vec::new();
+            let picture = image::RgbaImage::from_pixel(8, 8, image::Rgba([seed, 20, 30, 255]));
+            image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+                .encode(&picture, 8, 8, image::ExtendedColorType::Rgba8)
+                .expect("encodes");
+            out
+        };
+        let plain_a = webp_of(10);
+        let info = crate::sticker_meta::StickerInfo {
+            pack_name: "frogs".into(),
+            emojis: vec!["\u{1F438}".into()],
+            ..Default::default()
+        };
+        let tagged_a = crate::sticker_meta::write(&plain_a, &info).expect("tags");
+        let plain_b = webp_of(20);
+        std::fs::write(pack_dir.join("000.webp"), &tagged_a).expect("writes");
+        std::fs::write(pack_dir.join("001.webp"), &plain_b).expect("writes");
+        let hash_a = crate::stickers::hash_of(&tagged_a);
+        let hash_b = crate::stickers::hash_of(&plain_b);
+        worker
+            .archive
+            .set_favorite_sticker(&hash_a, true, 50, None, false)
+            .expect("stores");
+        worker.emit_stickers();
+        let mut seen = None;
+        while let Ok(event) = events_rx.try_recv() {
+            if let Event::Stickers {
+                favorites,
+                packs,
+                emojis,
+                ..
+            } = event
+            {
+                seen = Some((favorites, packs, emojis));
+            }
+        }
+        let (favorites, packs, emojis) = seen.expect("stickers emitted");
+        assert_eq!(favorites, vec![pack_dir.join(format!("{hash_a}.webp"))]);
+        assert_eq!(packs.len(), 1);
+        assert_eq!(
+            packs[0].stickers,
+            vec![pack_dir.join(format!("{hash_b}.webp"))]
+        );
+        assert_eq!(
+            emojis
+                .iter()
+                .find(|(path, _)| path.ends_with(format!("{hash_a}.webp")))
+                .map(|(_, tags)| tags.clone()),
+            Some(vec!["\u{1F438}".to_owned()])
+        );
+    }
+    #[tokio::test]
+    async fn a_viewed_pack_can_be_kept() {
+        let (mut worker, _events_rx, _inbox, _wa) = worker();
+        let shared = worker.dirs.sticker_cache_dir().join("shared").join("abc");
+        std::fs::create_dir_all(&shared).expect("creates");
+        let mut out = Vec::new();
+        let picture = image::RgbaImage::from_pixel(8, 8, image::Rgba([30, 20, 30, 255]));
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .encode(&picture, 8, 8, image::ExtendedColorType::Rgba8)
+            .expect("encodes");
+        std::fs::write(shared.join("000.webp"), &out).expect("writes");
+        worker.add_sticker_pack(&shared, "Ducks");
+        let kept = worker.packs_dir().join("Ducks");
+        assert!(
+            kept.join(format!("{}.webp", crate::stickers::hash_of(&out)))
+                .is_file(),
+            "the sticker is hash-filed"
+        );
+        assert!(
+            kept.join(crate::stickers::PACK_MANIFEST).is_file(),
+            "the manifest travels"
+        );
+        let packs = worker.sticker_packs();
+        assert!(
+            packs
+                .iter()
+                .any(|pack| pack.dir == kept && pack.stickers.len() == 1)
+        );
+    }
 
     #[test]
     fn a_cached_sticker_that_is_gone_is_fetched_again_and_stuck_ones_wait() {
@@ -8444,6 +9700,28 @@ mod tests {
         }
         assert_eq!(thumbnail_of(&image), Some(vec![0xff, 0xd8]));
         assert_eq!(classify(&wa::Message::default()), None);
+    }
+    #[test]
+    fn a_shared_sticker_pack_reads_as_a_pack_in_the_chat() {
+        let message = wa::Message {
+            sticker_pack_message: MessageField::some(wa::message::StickerPackMessage {
+                name: Some("Ducks".into()),
+                publisher: Some("Ada".into()),
+                caption: Some("  ".into()),
+                stickers: vec![Default::default(); 3],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify(&message),
+            Some(Content::StickerPack {
+                name: "Ducks".into(),
+                publisher: "Ada".into(),
+                count: 3,
+                caption: None,
+            })
+        );
     }
 
     #[test]
@@ -8785,12 +10063,23 @@ mod receipt_tests {
             sync_attempts: HashMap::new(),
             sync_in_flight: HashMap::new(),
             sync_aliases: HashMap::new(),
+            sync_dispatched: HashMap::new(),
+            search_generation: 0,
+            search_in_flight: 0,
+            search_pending: None,
             sync_retry_at: HashMap::new(),
+            media_gc: Vec::new(),
+            media_gc_retry: Vec::new(),
             #[cfg(any(test, feature = "demo"))]
             sync_sink: None,
             inflight_downloads: HashSet::new(),
             download_slots: Arc::new(tokio::sync::Semaphore::new(DOWNLOAD_SLOTS)),
             sticker_tries: HashMap::new(),
+            favorites_pushing: false,
+            favorites_again: false,
+            favorite_fetches: HashSet::new(),
+            emoji_cache: HashMap::new(),
+            favorites_migrated: false,
             thumb_tries: HashMap::new(),
             thumb_heals: HashMap::new(),
             cache_swept: false,
@@ -9987,18 +11276,93 @@ mod receipt_tests {
             worker.archive.message(PEER, "m1").expect("row").is_none(),
             "replay stays gone"
         );
-        // Repeating the event is quiet.
+        // Repeating the event still invalidates the interface: the archive
+        // may already be right while the screen still shows the message.
         worker
             .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
             .await;
-        assert!(
+        assert_eq!(
             ui_events(&events)
                 .iter()
-                .all(|event| !matches!(event, Event::MessageDeleted { .. })),
-            "repeat stays quiet"
+                .filter(|event| matches!(event, Event::MessageDeleted { .. }))
+                .count(),
+            1,
+            "repeat still invalidates"
         );
     }
 
+    #[tokio::test]
+    async fn delete_for_me_through_lid_survives_the_mapping() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER_LID, "Old").expect("chat");
+        worker.store_message(
+            Message {
+                chat: PEER_LID.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        // Mapping unknown: the delete files and invalidates under the LID.
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER_LID, "m1", 150)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .message(PEER_LID, "m1")
+                .expect("row")
+                .is_none()
+        );
+        // Learning the mapping moves the tombstone; a replay under the
+        // number stays gone and the canonical chat converges.
+        worker.learn_lid("167650256810092", "4917663430455");
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_none());
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|event| matches!(event, Event::MessageDeleted { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn removed_chat_always_invalidates_the_interface() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        worker
+            .handle_wa_event(Arc::new(delete_update(PEER, 200)))
+            .await;
+        assert!(worker.archive.chat(PEER).expect("chat").is_none());
+        // Repeating the removal still tells the interface: the archive may
+        // be right while the screen is stale.
+        worker
+            .handle_wa_event(Arc::new(delete_update(PEER, 200)))
+            .await;
+        assert_eq!(
+            ui_events(&events)
+                .iter()
+                .filter(|event| matches!(event, Event::ChatRemoved { .. }))
+                .count(),
+            2,
+            "repeat still invalidates"
+        );
+    }
     #[tokio::test]
     async fn delete_for_me_keeps_files_a_survivor_still_references() {
         let root =
@@ -10033,14 +11397,19 @@ mod receipt_tests {
         worker
             .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
             .await;
+        // Files leave the critical path: still there until the tick.
+        assert!(shared.exists(), "collection is deferred");
+        worker.pump_media_gc();
         assert!(shared.exists(), "survivor still references it");
         worker
             .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m2", 250)))
             .await;
+        worker.pump_media_gc();
         assert!(!shared.exists(), "last reference deleted the file");
         worker
             .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m3", 350)))
             .await;
+        worker.pump_media_gc();
         assert!(!lone.exists());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -10419,6 +11788,178 @@ mod receipt_tests {
             second_round.push(job.chat);
         }
         assert_eq!(second_round.len(), 2, "the rest follows next round");
+    }
+
+    #[tokio::test]
+    async fn stale_opposite_echo_keeps_the_newer_queued_intent() {
+        // R1 = archive dispatched; R2 = unarchive queued before R1 runs.
+        // The phone stamps R1 after R2: its echo must neither flip the
+        // chat nor dequeue R2, which still has to converge.
+        let (mut worker, events, _inbox, _wa) = worker();
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(accepted.try_recv().is_ok(), "R1 dispatched");
+        let rev1 = worker
+            .sync_in_flight
+            .keys()
+            .find(|(id, _)| id.as_str() == PEER)
+            .map(|(_, rev)| *rev)
+            .expect("R1 flight");
+        // R2 while R1 flies: queued, never sent yet.
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        assert!(accepted.try_recv().is_err(), "R2 waits for R1");
+        let (_, updated2, rev2) = worker
+            .archive
+            .queued_chat_sync(PEER, "archived")
+            .expect("queue")
+            .expect("R2 intent");
+        // R1 echo stamped after R2 intent time.
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, updated2 + 60_000)))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "stale echo never flips the newer intent"
+        );
+        assert_eq!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .map(|(_, _, rev)| rev),
+            Some(rev2),
+            "R2 stays queued"
+        );
+        let _ = ui_events(&events);
+        // R1 completion is stale against R2: the survivor goes out next.
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: rev1,
+                ok: true,
+            })
+            .await;
+        assert!(accepted.try_recv().is_ok(), "R2 dispatched after R1");
+        worker
+            .handle_command(Command::ChatSyncFlushed {
+                chat: PEER.into(),
+                rev: rev2,
+                ok: true,
+            })
+            .await;
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_none(),
+            "R2 converged"
+        );
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived,
+            "last click wins"
+        );
+    }
+    #[tokio::test]
+    async fn concurrent_remote_matching_the_flying_value_keeps_the_queued_intent() {
+        // Wire ambiguity, stated plainly: the library stamps every
+        // archive mutation with now_millis at send time and echoes only
+        // jid, timestamp and archived flag. No revision rides along, so
+        // an R1 echo stamped after R2 looks exactly like a genuine phone
+        // change to the R1 value stamped after R2. Policy keeps the queued
+        // local intent and records only the order marker; the survivor
+        // dispatch converges afterwards. This test drives the R1-echo
+        // shape through the production event path.
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        let (sink, accepted) = std::sync::mpsc::channel();
+        worker.sync_sink = Some(sink);
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(accepted.try_recv().is_ok());
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), false))
+            .await;
+        let (_, updated2, _) = worker
+            .archive
+            .queued_chat_sync(PEER, "archived")
+            .expect("queue")
+            .expect("R2");
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, updated2 + 60_000)))
+            .await;
+        assert!(
+            !worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert!(
+            worker
+                .archive
+                .queued_chat_sync(PEER, "archived")
+                .expect("queue")
+                .is_some()
+        );
+        assert_eq!(
+            worker
+                .archive
+                .sync_order(PEER)
+                .expect("order")
+                .map(|(ms, _)| ms),
+            Some(updated2 + 60_000)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_echo_below_accepted_order_is_ignored() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, true, 200)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        worker
+            .handle_wa_event(Arc::new(archive_update(PEER, false, 100)))
+            .await;
+        assert!(
+            worker
+                .archive
+                .chat(PEER)
+                .expect("chat")
+                .expect("row")
+                .archived
+        );
+        assert_eq!(
+            worker.archive.sync_order(PEER).expect("order"),
+            Some((200, true))
+        );
     }
 
     #[tokio::test]
@@ -11364,6 +12905,130 @@ mod receipt_tests {
     }
 
     #[tokio::test]
+    async fn offline_delete_then_history_never_shows() {
+        // Deleted while offline: the mutation lands on an absent row,
+        // the tombstone persists, and the message arriving later via
+        // history never reaches the database nor the screen.
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker
+            .handle_wa_event(Arc::new(delete_for_me_update(PEER, "gone", 150)))
+            .await;
+        assert!(worker.archive.message(PEER, "gone").expect("row").is_none());
+        assert!(
+            worker
+                .archive
+                .is_tombstoned(PEER, "gone")
+                .expect("tombstone")
+        );
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("gone", 100)
+            },
+            None,
+            None,
+        );
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("kept", 200)
+            },
+            None,
+            None,
+        );
+        let stored: Vec<String> = worker
+            .archive
+            .messages(PEER, None, 50)
+            .expect("reads")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(stored, vec!["kept".to_owned()]);
+        let shown: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Messages { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .flatten()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(shown, vec!["kept".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn duplicate_deletes_stay_idempotent() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        worker.store_message(
+            Message {
+                chat: PEER.into(),
+                ..own_message("m1", 100)
+            },
+            None,
+            None,
+        );
+        for _ in 0..2 {
+            worker
+                .handle_wa_event(Arc::new(delete_for_me_update(PEER, "m1", 150)))
+                .await;
+        }
+        assert!(worker.archive.message(PEER, "m1").expect("row").is_none());
+        assert!(worker.archive.is_tombstoned(PEER, "m1").expect("tombstone"));
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|event| matches!(event, Event::MessageDeleted { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_batch_files_without_loss_or_dup() {
+        // The offline queue shape: several messages, equal timestamps,
+        // then the same batch again. Database and emission must agree
+        // exactly, with no duplicate row.
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("a", 100), ("b", 100), ("c", 101), ("a", 100)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        let stored: Vec<String> = worker
+            .archive
+            .messages(PEER, None, 50)
+            .expect("reads")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(stored, vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
+        let shown: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::Messages { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .flatten()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                "a".to_owned(),
+                "b".to_owned(),
+                "c".to_owned(),
+                "a".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn clear_keeps_newer_messages_and_announces_once() {
         let (mut worker, events, _inbox, _wa) = worker();
         worker.archive.ensure_chat(PEER, "Peer").expect("chat");
@@ -11388,14 +13053,19 @@ mod receipt_tests {
             .filter(|event| matches!(event, Event::ChatCleared { .. }))
             .count();
         assert_eq!(cleared, 1);
-        // A duplicated clear finds a chat but nothing to remove: quiet.
+        // A duplicated clear still invalidates the interface through the
+        // stored boundary: the archive may already be right while the
+        // screen still shows the cleared range.
         worker
             .handle_wa_event(Arc::new(clear_update(PEER, 200, true)))
             .await;
-        assert!(
+        assert_eq!(
             ui_events(&events)
                 .iter()
-                .all(|event| !matches!(event, Event::ChatCleared { .. }))
+                .filter(|event| matches!(event, Event::ChatCleared { .. }))
+                .count(),
+            1,
+            "duplicate still invalidates"
         );
     }
 
@@ -11437,7 +13107,7 @@ mod receipt_tests {
 
     #[test]
     fn removed_files_survive_failed_reference_lookups() {
-        let (worker, _events, _inbox, _wa) = worker();
+        let (mut worker, _events, _inbox, _wa) = worker();
         let dir = std::env::temp_dir().join(format!("zapfast-refcheck-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("kept.jpg");
@@ -11448,14 +13118,16 @@ mod receipt_tests {
             .archive
             .drop_table_for_test("messages")
             .expect("breaks");
-        Worker::drop_cached_media(&worker.archive, std::slice::from_ref(&file));
+        // Collection runs on the tick, not on the delete path.
+        worker.queue_media_gc(vec![file.clone()]);
+        worker.pump_media_gc();
         assert!(file.exists(), "a failed lookup keeps every file");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn removed_files_cover_favorites_and_catalog() {
-        let (worker, _events, _inbox, _wa) = worker();
+        let (mut worker, _events, _inbox, _wa) = worker();
         let dir = std::env::temp_dir().join(format!("zapfast-refcover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let favorite = dir.join("favorite.webp");
@@ -11480,10 +13152,9 @@ mod receipt_tests {
             .archive
             .set_sticker_path("abc123", &cataloged)
             .expect("paths");
-        Worker::drop_cached_media(
-            &worker.archive,
-            &[favorite.clone(), cataloged.clone(), orphan.clone()],
-        );
+        // Collection runs on the tick, not on the delete path.
+        worker.queue_media_gc(vec![favorite.clone(), cataloged.clone(), orphan.clone()]);
+        worker.pump_media_gc();
         assert!(favorite.exists(), "a favorite without messages survives");
         assert!(
             cataloged.exists(),
@@ -11518,7 +13189,7 @@ mod receipt_tests {
 
     #[test]
     fn removed_media_files_drop_only_when_unreferenced() {
-        let (worker, _events, _inbox, _wa) = worker();
+        let (mut worker, _events, _inbox, _wa) = worker();
         // Its own folder: the archive removal test owns zapfast-removal in
         // this process and both remove their folder.
         let dir =
@@ -11560,10 +13231,392 @@ mod receipt_tests {
             .expect("removes");
         // The orphan is collected; the shared file still has live rows.
         assert!(removed.media.contains(&orphan));
-        Worker::drop_cached_media(&worker.archive, &removed.media);
+        // Collection runs on the tick, not on the delete path.
+        worker.queue_media_gc(removed.media);
+        worker.pump_media_gc();
         assert!(!orphan.exists(), "unreferenced file is deleted");
         assert!(shared.exists(), "referenced file is preserved");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn media_gc_collects_in_bounded_rounds() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        // Missing files finish through the NotFound path: the budget is
+        // what the test measures, not the disk.
+        let paths: Vec<std::path::PathBuf> = (0..100)
+            .map(|n| std::path::PathBuf::from(format!("/tmp/gc{n}")))
+            .collect();
+        worker.queue_media_gc(paths);
+        // A double delete never queues twice.
+        worker.queue_media_gc(vec![std::path::PathBuf::from("/tmp/gc0")]);
+        assert_eq!(worker.media_gc.len(), 100);
+        worker.pump_media_gc();
+        assert_eq!(
+            worker.media_gc.len(),
+            100 - Worker::MEDIA_GC_PER_TICK,
+            "one round keeps its budget"
+        );
+        worker.pump_media_gc();
+        assert!(worker.media_gc.is_empty(), "the rest drains next");
+        assert!(worker.media_gc_retry.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forget_pdf_never_blocks_the_loop() {
+        use std::time::{Duration, Instant};
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        // Occupy the reader on its own thread, exactly like a slow
+        // rasterization does. The test never holds the guard itself, so
+        // no await runs under the mutex on either side.
+        let pdf = worker.pdf.clone();
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = held.clone();
+        let holder = std::thread::Builder::new()
+            .name("pdf-lock-holder".into())
+            .spawn(move || {
+                let _guard = pdf
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(Duration::from_secs(3));
+            })
+            .expect("holder thread");
+        while !held.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        // ForgetPdf returns while the mutex is still held: invalidation
+        // is synchronous, the wait is not.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.handle_command(Command::ForgetPdf),
+        )
+        .await
+        .expect("forget returns without the mutex");
+        // A trivial command behind it is processed first, before release.
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|event| matches!(event, Event::ChatUpdated(_))),
+            "the loop stays alive under the lock"
+        );
+        holder.join().expect("holder releases");
+        // After release, the deferred clear really ran.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let empty = worker
+                .pdf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            if empty {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the deferred clear ran");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn forget_pdf_stale_clear_keeps_the_new_document() {
+        use std::time::{Duration, Instant};
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let dir = std::env::temp_dir().join(format!("zapfast-pdf-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let tiny = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n4 0 obj<</Length 36>>stream\nBT /F1 24 Tf 20 40 Td (Hi) Tj ET\nendstream\nendobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
+        let first = dir.join("first.pdf");
+        let second = dir.join("second.pdf");
+        std::fs::write(&first, tiny).expect("writes");
+        std::fs::write(&second, tiny).expect("writes");
+        worker
+            .pdf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .render(&first, 0, 400)
+            .expect("renders first");
+        let pdf = worker.pdf.clone();
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = held.clone();
+        let holder = std::thread::Builder::new()
+            .name("pdf-guard-holder".into())
+            .spawn(move || {
+                let _guard = pdf
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                signal.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(Duration::from_secs(3));
+            })
+            .expect("holder");
+        while !held.load(std::sync::atomic::Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            worker.handle_command(Command::ForgetPdf),
+        )
+        .await
+        .expect("forget returns");
+        worker
+            .handle_command(Command::RenderPdfPage {
+                path: second.clone(),
+                page: 0,
+                width: 400,
+            })
+            .await;
+        holder.join().expect("holder releases");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let done = !worker
+                .pdf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty();
+            if done {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "new document survives the stale clear"
+            );
+            tokio::task::yield_now().await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn search_applies_only_the_newest_answer() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        // Two answers arrive out of order: only the newest generation
+        // paints the panel.
+        worker.search_generation = 2;
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 1,
+                query: "old".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 2,
+                query: "new".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        let queries: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::SearchHits { query, .. } => Some(query),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queries, vec!["new".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn search_late_stale_answer_does_not_repaint() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.search_generation = 2;
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 2,
+                query: "new".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tx.send(()).expect("barrier arms");
+        rx.await.expect("barrier passes");
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 1,
+                query: "old".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        let queries: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::SearchHits { query, .. } => Some(query),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queries, vec!["new".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn search_coalesces_while_two_fly() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        worker.search_in_flight = 2;
+        worker.search_generation = 2;
+        worker.spawn_search(None, "first".to_owned(), 50);
+        assert_eq!(worker.search_in_flight, 2);
+        assert!(worker.search_pending.is_some());
+        let pending_gen = worker.search_generation;
+        worker.spawn_search(None, "second".to_owned(), 50);
+        assert_eq!(worker.search_in_flight, 2);
+        assert_eq!(worker.search_generation, pending_gen + 1);
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 0,
+                query: "stale".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        assert!(worker.search_pending.is_none());
+        assert_eq!(worker.search_in_flight, 2);
+    }
+
+    #[tokio::test]
+    async fn search_filters_a_message_deleted_in_flight() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        // Production hits always come from the database: store both
+        // first, then delete one after the query ran.
+        for (id, timestamp) in [("gone", 100), ("kept", 200)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        let gone = Message {
+            chat: PEER.into(),
+            ..own_message("gone", 100)
+        };
+        let kept = Message {
+            chat: PEER.into(),
+            ..own_message("kept", 200)
+        };
+        worker
+            .archive
+            .tombstone_message(PEER, "gone", 300)
+            .expect("tombstone");
+        worker.search_generation = 7;
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 7,
+                query: "hi".into(),
+                chat: None,
+                hits: Ok(vec![gone, kept]),
+            })
+            .await;
+        let shown: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::SearchHits { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .flatten()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(shown, vec!["kept".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn search_drops_hits_cleared_while_flying() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        for (id, timestamp) in [("old", 100), ("new", 200)] {
+            worker.store_message(
+                Message {
+                    chat: PEER.into(),
+                    ..own_message(id, timestamp)
+                },
+                None,
+                None,
+            );
+        }
+        let stale = vec![
+            Message {
+                chat: PEER.into(),
+                ..own_message("old", 100)
+            },
+            Message {
+                chat: PEER.into(),
+                ..own_message("new", 200)
+            },
+        ];
+        worker
+            .archive
+            .remove_chat_through(PEER, 150, false)
+            .expect("clears");
+        worker.search_generation = 9;
+        worker
+            .handle_command(Command::SearchReady {
+                generation: 9,
+                query: "hi".into(),
+                chat: None,
+                hits: Ok(stale),
+            })
+            .await;
+        let shown: Vec<String> = ui_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::SearchHits { messages, .. } => Some(messages),
+                _ => None,
+            })
+            .flatten()
+            .map(|message| message.id)
+            .collect();
+        assert_eq!(shown, vec!["new".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn search_leaves_the_loop_while_it_runs() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        worker.archive.ensure_chat(PEER, "Peer").expect("chat");
+        // The command returns with no hits event: the query runs beside
+        // the loop instead of inside it.
+        worker
+            .handle_command(Command::SearchMessages {
+                query: "hello".into(),
+            })
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .all(|event| !matches!(event, Event::SearchHits { .. })),
+            "no synchronous answer"
+        );
+        // A trivial command behind it is processed immediately.
+        worker
+            .handle_command(Command::SetArchived(PEER.into(), true))
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|event| matches!(event, Event::ChatUpdated(_))),
+            "the loop stays responsive"
+        );
+        // A background answer still applies through the generation gate.
+        worker
+            .handle_command(Command::SearchReady {
+                generation: worker.search_generation,
+                query: "hello".into(),
+                chat: None,
+                hits: Ok(vec![]),
+            })
+            .await;
+        assert!(
+            ui_events(&events)
+                .iter()
+                .any(|event| matches!(event, Event::SearchHits { .. })),
+            "the answer still lands"
+        );
     }
 
     #[test]
@@ -11742,25 +13795,61 @@ mod receipt_tests {
         let wide = dir.join("wide.png");
         std::fs::write(&wide, png_bytes(66000, 8)).expect("writes");
         assert!(validate_image_file(&wide, "image/png", 1024 * 1024 * 1024).is_err());
-        // Header-only path skips the decoder, so only the explicit check
-        // guards it. A bare BMP header carries dimensions with no pixel
-        // data at all, which is exactly what that path reads; sides fit
-        // but pixels do not.
+        // Header-only path skips pixel decoding, so only the explicit
+        // budget check guards it: sides fit but pixels do not.
         let huge = dir.join("huge.bmp");
         std::fs::write(&huge, bmp_header_only(60000, 6000)).expect("writes");
         assert!(validate_image_file(&huge, "image/bmp", 0).is_err());
+        // A structurally valid BMP (headers, payload, coherent sizes)
+        // passes the dimensions path on every platform now that the
+        // decoder ships everywhere.
         let tiny = dir.join("tiny.bmp");
-        std::fs::write(&tiny, bmp_header_only(4, 4)).expect("writes");
+        std::fs::write(&tiny, bmp_valid_tiny()).expect("writes");
         assert!(validate_image_file(&tiny, "image/bmp", 0).is_ok());
+        // A header declaring pixels it does not carry still fails once a
+        // full decode is required: truncation rejection is preserved.
+        let cut = dir.join("cut.bmp");
+        std::fs::write(&cut, bmp_header_only(4, 4)).expect("writes");
+        assert!(validate_image_file(&cut, "image/bmp", 1024 * 1024).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Bare BMP header with dimensions but no pixel data. Header-only
-    /// validation reads exactly these bytes.
+    #[test]
+    fn bmp_view_decodes_and_send_reencodes_to_jpeg() {
+        let bytes = bmp_valid_tiny();
+        let decoded = image::load_from_memory(&bytes).expect("bmp decodes for viewing");
+        assert_eq!(decoded.width(), 4);
+        let jpeg = encode_jpeg(&decoded, 80).expect("send path reencodes to jpeg");
+        assert!(jpeg.len() > 8);
+        assert_eq!(&jpeg[0..2], &[0xFF, 0xD8]);
+    }
+
+    /// Bare BMP header declaring dimensions with no pixel data. The
+    /// dimensions path reads headers only, so a 360-megapixel claim costs
+    /// nothing to fixture; its only possible defect is the pixel budget.
     fn bmp_header_only(width: i32, height: i32) -> Vec<u8> {
+        bmp_header(width, height, 54, 0, Vec::new())
+    }
+
+    /// Structurally valid 4x4 BMP: headers, pixel payload, row padding and
+    /// coherent sizes, so every platform accepts it on the dimensions path.
+    fn bmp_valid_tiny() -> Vec<u8> {
+        // 24-bit rows of 4 pixels need no padding: 12 bytes each.
+        bmp_header(4, 4, 102, 48, vec![0u8; 48])
+    }
+
+    /// Minimal 24-bit BMP with the given file size, image size and pixel
+    /// payload. Sizes must stay coherent or the file is malformed.
+    fn bmp_header(
+        width: i32,
+        height: i32,
+        file_size: u32,
+        image_size: u32,
+        pixels: Vec<u8>,
+    ) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"BM");
-        bytes.extend_from_slice(&54u32.to_le_bytes());
+        bytes.extend_from_slice(&file_size.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 4]);
         bytes.extend_from_slice(&54u32.to_le_bytes());
         bytes.extend_from_slice(&40u32.to_le_bytes());
@@ -11768,7 +13857,10 @@ mod receipt_tests {
         bytes.extend_from_slice(&height.to_le_bytes());
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&24u16.to_le_bytes());
-        bytes.extend_from_slice(&[0u8; 24]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&image_size.to_le_bytes());
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&pixels);
         bytes
     }
 
@@ -11918,7 +14010,7 @@ mod receipt_tests {
 
     #[test]
     fn damaged_favorites_abort_protection() {
-        let (worker, _events, _inbox, _wa) = worker();
+        let (mut worker, _events, _inbox, _wa) = worker();
         worker
             .archive
             .set_meta("sticker_favorites", "not json")
@@ -11939,7 +14031,8 @@ mod receipt_tests {
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("candidate.jpg");
         std::fs::write(&file, b"candidate").expect("writes");
-        Worker::drop_cached_media(&worker.archive, std::slice::from_ref(&file));
+        worker.queue_media_gc(vec![file.clone()]);
+        worker.pump_media_gc();
         assert!(file.exists(), "unprovable keeps every file");
         let _ = std::fs::remove_dir_all(&dir);
     }

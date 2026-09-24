@@ -203,6 +203,87 @@ fn unique_pack_dir(root: &Path, title: &str) -> Result<PathBuf, String> {
     }
     Err("Too many sticker packs have this name".to_owned())
 }
+/// Unpacks a WhatsApp sticker-pack zip into a folder, in the message order,
+/// stamping the listed emoji tags into each file. Adapted from upstream
+/// ZapFast (crmne/zapfast, MIT). Entry names are ignored, so a hostile
+/// archive cannot escape the folder; numbered files are hash-filed later.
+pub fn extract_whatsapp_pack(
+    zip: &[u8],
+    stickers: &[(String, Vec<String>)],
+    tray: Option<&str>,
+    name: &str,
+    dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip))
+        .map_err(|error| format!("This is not a sticker pack: {error}"))?;
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for index in 0..archive.len() {
+        let Ok(mut entry) = archive.by_index(index) else {
+            continue;
+        };
+        let file = entry.name().to_owned();
+        if Some(file.as_str()) == tray || !file.to_lowercase().ends_with(".webp") {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        if entry.read_to_end(&mut bytes).is_ok() {
+            files.push((file, bytes));
+        }
+    }
+    let rank = |file: &str| {
+        stickers
+            .iter()
+            .position(|(listed, _)| listed == file)
+            .unwrap_or(usize::MAX)
+    };
+    files.sort_by_key(|(file, _)| rank(file));
+    if files.is_empty() {
+        return Err("No stickers could be read from this pack".to_owned());
+    }
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    let mut written = Vec::new();
+    for (index, (file, bytes)) in files.into_iter().enumerate() {
+        let emojis = stickers
+            .iter()
+            .find(|(listed, _)| *listed == file)
+            .map(|(_, emojis)| emojis.clone())
+            .unwrap_or_default();
+        let bytes = if emojis.is_empty() {
+            bytes
+        } else {
+            let info = crate::sticker_meta::StickerInfo {
+                pack_name: name.to_owned(),
+                emojis,
+                ..crate::sticker_meta::read(&bytes).unwrap_or_default()
+            };
+            crate::sticker_meta::write(&bytes, &info).unwrap_or(bytes)
+        };
+        let path = dir.join(format!("{index:03}.webp"));
+        std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+        written.push(path);
+    }
+    Ok(written)
+}
+/// Copies a pack folder into a new pack, hash-filing every sticker so the
+/// copy shares one identity per picture with the rest of the library.
+pub fn copy_pack(from: &Path, packs: &Path, name: &str) -> Result<String, String> {
+    let mut stickers: Vec<PathBuf> = std::fs::read_dir(from)
+        .map_err(|error| error.to_string())?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "webp")
+        })
+        .collect();
+    stickers.sort();
+    let files = stickers
+        .iter()
+        .map(std::fs::read)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    write_pack(packs, name, files)
+}
 
 #[cfg(test)]
 mod tests {
@@ -341,6 +422,45 @@ mod tests {
         assert_eq!(at(&frames[0], 48, 48), 0, "frame one starts clean");
     }
 
+    #[test]
+    fn a_whatsapp_pack_unpacks_in_order_with_its_emojis() {
+        let root = std::env::temp_dir().join(format!("zapfast-shared-pack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("creates");
+        let webp = webp_bytes(tiny_png()).expect("encodes");
+        let zip_path = root.join("pack.zip");
+        let file = std::fs::File::create(&zip_path).expect("creates");
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        for name in [
+            "stickers/b.webp",
+            "../evil.webp",
+            "stickers/a.webp",
+            "tray.webp",
+        ] {
+            writer.start_file(name, options).expect("entry");
+            std::io::Write::write_all(&mut writer, &webp).expect("writes");
+        }
+        writer.finish().expect("finishes");
+        let zip = std::fs::read(&zip_path).expect("reads");
+        let out = root.join("out");
+        let listed = vec![
+            ("stickers/a.webp".to_owned(), vec!["\u{1F602}".to_owned()]),
+            ("stickers/b.webp".to_owned(), Vec::new()),
+        ];
+        let written = extract_whatsapp_pack(&zip, &listed, Some("tray.webp"), "Ducks", &out)
+            .expect("unpacks");
+        assert_eq!(written.len(), 3, "tray excluded, hostile name kept inside");
+        assert!(!root.join("evil.webp").exists(), "no archive entry escapes");
+        assert_eq!(
+            crate::sticker_meta::emojis(&std::fs::read(&written[0]).expect("reads")),
+            vec!["\u{1F602}"]
+        );
+        assert!(
+            crate::sticker_meta::emojis(&std::fs::read(&written[1]).expect("reads")).is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
     fn tiny_png() -> Vec<u8> {
         use image::ImageEncoder;
         let mut bytes = Vec::new();

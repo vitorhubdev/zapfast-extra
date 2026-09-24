@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egui::{
@@ -2814,6 +2813,55 @@ fn content(
             picture(ui, view, message, media, width, Some(*animated), actions);
             None
         }
+        Content::StickerPack {
+            name,
+            publisher,
+            count,
+            caption,
+        } => {
+            let palette = view.palette;
+            ui.horizontal(|ui| {
+                theme::icon(ui, Icon::Sticker, 20.0, palette.accent);
+                ui.vertical(|ui| {
+                    theme::text(
+                        ui,
+                        if name.trim().is_empty() {
+                            "Sticker pack"
+                        } else {
+                            name
+                        },
+                        theme::semibold(13.5),
+                        palette.text,
+                    );
+                    let mut detail =
+                        format!("{count} sticker{}", if *count == 1 { "" } else { "s" });
+                    if !publisher.trim().is_empty() {
+                        detail.push_str(&format!(" by {publisher}"));
+                    }
+                    theme::text(ui, detail, theme::regular(12.5), palette.secondary);
+                    if theme::soft_button(ui, &palette, Some(Icon::Download), "View pack", false)
+                        .clicked()
+                    {
+                        actions.push(Action::ViewStickerPack {
+                            chat: message.chat.clone(),
+                            message: message.id.clone(),
+                        });
+                    }
+                });
+            });
+            caption.as_ref().and_then(|caption| {
+                rich_body(
+                    ui,
+                    view,
+                    message,
+                    caption,
+                    width,
+                    Some(reserve),
+                    None,
+                    actions,
+                )
+            })
+        }
         Content::Video {
             caption,
             media,
@@ -3190,10 +3238,6 @@ fn preview_card(
     }
 }
 
-/// Thumbnails registered in each egui context.
-#[derive(Clone, Default)]
-struct Thumbnails(Arc<Mutex<HashSet<String>>>);
-
 /// Short hash of thumbnail bytes, so an upgraded poster registers under a
 /// new loader address instead of losing to the first image ever seen.
 pub(crate) fn thumb_revision(bytes: &[u8]) -> u64 {
@@ -3216,18 +3260,9 @@ fn thumbnail_uri(ctx: &egui::Context, chat: &str, id: &str, bytes: &[u8]) -> Str
         id,
         thumb_revision(bytes)
     );
-    let known: Thumbnails = ctx.data_mut(|data| {
-        data.get_temp_mut_or_default::<Thumbnails>(egui::Id::new("thumbnails"))
-            .clone()
-    });
-    let fresh = known
-        .0
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(uri.clone());
-    if fresh {
-        ctx.include_bytes(uri.clone(), bytes.to_vec());
-    }
+    // Budgeted registration: re-registers after a sweep forgets the image,
+    // and marks this frame so the sweep keeps what is on screen.
+    crate::image_cache::include(ctx, uri.clone(), bytes);
     uri
 }
 
@@ -3462,6 +3497,7 @@ fn picture(
                     _ => {
                         // A still frame, or a decoder that needs another pass.
                         let uri = file_uri(path);
+                        crate::image_cache::touch(ui.ctx(), &uri);
                         match egui::Image::new(&uri).load_for_size(ui.ctx(), rect.size()) {
                             Ok(egui::load::TexturePoll::Ready { texture }) => {
                                 forget_retries(ui, message);
@@ -3521,6 +3557,7 @@ fn picture(
             }
             return size.x;
         }
+        crate::image_cache::touch(ui.ctx(), &file_uri(path));
         let image = egui::Image::new(file_uri(path));
         return match image.load_for_size(ui.ctx(), vec2(max_width, max_height)) {
             Ok(egui::load::TexturePoll::Ready { texture }) => {
@@ -4341,6 +4378,33 @@ mod tests {
     }
 
     #[test]
+    fn a_swept_thumbnail_registers_again_on_its_next_draw() {
+        // The budgeted cache forgets pictures that scroll away; the next
+        // draw of the same thumbnail must re-register its bytes under the
+        // same address instead of losing to the first image ever seen.
+        let ctx = egui::Context::default();
+        egui_extras::install_image_loaders(&ctx);
+        let uri = thumbnail_uri(&ctx, "chat", "m1", &[1, 2, 3]);
+        assert!(ctx.try_load_bytes(&uri).is_ok(), "bytes register");
+        let frame = || {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+            output.textures_delta.clear();
+        };
+        frame();
+        for index in 0..150 {
+            thumbnail_uri(&ctx, &format!("chat{index}"), "m", &[7, 8, 9]);
+        }
+        crate::image_cache::sweep(&ctx);
+        assert!(
+            ctx.try_load_bytes(&uri).is_err(),
+            "scrolled-away bytes are forgotten"
+        );
+        let again = thumbnail_uri(&ctx, "chat", "m1", &[1, 2, 3]);
+        assert_eq!(uri, again, "same bytes keep their address");
+        assert!(ctx.try_load_bytes(&uri).is_ok(), "bytes register again");
+    }
+
+    #[test]
     fn the_flash_starts_when_its_message_is_drawn_and_fades_out() {
         let now = std::time::Instant::now();
         let mut flash = Flash {
@@ -4605,10 +4669,13 @@ fn pending_strip(app: &mut App, ui: &mut egui::Ui) {
                     }
                     crate::app::Pending::File(path) => {
                         if crate::app::Pending::is_picture_file(path) {
-                            egui::Image::new(file_uri(path))
-                                .fit_to_exact_size(Vec2::splat(tile - 8.0))
-                                .corner_radius(6.0)
-                                .paint_at(ui, rect.shrink(4.0));
+                            {
+                                crate::image_cache::touch(ui.ctx(), &file_uri(path));
+                                egui::Image::new(file_uri(path))
+                            }
+                            .fit_to_exact_size(Vec2::splat(tile - 8.0))
+                            .corner_radius(6.0)
+                            .paint_at(ui, rect.shrink(4.0));
                         } else {
                             let icon = Rect::from_center_size(
                                 rect.center() - vec2(0.0, 10.0),

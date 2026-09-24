@@ -16,13 +16,15 @@ name = "zapfast"
 path = "src/lib.rs"
 
 [[bin]]
-name = "zapfast"
+name = "zapext"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
 # Hashes saved stickers by content. Already included through wacore.
 sha2 = "0.11"
+# Decodes the phone file hashes, which arrive in several base64 flavors.
+base64 = "0.22"
 # Decrypts Signal sticker packs. All four crates are already included through
 # wacore at these versions.
 aes = "0.9"
@@ -38,7 +40,7 @@ log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 directories = "6"
 # UI framework. glow avoids the larger wgpu dependency.
-eframe = { version = "0.36", default-features = false, features = ["glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "links", "wayland", "x11", "persistence"] }
 egui = "0.36"
 egui_extras = { version = "0.36", features = ["file", "image", "svg", "webp", "gif"] }
 # Finds system fonts for scripts not covered by Inter. Keep skrifa aligned with
@@ -47,7 +49,7 @@ egui_extras = { version = "0.36", features = ["file", "image", "svg", "webp", "g
 skrifa = "0.44"
 memmap2 = "0.9"
 # Decodes JPEG, PNG, WebP, and GIF images.
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
 # WhatsApp Web protocol: pairing, encryption, history sync, and media. Version
 # 0.7.0 on crates.io enables `simd`, which needs nightly Rust. This commit builds
 # on stable and includes snapshot recovery and no-progress conflict handling

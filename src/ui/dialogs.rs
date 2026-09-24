@@ -38,6 +38,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::Forward { .. } => 420.0,
                 Dialog::ConfirmSticker { .. } => 340.0,
                 Dialog::PeekSticker { .. } => 320.0,
+                Dialog::StickerPackView { .. } => 420.0,
                 Dialog::FileInfo(_) => 400.0,
                 Dialog::ConfirmDeleteMany { .. } => 420.0,
                 Dialog::CreatePoll(_) => 420.0,
@@ -54,6 +55,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 Dialog::Forward { chat, messages } => forward(app, ui, &chat, &messages),
                 Dialog::ConfirmSticker { path } => confirm_sticker(app, ui, &path),
                 Dialog::PeekSticker { path } => peek_sticker(app, ui, &path),
+                Dialog::StickerPackView {
+                    name,
+                    publisher,
+                    dir,
+                    stickers,
+                } => sticker_pack_view(app, ui, &name, &publisher, &dir, &stickers),
                 Dialog::FileInfo(info) => file_info(app, ui, &info),
                 Dialog::ConfirmDeleteMany { ids, revocable, .. } => {
                     confirm_delete_many(app, ui, ids, revocable)
@@ -213,6 +220,54 @@ fn peek_sticker(app: &mut App, ui: &mut egui::Ui, path: &std::path::Path) {
     });
 }
 
+fn sticker_pack_view(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    name: &str,
+    publisher: &str,
+    dir: &std::path::Path,
+    stickers: &[std::path::PathBuf],
+) {
+    let palette = app.palette;
+    title(ui, app, name);
+    if !publisher.trim().is_empty() {
+        theme::paragraph(ui, publisher, theme::regular(12.5), palette.secondary);
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("pack-view")
+        .max_height(320.0)
+        .show(ui, |ui| {
+            egui::Grid::new("pack-grid")
+                .num_columns(4)
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    for (index, path) in stickers.iter().enumerate() {
+                        let (rect, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
+                        if ui.is_rect_visible(rect) {
+                            ui.painter().rect_filled(rect, 8.0, palette.surface);
+                            widgets::picture(ui, path, rect.shrink(6.0));
+                        }
+                        if index % 4 == 3 {
+                            ui.end_row();
+                        }
+                    }
+                });
+        });
+    ui.horizontal(|ui| {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if theme::pill_button(ui, &palette, "Close", false).clicked() {
+                app.actions.push(Action::CloseDialog);
+            }
+            if theme::pill_button(ui, &palette, "Add to my packs", true).clicked() {
+                app.actions.push(Action::AddStickerPack {
+                    dir: dir.to_path_buf(),
+                    name: name.to_owned(),
+                });
+                app.actions.push(Action::CloseDialog);
+            }
+        });
+    });
+}
 fn forward(app: &mut App, ui: &mut egui::Ui, from_chat: &str, messages: &[String]) {
     let palette = app.palette;
     title(

@@ -527,6 +527,57 @@ impl GridSources {
 fn sticker_tab(app: &mut App, ui: &mut egui::Ui, palette: &Palette) {
     import_row(app, ui, palette);
     ui.add_space(4.0);
+    let mut search = app.sticker_search.clone();
+    search_box(
+        ui,
+        palette,
+        "sticker-search",
+        &mut search,
+        "Search by emoji, word, or pack",
+    );
+    app.sticker_search = search;
+    let query = app.sticker_search.trim().to_owned();
+    if !query.is_empty() {
+        let library = crate::sticker_search::Library {
+            recent: &app.stickers,
+            favorites: &app.stickers_favorites,
+            packs: &app.sticker_packs,
+            emojis: &app.stickers_emojis,
+        };
+        let found = crate::sticker_search::search(&library, &query);
+        let sources = GridSources::of(app);
+        let thumbs = app.dirs.sticker_thumb_dir();
+        let favorites = favourites_on_disk(&app.stickers_favorites);
+        let mut choices = StickerChoices::default();
+        if found.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                theme::paragraph(
+                    ui,
+                    "No stickers match your search.",
+                    theme::regular(13.0),
+                    palette.secondary,
+                );
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("sticker-results")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    sticker_grid(
+                        ui,
+                        palette,
+                        &found,
+                        &sources,
+                        &thumbs,
+                        &favorites,
+                        &mut choices,
+                    );
+                });
+        }
+        apply_choices(app, choices);
+        return;
+    }
     if app.stickers.is_empty() && app.stickers_saved.is_empty() && app.sticker_packs.is_empty() {
         ui.add_space(20.0);
         ui.vertical_centered(|ui| {
@@ -906,6 +957,7 @@ fn paint_original_fallback(
     cache: bool,
     choices: &mut StickerChoices,
 ) {
+    crate::image_cache::touch(ui.ctx(), &crate::util::image_uri(path));
     let original = egui::Image::new(crate::util::image_uri(path));
     match original.load_for_size(ui.ctx(), rect.size()) {
         Ok(egui::load::TexturePoll::Ready { texture }) => {
@@ -963,6 +1015,7 @@ fn sticker_picture(
         return;
     }
     let source = preview.unwrap_or(path);
+    crate::image_cache::touch(ui.ctx(), &crate::util::image_uri(source));
     let image = egui::Image::new(crate::util::image_uri(source));
     match image.load_for_size(ui.ctx(), rect.size()) {
         Ok(egui::load::TexturePoll::Ready { texture }) => {

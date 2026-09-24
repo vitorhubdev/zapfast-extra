@@ -135,6 +135,12 @@ impl Reader {
         self.file = None;
         self.pages.clear();
     }
+    /// Whether nothing is staged: used to prove a deferred forget really
+    /// ran, without rendering a real document in tests.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.file.is_none() && self.pages.is_empty()
+    }
     /// How many pages the file holds, parsing it when it changed.
     pub fn pages(&mut self, path: &Path) -> Result<usize, String> {
         Ok(self.document(path)?.pages().len())

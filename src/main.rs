@@ -151,6 +151,24 @@ fn main() -> eframe::Result<()> {
             Err(error) => eprintln!("not keeping a log file: {error}"),
         }
     }
+    logger.format(|buffer, record| {
+        use std::io::Write;
+        let message = record.args().to_string();
+        let message = if zapfast::diagnostics::is_protocol_target(record.target())
+            || zapfast::diagnostics::is_protocol_target(record.module_path().unwrap_or_default())
+        {
+            zapfast::diagnostics::protocol_summary(&message)
+        } else {
+            &message
+        };
+        writeln!(
+            buffer,
+            "[{timestamp} {level} {target}] {message}",
+            timestamp = buffer.timestamp(),
+            level = record.level(),
+            target = record.target()
+        )
+    });
     logger.init();
     log_panics(dirs.panic_log());
     let settings = settings::Settings::load(&dirs.settings_file());

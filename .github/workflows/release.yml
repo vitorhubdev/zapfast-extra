@@ -66,16 +66,16 @@ jobs:
           name="zapfast-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           if [ "${{ runner.os }}" = "Windows" ]; then
-            cp "target/${{ matrix.target }}/release/zapfast.exe" "dist/$name/"
+            cp "target/${{ matrix.target }}/release/zapext.exe" "dist/$name/"
             case "${{ matrix.target }}" in
-              x86_64-*) portable_arch="x64" ;;
-              aarch64-*) portable_arch="arm64" ;;
-              *) portable_arch="${{ matrix.target }}" ;;
+              x86_64-*) portable_arch="x64" ;; 
+              aarch64-*) portable_arch="arm64" ;; 
+              *) portable_arch="${{ matrix.target }}" ;; 
             esac
-            cp "target/${{ matrix.target }}/release/zapfast.exe" \
+            cp "target/${{ matrix.target }}/release/zapext.exe" \
               "dist/ZapExt-${GITHUB_REF_NAME}-windows-${portable_arch}-portable.exe"
           else
-            cp "target/${{ matrix.target }}/release/zapfast" "dist/$name/"
+            cp "target/${{ matrix.target }}/release/zapext" "dist/$name/"
           fi
           cp README.md LICENSE packaging/zapfast-portable.txt "dist/$name/"
           if [ "${{ runner.os }}" = "Linux" ]; then
@@ -101,7 +101,7 @@ jobs:
           $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
           if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           & $iscc "/DVersion=$version" "/DNumericVersion=$numericVersion" "/DArch=$arch" `
-            "/DBinary=$PWD\target\${{ matrix.target }}/release/zapfast.exe" `
+            "/DBinary=$PWD\target\${{ matrix.target }}/release/zapext.exe" `
             "/DOutputDir=$PWD\dist" packaging\windows\zapfast.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -117,12 +117,6 @@ jobs:
 
   macos:
     name: macOS universal app
-    # Temporarily off: the macOS runner ran out of disk while making the DMG
-    # (hdiutil: create failed - No space left on device) with 90 GB free, and
-    # the release waited on it. Set the repository variable RELEASE_MACOS to
-    # off to skip it, delete the variable to bring it back. While it is off,
-    # remember to put macos back in the publish job's needs list.
-    if: vars.RELEASE_MACOS != 'off'
     runs-on: macos-latest
     env:
       # Complete Apple credentials enable native-packages signing/notarization.
@@ -151,9 +145,9 @@ jobs:
         run: |
           mkdir -p universal
           lipo -create \
-            target/aarch64-apple-darwin/release/zapfast \
-            target/x86_64-apple-darwin/release/zapfast \
-            -output universal/zapfast
+            target/aarch64-apple-darwin/release/zapext \
+            target/x86_64-apple-darwin/release/zapext \
+            -output universal/zapext
 
       # Making the disk image needs room, and nothing after this point reads
       # the build tree or the toolchains a macOS runner carries for other
@@ -178,7 +172,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p dist/macos-input
-          bash packaging/macos/bundle.sh universal/zapfast dist/macos-input/ZapExt.app "$version"
+          bash packaging/macos/bundle.sh universal/zapext dist/macos-input/ZapExt.app "$version"
           cp README.md LICENSE dist/macos-input/
 
       - name: Package, sign and notarize macOS app
@@ -242,7 +236,7 @@ jobs:
 
   publish:
     name: GitHub release
-    needs: [build, flatpak]
+    needs: [build, flatpak, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v7

@@ -136,7 +136,9 @@ pub fn picture_rect(area: Rect, texture: Vec2) -> Rect {
 /// The texture is measured first and the painting rect is fitted to it.
 /// Returns whether the picture was ready to be drawn at all.
 pub fn picture(ui: &Ui, path: &Path, area: Rect) -> bool {
-    let image = egui::Image::new(crate::util::image_uri(path));
+    let uri = crate::util::image_uri(path);
+    crate::image_cache::touch(ui.ctx(), &uri);
+    let image = egui::Image::new(uri);
     match image.load_for_size(ui.ctx(), area.size()) {
         Ok(egui::load::TexturePoll::Ready { texture }) => {
             image.paint_at(ui, picture_rect(area, texture.size));
@@ -158,6 +160,7 @@ pub fn paint_avatar(
     let mut painted = false;
     if let Some(picture) = picture {
         let uri = crate::util::image_uri(picture);
+        crate::image_cache::touch(ui.ctx(), &uri);
         let image = egui::Image::new(uri)
             .fit_to_exact_size(Vec2::splat(size))
             .corner_radius(size / 2.0);

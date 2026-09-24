@@ -72,7 +72,7 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 3
         run: |
-          target/debug/zapfast --demo --demo-shot "$RUNNER_TEMP/zapfast-content.png" --demo-shot-delay 8000 &
+          target/debug/zapext --demo --demo-shot "$RUNNER_TEMP/zapfast-content.png" --demo-shot-delay 8000 &
           demo_pid=$!
           sleep 6
           screencapture -x "$RUNNER_TEMP/zapfast-window.png" || true

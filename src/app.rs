@@ -11,7 +11,7 @@ use crate::audio::{Player, Recorder};
 use crate::backend::{Backend, Command, Event, LinkStatus, Waker};
 use crate::model::{
     Action, Chat, ChatId, Contact, Content, Delivery, Dialog, Media, MediaState, Message, Page,
-    PickerTab, StickerPack, Toast, ToastKind, Viewer, ViewerItem, ViewerKind,
+    PickerTab, StickerPack, Toast, ToastKind, VideoScrub, Viewer, ViewerItem, ViewerKind,
 };
 use crate::paths::AppDirs;
 use crate::settings::{Settings, ThemeChoice};
@@ -51,10 +51,27 @@ const CHAT_SEARCH_PAUSE: Duration = Duration::from_millis(250);
 /// Extra width a PDF page may be short of before it is rendered again.
 const PDF_SHARP_ENOUGH: u32 = 200;
 
+/// Uploaded scrub preview picture: the file and drag generation it was
+/// decoded for, the fraction it shows, and its texture slot.
+pub(crate) struct PreviewSlot {
+    pub(crate) path: PathBuf,
+    pub(crate) generation: u64,
+    pub(crate) seq: u64,
+    pub(crate) fraction: f32,
+    pub(crate) pts: Duration,
+    pub(crate) approximate: bool,
+    pub(crate) texture: egui::TextureHandle,
+}
+
 /// Loaded chat history and paging state.
 #[derive(Default)]
 pub struct Conversation {
     pub messages: Vec<Message>,
+    /// Every resident id, so merges dedupe without rebuilding a set from
+    /// the whole history on each page, and removals drop one key.
+    pub(crate) ids: HashSet<String>,
+    /// Last merge or open: eviction drops the stalest inactive chats first.
+    pub(crate) touched: Option<Instant>,
     /// Whether the local archive has no earlier messages.
     pub complete: bool,
     pub loading_older: bool,
@@ -77,23 +94,109 @@ pub struct Conversation {
 
 impl Conversation {
     fn merge(&mut self, incoming: Vec<Message>, older: bool) {
+        self.touched = Some(Instant::now());
         if older {
-            let known: HashSet<String> = self.messages.iter().map(|m| m.id.clone()).collect();
-            let mut fresh: Vec<Message> = incoming
-                .into_iter()
-                .filter(|message| !known.contains(&message.id))
-                .collect();
-            fresh.append(&mut self.messages);
-            self.messages = fresh;
+            self.merge_older_page(incoming);
         } else {
             for message in incoming {
-                match self.messages.iter_mut().find(|m| m.id == message.id) {
-                    Some(existing) => *existing = message,
-                    None => self.messages.push(message),
-                }
+                self.upsert_live(message);
             }
         }
-        self.messages.sort_by_key(|message| message.timestamp);
+    }
+
+    /// Merges one older page (ascending, as the archive returns) in front
+    /// without a full resort: linear in both runs, page-first on timestamp
+    /// ties because older pages carry smaller rowids.
+    fn merge_older_page(&mut self, page: Vec<Message>) {
+        let fresh: Vec<Message> = page
+            .into_iter()
+            .filter(|message| !self.ids.contains(&message.id))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+        for message in &fresh {
+            self.ids.insert(message.id.clone());
+        }
+        let mut merged = Vec::with_capacity(self.messages.len() + fresh.len());
+        let mut old = std::mem::take(&mut self.messages).into_iter().peekable();
+        let mut new = fresh.into_iter().peekable();
+        loop {
+            match (old.peek(), new.peek()) {
+                (Some(o), Some(n)) if n.timestamp < o.timestamp => {
+                    merged.push(new.next().expect("peeked"));
+                }
+                (Some(o), Some(n)) if n.timestamp == o.timestamp => {
+                    merged.push(new.next().expect("peeked"));
+                }
+                (Some(_), Some(_)) => {
+                    merged.push(old.next().expect("peeked"));
+                }
+                (Some(_), None) => {
+                    merged.push(old.next().expect("peeked"));
+                }
+                (None, Some(_)) => {
+                    merged.push(new.next().expect("peeked"));
+                }
+                (None, None) => break,
+            }
+        }
+        self.messages = merged;
+    }
+
+    /// Upserts one live message: replacement in place, or binary search by
+    /// timestamp for a new id. No full resort either way.
+    fn upsert_live(&mut self, message: Message) {
+        if self.ids.contains(&message.id)
+            && let Some(position) = self.messages.iter().position(|m| m.id == message.id)
+        {
+            if self.messages[position].timestamp == message.timestamp {
+                self.messages[position] = message;
+                return;
+            }
+            self.messages.remove(position);
+        }
+        // Upper bound: a live arrival is the newest of its second.
+        let position = self
+            .messages
+            .partition_point(|m| m.timestamp <= message.timestamp);
+        self.ids.insert(message.id.clone());
+        self.messages.insert(position, message);
+    }
+
+    /// Forgets one resident message from every structure at once.
+    fn forget(&mut self, id: &str) {
+        self.ids.remove(id);
+        self.messages.retain(|message| message.id != id);
+    }
+
+    /// Keeps only the newest `keep` messages, pruning the id set with
+    /// them. Older history still pages from the archive: callers reset
+    /// the reload flags so reopening refetches what left the RAM.
+    fn trim_older(&mut self, keep: usize) {
+        if self.messages.len() > keep {
+            let drop = self.messages.len() - keep;
+            for message in self.messages.drain(..drop) {
+                self.ids.remove(&message.id);
+            }
+        }
+    }
+
+    /// Forgets every message at or below `through`, returning the removed
+    /// ids for composer and selection cleanup.
+    fn forget_range(&mut self, through: i64) -> std::collections::HashSet<String> {
+        let mut removed = std::collections::HashSet::new();
+        self.messages.retain(|message| {
+            let gone = message.timestamp <= through;
+            if gone {
+                removed.insert(message.id.clone());
+            }
+            !gone
+        });
+        for id in &removed {
+            self.ids.remove(id);
+        }
+        removed
     }
 
     pub fn message_mut(&mut self, id: &str) -> Option<&mut Message> {
@@ -221,6 +324,8 @@ pub struct App {
     /// Picker anchor at the composer button.
     pub picker_anchor: Option<egui::Rect>,
     pub picker_search: String,
+    /// Sticker picker search text.
+    pub sticker_search: String,
     /// Whether the newly opened picker should focus search.
     pub picker_focus: bool,
     /// Attachments pending in the composer.
@@ -229,6 +334,12 @@ pub struct App {
     pub player: Player,
     /// Plays the video open in the viewer. Only one plays at a time.
     pub video: crate::video::Player,
+    /// Scrub drag in progress over the open video, if any.
+    pub video_scrub: Option<VideoScrub>,
+    /// Background scrub-preview decoder shared by all drags.
+    pub previewer: crate::video::Previewer,
+    /// Uploaded preview picture: file, drag generation and texture.
+    pub(crate) video_preview: Option<PreviewSlot>,
     /// Active voice recorder.
     pub recording: Option<Recorder>,
     /// Voice messages with a sent played receipt.
@@ -244,6 +355,8 @@ pub struct App {
     pub stickers_favorites: Vec<PathBuf>,
     /// Imported sticker packs, newest first.
     pub sticker_packs: Vec<StickerPack>,
+    /// Emoji tags by sticker file, for picker search.
+    pub stickers_emojis: HashMap<PathBuf, Vec<String>>,
     /// Whether the sticker list is loading.
     pub stickers_pending: bool,
     /// Undrained thumbnail rebuild results from the worker: the sticker
@@ -464,10 +577,14 @@ impl App {
             chat_search_focus: false,
             picker_anchor: None,
             picker_search: String::new(),
+            sticker_search: String::new(),
             picker_focus: false,
             pending: Vec::new(),
             player: Player::new(waker.clone()),
             video: crate::video::Player::default(),
+            video_scrub: None,
+            previewer: crate::video::Previewer::default(),
+            video_preview: None,
             recording: None,
             played_told: HashSet::new(),
             copy_rows: Default::default(),
@@ -476,6 +593,7 @@ impl App {
             stickers_saved: Vec::new(),
             stickers_favorites: Vec::new(),
             sticker_packs: Vec::new(),
+            stickers_emojis: HashMap::new(),
             stickers_pending: false,
             sticker_thumb_results: Vec::new(),
             sticker_import_pending: false,
@@ -1333,41 +1451,40 @@ impl App {
                     packs,
                     recent,
                     favorites,
+                    emojis,
                 } => {
                     self.stickers_saved = saved;
                     self.sticker_packs = packs;
                     self.stickers = recent;
                     self.stickers_favorites = favorites;
+                    self.stickers_emojis = emojis.into_iter().collect();
                     self.stickers_pending = false;
                     self.sticker_import_pending = false;
                 }
+                Event::StickerPackPreview(result) => match result {
+                    Ok((pack, publisher)) => {
+                        self.dialog = Some(Dialog::StickerPackView {
+                            name: pack.name.clone(),
+                            publisher,
+                            dir: pack.dir.clone(),
+                            stickers: pack.stickers.clone(),
+                        });
+                    }
+                    Err(error) => {
+                        self.toast_error(error);
+                    }
+                },
                 Event::MessageDeleted { chat, id } => {
-                    if let Some(conversation) = self.conversations.get_mut(&chat) {
-                        conversation.messages.retain(|message| message.id != id);
-                    }
-                    if self.editing.as_deref() == Some(id.as_str()) {
-                        self.editing = None;
-                        self.composer.clear();
-                    }
+                    self.invalidate_message(&chat, &id);
                 }
                 Event::ChatRemoved { chat } => {
-                    self.chats.retain(|row| row.id != chat);
-                    self.conversations.remove(&chat);
-                    self.notifications.clear(&chat);
-                    if self.open_chat.as_deref() == Some(chat.as_str()) {
-                        self.open_chat = None;
-                        self.composer.clear();
-                        self.editing = None;
-                        self.chat_search_open = false;
-                        self.chat_search_hits.clear();
-                    }
+                    self.invalidate_chat(&chat);
                 }
-                Event::ChatCleared { chat, .. } => {
-                    // The archive already dropped the range; forget the cached
-                    // copy so the next open reloads what survived.
-                    self.conversations.remove(&chat);
-                    if self.open_chat.as_deref() == Some(chat.as_str()) {
-                        self.chat_search_hits.clear();
+                Event::ChatCleared { chat, through } => {
+                    self.invalidate_chat_range(&chat, through);
+                    if self.open_chat.as_deref() == Some(chat.as_str())
+                        && !self.conversations.contains_key(&chat)
+                    {
                         self.ensure_loaded(&chat);
                     }
                 }
@@ -1546,6 +1663,235 @@ impl App {
         }
     }
 
+    /// Single invalidation layer for one removed message: SQLite is the
+    /// truth, every in-memory projection of that id passes through here.
+    /// Cheap by construction, one comparison per cached row, and nothing
+    /// is reloaded: a repeated delete still clears a stale screen.
+    fn invalidate_message(&mut self, chat: &str, id: &str) {
+        if let Some(conversation) = self.conversations.get_mut(chat) {
+            conversation.forget(id);
+        }
+        self.search_hits
+            .retain(|message| !(message.chat == chat && message.id == id));
+        if self.open_chat.as_deref() == Some(chat) {
+            self.chat_search_hits.retain(|message| message.id != id);
+            if self.reply_to.as_deref() == Some(id) {
+                self.reply_to = None;
+            }
+            if self.editing.as_deref() == Some(id) {
+                self.editing = None;
+                self.composer.clear();
+            }
+            self.selected.retain(|known| known != id);
+        }
+        // The viewer walks archive media, so a deleted picture must go
+        // even when the conversation cache never held it.
+        let close_viewer = if let Some(viewer) = self.viewer.as_mut() {
+            if viewer.chat != chat {
+                false
+            } else {
+                let current = viewer.current().map(|item| item.message.clone());
+                viewer.items.retain(|item| item.message != id);
+                // The open item survives by identity, not by number: with
+                // [A, B, C] on B, deleting A keeps B on screen instead of
+                // sliding to C. Only a deleted open item closes the viewer.
+                match current {
+                    Some(message) => {
+                        match viewer.items.iter().position(|item| item.message == message) {
+                            Some(index) => {
+                                viewer.index = index;
+                                false
+                            }
+                            // The open item itself is gone: close instead of
+                            // sliding to a neighbour nobody chose.
+                            None => true,
+                        }
+                    }
+                    None if viewer.items.is_empty() => true,
+                    None => {
+                        viewer.index = viewer.index.min(viewer.items.len() - 1);
+                        false
+                    }
+                }
+            }
+        } else {
+            false
+        };
+        if close_viewer {
+            // Effective shutdown, not just a hidden window: the decoder,
+            // its task and the sound really stop, like a normal close.
+            self.stop_media(Some(id));
+        } else if self.player.playing_message() == Some(id) {
+            // A voice note has no viewer item: still its own sound.
+            self.player.stop();
+        }
+        self.notifications.clear_message(chat, id);
+    }
+
+    /// Single invalidation layer for a cleared range: drops only messages
+    /// at or below `through`, keeps anything newer in memory, and never
+    /// forces a full reload. The archive already dropped the same range.
+    fn invalidate_chat_range(&mut self, chat: &str, through: i64) {
+        // Membership by set: a big clear with a big selection must not
+        // turn quadratic.
+        let removed = self
+            .conversations
+            .get_mut(chat)
+            .map(|conversation| conversation.forget_range(through))
+            .unwrap_or_default();
+        // Global search may hold rows of this chat from any query.
+        self.search_hits
+            .retain(|message| !(message.chat == chat && message.timestamp <= through));
+        if self.open_chat.as_deref() == Some(chat) {
+            self.chat_search_hits
+                .retain(|message| message.timestamp > through);
+            if self
+                .reply_to
+                .as_ref()
+                .is_some_and(|id| removed.contains(id))
+            {
+                self.reply_to = None;
+            }
+            if self.editing.as_ref().is_some_and(|id| removed.contains(id)) {
+                self.editing = None;
+                self.composer.clear();
+            }
+            self.selected.retain(|known| !removed.contains(known));
+            // The open item survives by identity: a partial clear that
+            // keeps it repoints the index instead of jumping to the first
+            // picture. Only a cleared open item closes the viewer, with
+            // effective shutdown like a normal close.
+            let viewer_closed = if self
+                .viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.chat == chat)
+            {
+                let current = self
+                    .viewer
+                    .as_ref()
+                    .and_then(|viewer| viewer.current())
+                    .map(|item| item.message.clone());
+                let items = self.viewer_items(chat);
+                match current
+                    .and_then(|message| items.iter().position(|item| item.message == message))
+                {
+                    Some(index) => {
+                        if let Some(viewer) = self.viewer.as_mut() {
+                            viewer.items = items;
+                            viewer.index = index;
+                        }
+                        false
+                    }
+                    None => true,
+                }
+            } else {
+                false
+            };
+            if viewer_closed {
+                self.stop_media(None);
+            }
+        }
+        if self
+            .player
+            .playing_message()
+            .is_some_and(|message| removed.contains(message))
+        {
+            // A voice note has no viewer item: still its own sound.
+            self.player.stop();
+        }
+        self.notifications.clear(chat);
+    }
+
+    /// Single invalidation layer for a removed chat: every projection of
+    /// the chat goes, the open view steps back, pending notifications die.
+    fn invalidate_chat(&mut self, chat: &str) {
+        self.chats.retain(|row| row.id != chat);
+        // Voice has no viewer item: learn its message before the rows go.
+        // A note playing in the open chat belongs to it by construction.
+        let playing = self.player.playing_message().map(str::to_owned);
+        let voice_gone = playing.is_some_and(|message| {
+            self.open_chat.as_deref() == Some(chat)
+                || self.conversations.get(chat).is_some_and(|conversation| {
+                    conversation.messages.iter().any(|row| row.id == message)
+                })
+        });
+        self.conversations.remove(chat);
+        self.search_hits.retain(|message| message.chat != chat);
+        self.notifications.clear(chat);
+        if self
+            .viewer
+            .as_ref()
+            .is_some_and(|viewer| viewer.chat == chat)
+        {
+            // Effective shutdown, not just a hidden window.
+            self.stop_media(None);
+        }
+        if voice_gone {
+            self.player.stop();
+        }
+        if self.open_chat.as_deref() == Some(chat) {
+            self.open_chat = None;
+            self.composer.clear();
+            self.editing = None;
+            self.reply_to = None;
+            self.selected.clear();
+            self.chat_search_open = false;
+            self.chat_search_hits.clear();
+        }
+    }
+
+    /// Cancels a scrub drag, resuming playback only when the clip played
+    /// before the drag held it. No jump happens here; the preview slot
+    /// and its generation retire with the drag. Returns whether a drag
+    /// was active.
+    fn cancel_video_scrub(&mut self) -> bool {
+        let Some(scrub) = self.video_scrub.take() else {
+            return false;
+        };
+        self.previewer.cancel(&scrub.path);
+        self.video_preview = None;
+        if scrub.was_playing
+            && let Some(item) = self.viewer.as_ref().and_then(|viewer| viewer.current())
+        {
+            let path = item.path.clone();
+            let (video, player) = (&mut self.video, &mut self.player);
+            if let Err(error) = video.toggle(&path, &mut || player.stop()) {
+                self.toast_error(error);
+            }
+        }
+        true
+    }
+
+    /// Drops a scrub drag without seeking or resuming: stepping to
+    /// another file or opening a new viewer retires the drag and its
+    /// generation, leaving playback to the new view.
+    fn drop_video_scrub(&mut self) {
+        if let Some(scrub) = self.video_scrub.take() {
+            self.previewer.cancel(&scrub.path);
+        }
+        self.video_preview = None;
+    }
+
+    /// Effective media shutdown shared by the viewer close and the delete
+    /// invalidation: the video decoder and its task stand down, rendered
+    /// PDF pages leave memory, and the worker drops the document. A voice
+    /// note stops only when the message it belongs to is gone, passed as
+    /// `voice_message`; a plain close passes nothing and never stills
+    /// unrelated sound.
+    fn stop_media(&mut self, voice_message: Option<&str>) {
+        // A scrub never survives its video: dropping the state and its
+        // generation retires every pending preview with it.
+        self.drop_video_scrub();
+        self.viewer = None;
+        self.forget_pdf();
+        self.video.stop();
+        if voice_message.is_some_and(|id| self.player.playing_message() == Some(id)) {
+            self.player.stop();
+        }
+        // The document does not stay in memory once it is closed.
+        self.backend.send(Command::ForgetPdf);
+    }
+
     fn ensure_loaded(&mut self, chat: &str) {
         let conversation = self.conversations.entry(chat.to_owned()).or_default();
         if !conversation.requested {
@@ -1666,7 +2012,7 @@ impl App {
     /// Drops a message from the local conversation and the archive.
     fn delete_message_local(&mut self, chat: &str, id: &str) {
         if let Some(conversation) = self.conversations.get_mut(chat) {
-            conversation.messages.retain(|message| message.id != id);
+            conversation.forget(id);
         }
         self.backend.send(Command::DeleteLocal {
             chat: chat.to_owned(),
@@ -1741,6 +2087,52 @@ impl App {
             self.settings.last_chat = Some(id);
             self.mark_settings_dirty();
         }
+        // The previous chat is inactive now: enforce the budget before its
+        // pages accumulate without bound.
+        self.trim_inactive_chats();
+    }
+
+    /// Messages kept for an inactive chat: reopening shows recent history
+    /// instantly, older pages reload from the archive on demand.
+    const INACTIVE_CHAT_RETAINED: usize = 120;
+    /// Inactive conversations kept resident at all: beyond this the stalest
+    /// entries leave the RAM entirely and reopen from the archive.
+    const INACTIVE_CHATS_KEPT: usize = 10;
+
+    /// Enforces the resident-history budget: every inactive chat keeps its
+    /// newest rows, and only the most recently touched inactive chats stay
+    /// resident at all. Trimmed chats reset their reload flags so reopening
+    /// refetches from the archive; drafts, selection and the open chat are
+    /// untouched. Total resident history stays bounded no matter how many
+    /// chats the session visits.
+    fn trim_inactive_chats(&mut self) {
+        if let Some(open) = self.open_chat.clone()
+            && let Some(conversation) = self.conversations.get_mut(&open)
+        {
+            conversation.touched = Some(Instant::now());
+        }
+        let open = self.open_chat.clone();
+        for (id, conversation) in self.conversations.iter_mut() {
+            if Some(id.as_str()) != open.as_deref() {
+                conversation.trim_older(Self::INACTIVE_CHAT_RETAINED);
+                conversation.complete = false;
+                conversation.requested = false;
+                conversation.loading_older = false;
+            }
+        }
+        let allowed = Self::INACTIVE_CHATS_KEPT + usize::from(open.is_some());
+        if self.conversations.len() > allowed {
+            let mut idle: Vec<(Option<Instant>, ChatId)> = self
+                .conversations
+                .iter()
+                .filter(|(id, _)| Some(id.as_str()) != open.as_deref())
+                .map(|(id, conversation)| (conversation.touched, id.clone()))
+                .collect();
+            idle.sort_by_key(|(touched, _)| *touched);
+            for (_, id) in idle.into_iter().take(self.conversations.len() - allowed) {
+                self.conversations.remove(&id);
+            }
+        }
     }
 
     /// Identifies a PDF for its remembered page: file name plus size on disk.
@@ -1793,6 +2185,7 @@ impl App {
 
     /// Opens the media viewer on one picture or sticker of a chat.
     pub fn open_viewer(&mut self, chat: &str, message: &str) {
+        self.drop_video_scrub(); // A new viewer retires any drag from the old video.
         let items = self.viewer_items(chat);
         if items.is_empty() {
             return;
@@ -2416,6 +2809,8 @@ impl App {
                 self.selected.clear();
                 self.emoji_start = None;
                 self.mention_start = None;
+                // Nobody is open: every conversation is inactive budget now.
+                self.trim_inactive_chats();
             }
             Action::SendText {
                 chat,
@@ -2501,6 +2896,7 @@ impl App {
                     viewer.step(step);
                 }
                 self.video.stop();
+                self.drop_video_scrub();
                 // A new PDF opens where its reader left it.
                 self.restore_pdf_page();
                 self.request_pdf_thumbs();
@@ -2541,6 +2937,9 @@ impl App {
                     self.toast_error(error);
                 }
             }
+            Action::VideoScrubCancel => {
+                self.cancel_video_scrub();
+            }
             Action::VideoVolume(volume) => {
                 let volume = volume.clamp(0.0, 1.0);
                 self.settings.video_volume = volume;
@@ -2572,12 +2971,14 @@ impl App {
                 }
             }
             Action::CloseViewer => {
-                self.remember_pdf_page();
-                self.viewer = None;
-                self.forget_pdf();
-                self.video.stop();
-                // The document does not stay in memory once it is closed.
-                self.backend.send(Command::ForgetPdf);
+                // Escape mid-drag restores the pre-drag state instead of
+                // closing the viewer.
+                if !self.cancel_video_scrub() {
+                    self.remember_pdf_page();
+                    // A plain close never stops a voice note: only a deleted
+                    // message stills its own sound.
+                    self.stop_media(None);
+                }
             }
             Action::ToggleChatSearch => {
                 self.chat_search_open = !self.chat_search_open;
@@ -2784,6 +3185,7 @@ impl App {
                 } else {
                     self.picker = Some(tab);
                     self.picker_search.clear();
+                    self.sticker_search.clear();
                     // Reopening the picker returns to this tab, even after a restart.
                     self.settings.picker_tab = tab;
                     self.actions.push(Action::SettingsChanged);
@@ -2879,6 +3281,13 @@ impl App {
             }
             Action::FavoriteSticker(path) => {
                 self.backend.send(Command::FavoriteSticker { path });
+            }
+            Action::ViewStickerPack { chat, message } => {
+                self.backend
+                    .send(Command::ViewStickerPack { chat, message });
+            }
+            Action::AddStickerPack { dir, name } => {
+                self.backend.send(Command::AddStickerPack { dir, name });
             }
             Action::PeekSticker(path) => {
                 self.dialog = Some(Dialog::PeekSticker { path });
@@ -3344,6 +3753,8 @@ impl App {
         self.take_drops_and_pastes(ctx);
         crate::ui::show(self, ui);
         self.apply_actions(ctx);
+        // Release the image caches of everything that scrolled away.
+        crate::image_cache::sweep(ctx);
         if !self.toasts.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
@@ -4874,6 +5285,116 @@ mod tests {
         );
     }
 
+    fn unfocused_frame(
+        app: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        calls: &mut usize,
+    ) {
+        // Overlay open: the window lost focus, like under Win+Shift+S.
+        // Releases and pastes delivered here must die with the frame.
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                focused: false,
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.take_image_paste(ui.ctx(), || {
+                    *calls += 1;
+                    None
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.composer)
+                        .id(egui::Id::new("composer-text")),
+                );
+                app.apply_actions(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn unfocused_frames_read_nothing_and_attach_nothing() {
+        let (mut app, ctx) = paste_app();
+        let mut calls = 0;
+        unfocused_frame(&mut app, &ctx, vec![paste_release()], &mut calls);
+        unfocused_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("shot".into())],
+            &mut calls,
+        );
+        unfocused_frame(&mut app, &ctx, vec![], &mut calls);
+        assert_eq!(calls, 0, "no clipboard touch without focus");
+        assert!(app.pending.is_empty());
+        assert!(!app.paste_armed && !app.paste_typed_v && !app.paste_ctrl_held);
+    }
+
+    #[test]
+    fn release_outside_then_return_pastes_once_without_dup() {
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        // Ctrl let go outside while the overlay owns the keys.
+        let mut calls = 0;
+        unfocused_frame(&mut app, &ctx, vec![paste_release()], &mut calls);
+        assert!(app.pending.is_empty());
+        // A fresh Ctrl+V after return attaches exactly once.
+        paste_frame(&mut app, &ctx, vec![], true, Some(image.clone()));
+        paste_frame(&mut app, &ctx, vec![paste_release()], true, Some(image));
+        assert_eq!(app.pending.len(), 1);
+    }
+
+    #[test]
+    fn large_print_paste_cost_is_bounded_and_reported() {
+        let (mut app, ctx) = paste_app();
+        // 4K screenshot: 3840 by 2160 RGBA is about 33 MB per copy.
+        let big = (3840, 2160, vec![7u8; 3840 * 2160 * 4]);
+        let start = std::time::Instant::now();
+        paste_frame(
+            &mut app,
+            &ctx,
+            vec![egui::Event::Paste("shot".into())],
+            true,
+            Some(big),
+        );
+        eprintln!("paste-4k single intent on UI thread: {:?}", start.elapsed());
+        assert_eq!(app.pending.len(), 1);
+    }
+
+    #[test]
+    fn blocked_reader_blocks_the_calling_frame() {
+        // Structural proof, not a freeze repro: whatever stalls the
+        // reader stalls the frame by the same amount.
+        let (mut app, ctx) = paste_app();
+        let image = ten_by_ten(7);
+        let start = std::time::Instant::now();
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![
+                    egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+                    egui::Event::Paste("shot".into()),
+                ],
+                ..Default::default()
+            },
+            |ui| {
+                app.take_image_paste(ui.ctx(), || {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    Some(image.clone())
+                });
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.composer)
+                        .id(egui::Id::new("composer-text")),
+                );
+                app.apply_actions(ui.ctx());
+            },
+        );
+        output.textures_delta.clear();
+        eprintln!("blocked reader held the frame: {:?}", start.elapsed());
+        assert!(start.elapsed() >= std::time::Duration::from_millis(300));
+        assert_eq!(app.pending.len(), 1);
+    }
+
     #[test]
     fn text_search_switch_and_empty_clipboard_stay_correct() {
         let (mut app, ctx) = paste_app();
@@ -4981,7 +5502,7 @@ mod tests {
     }
 
     #[test]
-    fn cleared_chat_drops_cache_and_reloads_open() {
+    fn cleared_chat_filters_range_and_keeps_newer() {
         let root =
             std::env::temp_dir().join(format!("zapfast-cleared-chat-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
@@ -4991,7 +5512,13 @@ mod tests {
         app.conversations
             .entry("1@s.whatsapp.net".into())
             .or_default()
-            .merge(vec![message("1@s.whatsapp.net", "m1", 10)], false);
+            .merge(
+                vec![
+                    message("1@s.whatsapp.net", "m1", 10),
+                    message("1@s.whatsapp.net", "m2", 100),
+                ],
+                false,
+            );
         events
             .send(Event::ChatCleared {
                 chat: "1@s.whatsapp.net".into(),
@@ -5001,12 +5528,914 @@ mod tests {
         app.handle_events();
         assert_eq!(app.chats.len(), 1, "the chat stays listed");
         assert_eq!(app.open_chat.as_deref(), Some("1@s.whatsapp.net"));
+        let conversation = app
+            .conversations
+            .get("1@s.whatsapp.net")
+            .expect("newer messages stay cached");
+        assert_eq!(
+            conversation
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m2"],
+            "only the cleared range goes"
+        );
+        assert!(
+            !conversation.requested,
+            "no reload is requested for a filtered cache"
+        );
+    }
+
+    #[test]
+    fn deleted_message_leaves_every_projection() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-deleted-everywhere-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.chats
+            .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(
+                vec![
+                    message("1@s.whatsapp.net", "m1", 10),
+                    message("1@s.whatsapp.net", "m2", 20),
+                ],
+                false,
+            );
+        app.search_hits = vec![
+            message("1@s.whatsapp.net", "m1", 10),
+            message("2@s.whatsapp.net", "m1", 10),
+        ];
+        app.chat_search_open = true;
+        app.chat_search_hits = vec![message("1@s.whatsapp.net", "m1", 10)];
+        app.reply_to = Some("m1".into());
+        app.editing = Some("m1".into());
+        app.composer = "draft".into();
+        app.selected = vec!["m1".into(), "m2".into()];
+        app.viewer = Some(Viewer {
+            chat: "1@s.whatsapp.net".into(),
+            items: vec![
+                ViewerItem {
+                    message: "m1".into(),
+                    path: "/tmp/m1".into(),
+                    kind: ViewerKind::Picture,
+                },
+                ViewerItem {
+                    message: "m2".into(),
+                    path: "/tmp/m2".into(),
+                    kind: ViewerKind::Picture,
+                },
+            ],
+            index: 1,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+            pdf_page: 0,
+            pdf_pages: 0,
+            pdf_rotate: 0,
+        });
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        let ids: Vec<&str> = app
+            .conversations
+            .get("1@s.whatsapp.net")
+            .expect("chat stays")
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["m2"]);
+        assert_eq!(app.search_hits.len(), 1);
+        assert_eq!(app.search_hits[0].chat.as_str(), "2@s.whatsapp.net");
+        assert!(app.chat_search_hits.is_empty());
+        assert!(app.reply_to.is_none());
+        assert!(app.editing.is_none());
+        assert!(app.composer.is_empty());
+        assert_eq!(app.selected, vec!["m2".to_owned()]);
+        let viewer = app.viewer.as_ref().expect("viewer survives");
+        assert_eq!(viewer.items.len(), 1);
+        assert_eq!(viewer.index, 0);
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m2".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert!(app.viewer.is_none(), "viewer closes on its last item");
+    }
+    #[test]
+    fn deleted_message_in_other_chat_keeps_open_state() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-deleted-elsewhere-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.reply_to = Some("m9".into());
+        app.editing = Some("m9".into());
+        app.selected = vec!["m9".into()];
+        app.chat_search_open = true;
+        app.chat_search_hits = vec![message("1@s.whatsapp.net", "m9", 10)];
+        app.conversations
+            .entry("2@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![message("2@s.whatsapp.net", "m1", 10)], false);
+        app.search_hits = vec![message("2@s.whatsapp.net", "m1", 10)];
+        events
+            .send(Event::MessageDeleted {
+                chat: "2@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert!(
+            app.conversations
+                .get("2@s.whatsapp.net")
+                .expect("preloaded")
+                .messages
+                .is_empty()
+        );
+        assert!(app.search_hits.is_empty());
+        assert_eq!(app.reply_to.as_deref(), Some("m9"));
+        assert_eq!(app.editing.as_deref(), Some("m9"));
+        assert_eq!(app.selected, vec!["m9".to_owned()]);
+        assert_eq!(app.chat_search_hits.len(), 1);
+    }
+    #[test]
+    fn deleted_missing_row_still_clears_stale_screen() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-deleted-stale-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![message("1@s.whatsapp.net", "m1", 10)], false);
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
         assert!(
             app.conversations
                 .get("1@s.whatsapp.net")
-                .is_none_or(|conversation| conversation.messages.is_empty()),
-            "stale messages are gone; a reload was requested"
+                .expect("chat stays")
+                .messages
+                .is_empty()
         );
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+    }
+    #[test]
+    fn cleared_thousands_with_big_selection_stay_synchronous() {
+        // Five thousand rows, five thousand selected, reply and edit
+        // inside the cleared range: membership by set keeps the clear
+        // linear instead of quadratic.
+        let root =
+            std::env::temp_dir().join(format!("zapfast-cleared-many-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let rows: Vec<Message> = (1..=5000)
+            .map(|n| message("1@s.whatsapp.net", &format!("m{n}"), n))
+            .collect();
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(rows, false);
+        app.search_hits = (1..=5000)
+            .map(|n| message("1@s.whatsapp.net", &format!("m{n}"), n))
+            .collect();
+        app.chat_search_hits = (1..=5000)
+            .map(|n| message("1@s.whatsapp.net", &format!("m{n}"), n))
+            .collect();
+        app.selected = (1..=5000).map(|n| format!("m{n}")).collect();
+        app.reply_to = Some("m100".into());
+        app.editing = Some("m200".into());
+        app.composer = "draft".into();
+        events
+            .send(Event::ChatCleared {
+                chat: "1@s.whatsapp.net".into(),
+                through: 2500,
+            })
+            .expect("sends");
+        app.handle_events();
+        assert_eq!(
+            app.conversations
+                .get("1@s.whatsapp.net")
+                .expect("chat stays")
+                .messages
+                .len(),
+            2500
+        );
+        assert_eq!(app.search_hits.len(), 2500);
+        assert_eq!(app.chat_search_hits.len(), 2500);
+        assert_eq!(app.selected.len(), 2500, "only survivors stay selected");
+        assert!(app.reply_to.is_none(), "cleared reply goes");
+        assert!(app.editing.is_none(), "cleared edit goes");
+        assert!(app.composer.is_empty());
+    }
+
+    #[test]
+    fn deleted_video_message_stops_media_but_keeps_unrelated_voice() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-deleted-media-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        // Viewer open on the video message; a voice note plays for
+        // another message. Loading needs no audio device, only a path.
+        app.viewer = Some(Viewer {
+            chat: "1@s.whatsapp.net".into(),
+            items: vec![ViewerItem {
+                message: "m1".into(),
+                path: "/tmp/m1.mp4".into(),
+                kind: ViewerKind::Video,
+            }],
+            index: 0,
+            zoom: 1.0,
+            offset: (0.0, 0.0),
+            pdf_page: 0,
+            pdf_pages: 0,
+            pdf_rotate: 0,
+        });
+        app.player
+            .toggle("m2", std::path::Path::new("/tmp/voice-m2.ogg"))
+            .expect("loads");
+        assert_eq!(app.player.playing_message(), Some("m2"));
+        // Deleting the video closes its viewer with effective shutdown
+        // while the unrelated voice keeps playing.
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert!(app.viewer.is_none());
+        assert_eq!(app.player.playing_message(), Some("m2"));
+        // Deleting the voice message stills its own sound.
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m2".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert_eq!(app.player.playing_message(), None);
+    }
+    #[test]
+    fn viewer_keeps_the_open_item_by_identity() {
+        let root = std::env::temp_dir().join(format!("zapfast-viewer-id-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let picture = |id: &str, timestamp: i64| {
+            let path = root.join(format!("{id}.mp4"));
+            std::fs::write(&path, b"bytes").expect("writes");
+            let mut message = message("1@s.whatsapp.net", id, timestamp);
+            message.content = Content::Video {
+                caption: None,
+                media: Media {
+                    mime: "video/mp4".into(),
+                    size: 5,
+                    width: None,
+                    height: None,
+                    path: Some(path),
+                    state: Default::default(),
+                },
+                seconds: None,
+                gif: false,
+            };
+            message
+        };
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(
+                vec![picture("m1", 10), picture("m2", 20), picture("m3", 30)],
+                false,
+            );
+        // [m1, m2, m3] showing m2: deleting m1 must keep m2, not slide.
+        app.open_viewer("1@s.whatsapp.net", "m2");
+        assert_eq!(app.viewer.as_ref().map(|viewer| viewer.index), Some(1));
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m1".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        let viewer = app.viewer.as_ref().expect("viewer survives");
+        assert_eq!(viewer.items.len(), 2);
+        assert_eq!(
+            viewer.current().map(|item| item.message.as_str()),
+            Some("m2")
+        );
+        assert_eq!(viewer.index, 0);
+        // Deleting past the open item changes nothing on screen.
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m3".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        let viewer = app.viewer.as_ref().expect("viewer survives");
+        assert_eq!(
+            viewer.current().map(|item| item.message.as_str()),
+            Some("m2")
+        );
+        // Deleting the open item itself closes instead of sliding.
+        events
+            .send(Event::MessageDeleted {
+                chat: "1@s.whatsapp.net".into(),
+                id: "m2".into(),
+            })
+            .expect("sends");
+        app.handle_events();
+        assert!(app.viewer.is_none());
+    }
+    #[test]
+    fn scrub_cancel_step_and_close_retire_without_a_jump() {
+        let root = std::env::temp_dir().join(format!("zapfast-scrub-app-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let clip = |id: &str, timestamp: i64| {
+            let path = root.join(format!("{id}.mp4"));
+            std::fs::write(&path, b"bytes").expect("writes");
+            let mut body = message("1@s.whatsapp.net", id, timestamp);
+            body.content = Content::Video {
+                caption: None,
+                media: Media {
+                    mime: "video/mp4".into(),
+                    size: 5,
+                    width: None,
+                    height: None,
+                    path: Some(path),
+                    state: Default::default(),
+                },
+                seconds: None,
+                gif: false,
+            };
+            body
+        };
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![clip("m1", 10), clip("m2", 20)], false);
+        app.open_viewer("1@s.whatsapp.net", "m1");
+        let ctx = egui::Context::default();
+        let path = app
+            .viewer
+            .as_ref()
+            .and_then(|viewer| viewer.current())
+            .map(|item| item.path.clone())
+            .expect("m1 opens");
+        let held = |app: &mut App, path: &std::path::Path| {
+            let generation = app.previewer.begin(path);
+            app.video_scrub = Some(VideoScrub {
+                path: path.to_path_buf(),
+                generation,
+                was_playing: false,
+                target: 0.8,
+            });
+        };
+        held(&mut app, &path);
+        app.apply(Action::VideoScrubCancel, &ctx);
+        assert!(app.video_scrub.is_none(), "cancel retires the drag");
+        assert!(app.viewer.is_some(), "cancel never closes the viewer");
+        held(&mut app, &path);
+        app.apply(Action::ViewerStep(1), &ctx);
+        assert!(app.video_scrub.is_none(), "stepping retires the drag");
+        assert_eq!(
+            app.viewer
+                .as_ref()
+                .and_then(|viewer| viewer.current())
+                .map(|item| item.message.as_str()),
+            Some("m2"),
+            "the view moves on",
+        );
+        let next = app
+            .viewer
+            .as_ref()
+            .and_then(|viewer| viewer.current())
+            .map(|item| item.path.clone())
+            .expect("m2 shows");
+        held(&mut app, &next);
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(app.video_scrub.is_none(), "escape retires the drag first");
+        assert!(app.viewer.is_some(), "the first escape keeps the viewer");
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(app.viewer.is_none(), "the second escape closes");
+    }
+    #[test]
+    fn scrub_commit_with_real_decoder_holds_then_lands() {
+        let root = std::env::temp_dir().join(format!("zapfast-scrubflow-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let path = root.join("m1.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc2=s=320x240:d=6:r=10"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=6"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .args(["-profile:v", "baseline", "-bf", "0"])
+            .args(["-g", "10", "-keyint_min", "10", "-sc_threshold", "0"])
+            .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
+            .arg(&path)
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(made, "ffmpeg encodes the fixture");
+        let mut first = message("1@s.whatsapp.net", "m1", 10);
+        first.content = Content::Video {
+            caption: None,
+            media: Media {
+                mime: "video/mp4".into(),
+                size: 5,
+                width: None,
+                height: None,
+                path: Some(path.clone()),
+                state: Default::default(),
+            },
+            seconds: None,
+            gif: false,
+        };
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![first], false);
+        app.open_viewer("1@s.whatsapp.net", "m1");
+        let ctx = egui::Context::default();
+        app.apply(Action::VideoToggle, &ctx);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let total = loop {
+            match app.video.poll(&ctx, &path) {
+                crate::video::State::Showing { playing, total, .. } if playing => break total,
+                crate::video::State::Showing { .. } => {}
+                crate::video::State::Loading => {}
+                crate::video::State::Unsupported(why) => panic!("the fixture plays: {why}"),
+            }
+            assert!(Instant::now() < deadline, "playback starts");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        app.apply(Action::VideoToggle, &ctx);
+        let generation = app.previewer.begin(&path);
+        app.video_scrub = Some(VideoScrub {
+            path: path.clone(),
+            generation,
+            was_playing: true,
+            target: 0.75,
+        });
+        let frozen = match app.video.poll(&ctx, &path) {
+            crate::video::State::Showing {
+                position, playing, ..
+            } => {
+                assert!(!playing, "the drag holds playback");
+                position
+            }
+            _ => panic!("the held clip keeps showing"),
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        let still = match app.video.poll(&ctx, &path) {
+            crate::video::State::Showing { position, .. } => position,
+            _ => panic!("the held clip keeps showing"),
+        };
+        assert_eq!(frozen, still, "a held preview advances nothing");
+        let target = total.mul_f32(0.75);
+        app.apply(Action::VideoSeek(0.75), &ctx);
+        app.apply(Action::VideoToggle, &ctx);
+        let start = Instant::now();
+        let landed = loop {
+            match app.video.poll(&ctx, &path) {
+                crate::video::State::Showing {
+                    position,
+                    seeking,
+                    playing,
+                    ..
+                } => {
+                    assert!(playing, "the commit resumes");
+                    if seeking {
+                        assert_eq!(position, target, "the clock holds the target mid-seek");
+                    } else {
+                        break start.elapsed().as_millis();
+                    }
+                }
+                crate::video::State::Loading => {}
+                crate::video::State::Unsupported(why) => panic!("the fixture plays: {why}"),
+            }
+            assert!(start.elapsed() < Duration::from_secs(25), "the jump lands");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        eprintln!("scrub-commit landed_ms={landed}");
+        app.apply(Action::VideoToggle, &ctx);
+        let generation = app.previewer.begin(&path);
+        app.video_scrub = Some(VideoScrub {
+            path: path.clone(),
+            generation,
+            was_playing: false,
+            target: 0.25,
+        });
+        app.apply(Action::VideoSeek(0.25), &ctx);
+        let parked = total.mul_f32(0.25);
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            match app.video.poll(&ctx, &path) {
+                crate::video::State::Showing {
+                    position,
+                    seeking,
+                    playing,
+                    ..
+                } => {
+                    assert!(!playing, "a parked commit never resumes");
+                    if !seeking {
+                        let gap = position.abs_diff(parked);
+                        assert!(gap < Duration::from_millis(200), "the parked jump lands");
+                        break;
+                    }
+                }
+                crate::video::State::Loading => {}
+                crate::video::State::Unsupported(why) => panic!("the fixture plays: {why}"),
+            }
+            assert!(Instant::now() < deadline, "the parked jump lands");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+    #[test]
+    fn scrub_lifecycle_with_real_decoder_stops_cleanly() {
+        let root = std::env::temp_dir().join(format!("zapfast-scrublife-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let real = |id: &str| {
+            let path = root.join(format!("{id}.mp4"));
+            let made = std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-y"])
+                .args(["-f", "lavfi", "-i", "testsrc2=s=320x240:d=6:r=10"])
+                .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+                .args(["-profile:v", "baseline", "-bf", "0"])
+                .args(["-g", "10", "-keyint_min", "10", "-sc_threshold", "0"])
+                .args(["-an", "-movflags", "+faststart"])
+                .arg(&path)
+                .status()
+                .is_ok_and(|status| status.success());
+            assert!(made, "ffmpeg encodes the fixture");
+            let mut body = message("1@s.whatsapp.net", id, 10);
+            body.content = Content::Video {
+                caption: None,
+                media: Media {
+                    mime: "video/mp4".into(),
+                    size: 5,
+                    width: None,
+                    height: None,
+                    path: Some(path.clone()),
+                    state: Default::default(),
+                },
+                seconds: None,
+                gif: false,
+            };
+            (path, body)
+        };
+        let (first_path, first) = real("m1");
+        let (_, second) = real("m2");
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(vec![first, second], false);
+        app.open_viewer("1@s.whatsapp.net", "m1");
+        let ctx = egui::Context::default();
+        app.apply(Action::VideoToggle, &ctx);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match app.video.poll(&ctx, &first_path) {
+                crate::video::State::Showing { playing, .. } if playing => break,
+                crate::video::State::Showing { .. } => {}
+                crate::video::State::Loading => {}
+                crate::video::State::Unsupported(why) => panic!("the fixture plays: {why}"),
+            }
+            assert!(Instant::now() < deadline, "playback starts");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.apply(Action::VideoToggle, &ctx);
+        let generation = app.previewer.begin(&first_path);
+        app.video_scrub = Some(VideoScrub {
+            path: first_path.clone(),
+            generation,
+            was_playing: true,
+            target: 0.5,
+        });
+        app.apply(Action::VideoScrubCancel, &ctx);
+        assert!(app.video_scrub.is_none(), "escape retires the drag");
+        assert!(app.viewer.is_some(), "escape never closes the viewer");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match app.video.poll(&ctx, &first_path) {
+                crate::video::State::Showing { playing, .. } if playing => break,
+                crate::video::State::Showing { .. } => {}
+                crate::video::State::Loading => {}
+                crate::video::State::Unsupported(why) => panic!("the fixture plays: {why}"),
+            }
+            assert!(Instant::now() < deadline, "escape resumes playback");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        app.apply(Action::VideoToggle, &ctx);
+        let generation = app.previewer.begin(&first_path);
+        app.video_scrub = Some(VideoScrub {
+            path: first_path.clone(),
+            generation,
+            was_playing: false,
+            target: 0.5,
+        });
+        app.apply(Action::ViewerStep(1), &ctx);
+        assert!(app.video_scrub.is_none(), "stepping retires the drag");
+        assert_eq!(
+            app.viewer
+                .as_ref()
+                .and_then(|viewer| viewer.current())
+                .map(|item| item.message.as_str()),
+            Some("m2"),
+            "the view moves on",
+        );
+        assert!(
+            !app.video.is_active(&first_path),
+            "the old decode stands down"
+        );
+        let second_path = app
+            .viewer
+            .as_ref()
+            .and_then(|viewer| viewer.current())
+            .map(|item| item.path.clone())
+            .expect("m2 shows");
+        let generation = app.previewer.begin(&second_path);
+        app.video_scrub = Some(VideoScrub {
+            path: second_path.clone(),
+            generation,
+            was_playing: false,
+            target: 0.5,
+        });
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(
+            app.video_scrub.is_none(),
+            "the first close retires the drag"
+        );
+        assert!(app.viewer.is_some(), "the first close keeps the viewer");
+        app.apply(Action::CloseViewer, &ctx);
+        assert!(app.viewer.is_none(), "the second close leaves");
+        assert!(
+            !app.video.is_active(&second_path),
+            "closing stills the decoder"
+        );
+    }
+    #[test]
+    fn cleared_range_repoints_the_open_item_by_identity() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-viewer-clear-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("creates");
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        app.open_chat = Some("1@s.whatsapp.net".into());
+        let picture = |id: &str, timestamp: i64| {
+            let path = root.join(format!("{id}.mp4"));
+            std::fs::write(&path, b"bytes").expect("writes");
+            let mut message = message("1@s.whatsapp.net", id, timestamp);
+            message.content = Content::Video {
+                caption: None,
+                media: Media {
+                    mime: "video/mp4".into(),
+                    size: 5,
+                    width: None,
+                    height: None,
+                    path: Some(path),
+                    state: Default::default(),
+                },
+                seconds: None,
+                gif: false,
+            };
+            message
+        };
+        app.conversations
+            .entry("1@s.whatsapp.net".into())
+            .or_default()
+            .merge(
+                vec![picture("m1", 10), picture("m2", 100), picture("m3", 200)],
+                false,
+            );
+        app.open_viewer("1@s.whatsapp.net", "m2");
+        // A partial clear keeps the open picture by identity.
+        events
+            .send(Event::ChatCleared {
+                chat: "1@s.whatsapp.net".into(),
+                through: 50,
+            })
+            .expect("sends");
+        app.handle_events();
+        let viewer = app.viewer.as_ref().expect("viewer survives");
+        assert_eq!(viewer.items.len(), 2);
+        assert_eq!(
+            viewer.current().map(|item| item.message.as_str()),
+            Some("m2")
+        );
+        assert_eq!(viewer.index, 0);
+        // Clearing the open picture closes with effective shutdown.
+        events
+            .send(Event::ChatCleared {
+                chat: "1@s.whatsapp.net".into(),
+                through: 150,
+            })
+            .expect("sends");
+        app.handle_events();
+        assert!(app.viewer.is_none());
+    }
+
+    #[test]
+    fn resident_history_stays_bounded_across_many_chats() {
+        let root = std::env::temp_dir().join(format!("zapfast-bounded-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        // Thirty chats with two hundred messages each, opened in turn.
+        for n in 0..30 {
+            let chat = format!("{n}@s.whatsapp.net");
+            app.chats.push(Chat::new(chat.clone(), "Peer".into()));
+            let rows: Vec<Message> = (1..=200)
+                .map(|m| message(&chat, &format!("m{m}"), m as i64))
+                .collect();
+            app.conversations
+                .entry(chat.clone())
+                .or_default()
+                .merge(rows, false);
+            app.open_chat(chat);
+        }
+        let total: usize = app.conversations.values().map(|c| c.messages.len()).sum();
+        assert!(
+            total <= 200 + 10 * 120,
+            "bounded no matter the visits: {total}"
+        );
+        assert!(app.conversations.len() <= 11);
+        // A trimmed survivor refetches on reopen...
+        let kept = app
+            .conversations
+            .get("25@s.whatsapp.net")
+            .expect("recent stays");
+        assert_eq!(kept.messages.len(), 120);
+        assert!(!kept.requested, "reopen reloads");
+        // ...and an evicted chat rebuilds through the real event path.
+        assert!(!app.conversations.contains_key("0@s.whatsapp.net"));
+        app.open_chat("0@s.whatsapp.net".into());
+        assert!(app.conversations.contains_key("0@s.whatsapp.net"));
+        let rows: Vec<Message> = (141..=200)
+            .map(|m| message("0@s.whatsapp.net", &format!("m{m}"), m as i64))
+            .collect();
+        events
+            .send(Event::Messages {
+                chat: "0@s.whatsapp.net".into(),
+                messages: rows,
+                older: false,
+                complete: true,
+            })
+            .expect("sends");
+        app.handle_events();
+        assert_eq!(
+            app.conversations
+                .get("0@s.whatsapp.net")
+                .expect("rebuilt")
+                .messages
+                .len(),
+            60
+        );
+    }
+
+    #[test]
+    fn live_replace_moves_changed_timestamps() {
+        let mut conversation = Conversation::default();
+        conversation.merge(
+            vec![
+                message("c", "a", 1),
+                message("c", "b", 2),
+                message("c", "c", 3),
+            ],
+            true,
+        );
+        // Same id, new timestamp: reinserted in order, never duplicated.
+        conversation.merge(vec![message("c", "b", 5)], false);
+        let ids: Vec<&str> = conversation
+            .messages
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "c", "b"]);
+        conversation.merge(vec![message("c", "b", 5)], false);
+        assert_eq!(conversation.messages.len(), 3);
+    }
+
+    #[test]
+    fn same_second_messages_keep_every_row() {
+        let mut conversation = Conversation::default();
+        let page: Vec<Message> = (0..5)
+            .map(|n| message("c", &format!("m{n}"), 100))
+            .collect();
+        conversation.merge(page, true);
+        assert_eq!(conversation.messages.len(), 5);
+        assert_eq!(conversation.ids.len(), 5);
+        conversation.merge(vec![message("c", "live", 100)], false);
+        assert_eq!(conversation.messages.len(), 6);
+        assert_eq!(conversation.ids.len(), 6);
+    }
+
+    #[test]
+    fn overlapping_pages_dedupe_without_holes() {
+        let mut conversation = Conversation::default();
+        let first: Vec<Message> = (1..=60)
+            .map(|n| message("c", &format!("m{n}"), n as i64))
+            .collect();
+        conversation.merge(first, true);
+        let second: Vec<Message> = (40..=100)
+            .map(|n| message("c", &format!("m{n}"), n as i64))
+            .collect();
+        conversation.merge(second, true);
+        assert_eq!(conversation.messages.len(), 100);
+        assert_eq!(conversation.ids.len(), 100);
+        let ids: Vec<String> = conversation.messages.iter().map(|m| m.id.clone()).collect();
+        let expected: Vec<String> = (1..=100).map(|n| format!("m{n}")).collect();
+        assert_eq!(ids, expected);
+    }
+
+    #[test]
+    fn clear_during_load_keeps_newer_and_drops_ids() {
+        let mut conversation = Conversation::default();
+        let rows: Vec<Message> = (1..=10)
+            .map(|n| message("c", &format!("m{n}"), n as i64))
+            .collect();
+        conversation.merge(rows, true);
+        let removed = conversation.forget_range(5);
+        assert_eq!(removed.len(), 5);
+        assert_eq!(conversation.messages.len(), 5);
+        assert_eq!(conversation.ids.len(), 5);
+        assert!(conversation.message("m3").is_none());
+        assert!(conversation.message("m8").is_some());
+    }
+
+    #[test]
+    fn delete_local_drops_the_resident_id() {
+        let root = std::env::temp_dir().join(format!("zapfast-delete-id-{}", std::process::id()));
+        let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
+        let chat = String::from("c@s.whatsapp.net");
+        app.conversations.entry(chat.clone()).or_default().merge(
+            vec![message(&chat, "gone", 1), message(&chat, "kept", 2)],
+            true,
+        );
+        app.delete_message_local(&chat, "gone");
+        let conversation = app.conversations.get(&chat).expect("chat stays");
+        assert!(conversation.message("gone").is_none());
+        assert!(!conversation.ids.contains("gone"));
+        assert!(conversation.message("kept").is_some());
+    }
+
+    #[test]
+    fn deleted_event_clears_open_closed_and_archived_views() {
+        let root =
+            std::env::temp_dir().join(format!("zapfast-deleted-views-{}", std::process::id()));
+        let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
+        for chat in ["a@s.whatsapp.net", "c@s.whatsapp.net"] {
+            let mut known = Chat::new(chat.into(), "Peer".into());
+            if chat.starts_with("c") {
+                known.archived = true;
+            }
+            app.chats.push(known);
+            app.conversations.entry(chat.to_owned()).or_default().merge(
+                vec![message(chat, "gone", 1), message(chat, "kept", 2)],
+                true,
+            );
+        }
+        app.open_chat = Some("a@s.whatsapp.net".into());
+        for (chat, id) in [
+            ("a@s.whatsapp.net", "gone"),
+            ("b@s.whatsapp.net", "gone"),
+            ("c@s.whatsapp.net", "gone"),
+        ] {
+            events
+                .send(Event::MessageDeleted {
+                    chat: chat.into(),
+                    id: id.into(),
+                })
+                .expect("sends");
+        }
+        app.handle_events();
+        for chat in ["a@s.whatsapp.net", "c@s.whatsapp.net"] {
+            let conversation = app.conversations.get(chat).expect("chat stays");
+            assert!(conversation.message("gone").is_none());
+            assert!(conversation.message("kept").is_some());
+        }
     }
 
     #[test]

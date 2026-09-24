@@ -29,7 +29,7 @@
 #ifndef NumericVersion
   #define NumericVersion Version
 #endif
-#define AppExeName "zapfast.exe"
+#define AppExeName "zapext.exe"
 
 [Setup]
 ; Never change: this is how Windows tells an update from a new program.

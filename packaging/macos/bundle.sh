@@ -18,8 +18,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
-cp "$binary" "$app/Contents/MacOS/zapfast"
-chmod 755 "$app/Contents/MacOS/zapfast"
+cp "$binary" "$app/Contents/MacOS/zapext"
+chmod 755 "$app/Contents/MacOS/zapext"
 sed "s/__VERSION__/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 
 iconset="$(mktemp -d)/zapfast.iconset"

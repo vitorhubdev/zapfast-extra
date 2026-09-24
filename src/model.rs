@@ -336,6 +336,13 @@ pub enum Content {
         media: Media,
         animated: bool,
     },
+    /// A sticker pack shared in a chat, opened on demand.
+    StickerPack {
+        name: String,
+        publisher: String,
+        count: u32,
+        caption: Option<String>,
+    },
     /// A photo or video marked as view once by its sender.
     ViewOnce {
         what: String,
@@ -470,6 +477,7 @@ impl Content {
             Self::Contact { display_name, .. } => format!("Contact: {display_name}"),
             Self::Poll { question, .. } => format!("Poll: {question}"),
             Self::Revoked => "This message was deleted".to_owned(),
+            Self::StickerPack { name, .. } => format!("Sticker pack: {name}"),
             Self::Unsupported { what } => format!("Unsupported message ({what})"),
         }
     }
@@ -677,6 +685,20 @@ impl Viewer {
     }
 }
 
+/// Scrub drag in progress over the open video: preview state only, the
+/// definitive jump still goes through VideoSeek on release.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VideoScrub {
+    /// File being scrubbed: answers for anything else never paint.
+    pub path: PathBuf,
+    /// Drag generation from the preview decoder.
+    pub generation: u64,
+    /// Whether the clip played before the drag held it.
+    pub was_playing: bool,
+    /// Latest drag destination, 0 to 1: the only jump a release makes.
+    pub target: f32,
+}
+
 /// One file the viewer can show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewerItem {
@@ -723,6 +745,13 @@ pub enum Dialog {
     /// Shows a sticker on its own, bigger, with a save button.
     PeekSticker {
         path: PathBuf,
+    },
+    /// Previews a sticker pack shared in a chat, with a button to keep it.
+    StickerPackView {
+        name: String,
+        publisher: String,
+        dir: PathBuf,
+        stickers: Vec<PathBuf>,
     },
     /// Lists everything known about one attachment.
     FileInfo(Box<FileInfo>),
@@ -835,6 +864,8 @@ pub enum Action {
     VideoToggle,
     /// Jumps to a fraction of the video open in the viewer, from 0 to 1.
     VideoSeek(f32),
+    /// Cancels a scrub drag: restores the pre-drag state with no jump.
+    VideoScrubCancel,
     /// Applies a video output level while it plays; saving follows on release.
     VideoVolume(f32),
     /// Mutes or unmutes the video open in the viewer.
@@ -933,6 +964,16 @@ pub enum Action {
     ForgetSticker(PathBuf),
     /// Marks a sticker as a favourite, or clears the mark.
     FavoriteSticker(PathBuf),
+    /// Downloads a sticker pack shared in a chat for preview.
+    ViewStickerPack {
+        chat: ChatId,
+        message: String,
+    },
+    /// Copies a previewed pack into the packs folder.
+    AddStickerPack {
+        dir: PathBuf,
+        name: String,
+    },
     /// Shows one sticker bigger, without opening the media viewer.
     PeekSticker(PathBuf),
     /// Asks for the details of one attachment.

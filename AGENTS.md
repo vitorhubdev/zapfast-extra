@@ -312,6 +312,10 @@ A release is not finished when the tag is pushed. Do these in order:
 
   Do not weaken a lint, delete a test, or add an `allow` merely to make
   them pass without explaining why the rule does not apply.
+- At the start of a batch and before preparing a release, review relevant updates
+  from upstream ZapFast, whatsapp-rust, and used dependencies. Record current
+  revision, candidate, benefits, incompatibilities, and decision. Reviewing does
+  never mean updating automatically.
 - Report platform coverage honestly: say what was run and what was only
   compiled.
 - Never log message contents, phone numbers, keys, or QR payloads at a

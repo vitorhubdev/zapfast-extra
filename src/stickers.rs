@@ -28,6 +28,40 @@ pub fn id_of(path: &Path) -> Option<String> {
         .then(|| stem.to_ascii_lowercase())
 }
 
+/// The hex content hash for a phone file hash: the base64 SHA-256 of the
+/// decrypted file. WhatsApp writes standard padded base64, but an unpadded
+/// or URL-safe digest names the same file, so every flavor is tried.
+pub fn hash_of_filehash(filehash: &str) -> Option<String> {
+    use base64::Engine;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let filehash = filehash.trim();
+    let bytes = [STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD]
+        .iter()
+        .find_map(|engine| engine.decode(filehash).ok())?;
+    (bytes.len() == 32).then(|| bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// The phone file hash for a hex content hash, in standard padded base64.
+pub fn filehash_of_hash(hash: &str) -> Option<String> {
+    use base64::Engine;
+    if hash.len() != 64 {
+        return None;
+    }
+    let bytes: Vec<u8> = (0..32)
+        .map(|index| u8::from_str_radix(hash.get(index * 2..index * 2 + 2)?, 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+/// The raw SHA-256 behind a hex content hash, to prove downloaded bytes.
+pub fn filehash_bytes(hash: &str) -> Option<Vec<u8>> {
+    if hash.len() != 64 {
+        return None;
+    }
+    (0..32)
+        .map(|index| u8::from_str_radix(hash.get(index * 2..index * 2 + 2)?, 16).ok())
+        .collect()
+}
+
 /// Where the thumbnail of a sticker lives, once it has one.
 pub fn thumb_path(thumbs: &Path, file: &Path) -> Option<PathBuf> {
     let id = id_of(file)?;
@@ -273,6 +307,32 @@ mod tests {
             thumb_path(Path::new("/thumbs"), &path),
             Some(PathBuf::from(format!("/thumbs/{hash}.png")))
         );
+    }
+    #[test]
+    fn a_phone_file_hash_names_the_same_sticker_in_every_flavor() {
+        use base64::Engine;
+        let bytes: Vec<u8> = (0..32).map(|byte| byte as u8).collect();
+        let hash: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let flavors = [
+            base64::engine::general_purpose::STANDARD.encode(&bytes),
+            base64::engine::general_purpose::STANDARD_NO_PAD.encode(&bytes),
+            base64::engine::general_purpose::URL_SAFE.encode(&bytes),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes),
+        ];
+        for filehash in &flavors {
+            assert_eq!(hash_of_filehash(filehash).as_deref(), Some(hash.as_str()));
+        }
+        assert_eq!(hash_of_filehash("  "), None);
+        assert_eq!(hash_of_filehash("!!!!"), None);
+        assert_eq!(
+            hash_of_filehash("aGVsbG8="),
+            None,
+            "short digests never match"
+        );
+        let back = filehash_of_hash(&hash).expect("encodes");
+        assert_eq!(hash_of_filehash(&back).as_deref(), Some(hash.as_str()));
+        assert_eq!(filehash_of_hash("short"), None);
+        assert_eq!(filehash_of_hash(&"zz".repeat(32)), None);
     }
 
     #[test]

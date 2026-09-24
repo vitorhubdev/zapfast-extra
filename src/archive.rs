@@ -31,6 +31,19 @@ pub struct ArchivedSticker {
     pub raw: Option<Vec<u8>>,
 }
 
+/// One favorite sticker sync state, keyed by content hash so a sticker
+/// filed from any origin stays one favorite. Adapted from upstream ZapFast
+/// (crmne/zapfast, MIT): whether it is a favorite, when that last changed
+/// on either side, the encoded references the phone needs to fetch it, and
+/// whether the phone has been told.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FavoriteStickerSync {
+    pub favorite: bool,
+    pub updated_at: i64,
+    pub action: Option<Vec<u8>>,
+    pub pushed: bool,
+}
+
 /// What a chat removal took out. existed is false for a replayed sync
 /// action with nothing left to remove. media lists the attachment paths
 /// the removed messages referenced; a file is deleted only when no
@@ -96,6 +109,13 @@ CREATE TABLE IF NOT EXISTS stickers (
     last_used INTEGER NOT NULL DEFAULT 0,
     weight REAL NOT NULL DEFAULT 0,
     path TEXT
+);
+CREATE TABLE IF NOT EXISTS favorite_stickers (
+    hash TEXT PRIMARY KEY,
+    favorite INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    action BLOB,
+    pushed INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS group_receipts (
     chat TEXT NOT NULL,
@@ -880,6 +900,15 @@ impl Archive {
         if self.is_tombstoned(&message.chat, &message.id)? {
             return Ok(());
         }
+        // A clear/delete barrier wins over any late replay below it, no
+        // matter which ingestion path filed the row: history sync writes
+        // straight through here, bypassing the worker live-message guard.
+        if self
+            .removal_point(&message.chat)?
+            .is_some_and(|through| message.timestamp <= through)
+        {
+            return Ok(());
+        }
         let existing: Option<i64> = self
             .connection
             .query_row(
@@ -901,7 +930,9 @@ impl Archive {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(chat, id) DO UPDATE SET
                 sender_name = COALESCE(excluded.sender_name, sender_name),
-                content = excluded.content,
+                -- A revocation sticks: late replays must not resurrect it.
+                content = CASE WHEN json_extract(content, '$.kind') = 'revoked'
+                    THEN content ELSE excluded.content END,
                 status = excluded.status,
                 quoted = COALESCE(excluded.quoted, quoted),
                 reactions = excluded.reactions,
@@ -942,6 +973,18 @@ impl Archive {
         Ok(())
     }
 
+    /// Resolves the cursor rowid once, up front: a cursor deleted between
+    /// the UI read and a paging query has no rowid left, and the paging
+    /// queries below handle that absence with the whole-second fallback.
+    fn cursor_rowid(&self, chat: &str, id: &str) -> Result<Option<i64>> {
+        self.connection
+            .query_row(
+                "SELECT rowid FROM messages WHERE chat = ?1 AND id = ?2",
+                params![chat, id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
     /// Returns up to `limit` messages before an optional timestamp/id boundary,
     /// in ascending order.
     pub fn messages(
@@ -953,14 +996,18 @@ impl Archive {
         let mut statement = self.connection.prepare(
             "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
              FROM messages
-             WHERE chat = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND rowid <
-                 (SELECT rowid FROM messages WHERE chat = ?1 AND id = ?3)))
+             WHERE chat = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND rowid < ?3))
              ORDER BY timestamp DESC, rowid DESC
              LIMIT ?4",
         )?;
         let (before_time, before_id) = before.unwrap_or((i64::MAX, ""));
-        let rows =
-            statement.query_map(params![chat, before_time, before_id, limit as i64], |row| {
+        // A deleted cursor has no rowid left: fall back to the whole
+        // second instead of an empty comparison, so same-second siblings
+        // still page. Callers dedupe by id; nothing is skipped twice.
+        let before_rowid = self.cursor_rowid(chat, before_id)?.unwrap_or(i64::MAX);
+        let rows = statement.query_map(
+            params![chat, before_time, before_rowid, limit as i64],
+            |row| {
                 let content: String = row.get(5)?;
                 let quoted: Option<String> = row.get(7)?;
                 let reactions: String = row.get(8)?;
@@ -985,7 +1032,8 @@ impl Archive {
                     forwarded: row.get(12)?,
                     thumbnail: row.get(10)?,
                 })
-            })?;
+            },
+        )?;
         let mut messages: Vec<Message> = rows.collect::<Result<_>>()?;
         messages.reverse();
         Ok(messages)
@@ -1068,13 +1116,15 @@ impl Archive {
         let mut statement = self.connection.prepare(
             "SELECT id, sender, sender_name, from_me, timestamp, content, status, quoted, reactions, edited, thumbnail, mentions, forwarded, delivered_at, read_at
              FROM messages
-             WHERE chat = ?1 AND timestamp >= ?2 AND (timestamp < ?3 OR (timestamp = ?3 AND rowid <
-                 (SELECT rowid FROM messages WHERE chat = ?1 AND id = ?4)))
+             WHERE chat = ?1 AND timestamp >= ?2 AND (timestamp < ?3 OR (timestamp = ?3 AND rowid < ?4))
              ORDER BY timestamp ASC, rowid ASC
              LIMIT ?5",
         )?;
+        // Same deleted-cursor fallback as messages(): the whole second
+        // still pages instead of vanishing behind a NULL comparison.
+        let before_rowid = self.cursor_rowid(chat, before.1)?.unwrap_or(i64::MAX);
         let rows = statement.query_map(
-            params![chat, from, before.0, before.1, limit as i64],
+            params![chat, from, before.0, before_rowid, limit as i64],
             |row| {
                 let content: String = row.get(5)?;
                 let quoted: Option<String> = row.get(7)?;
@@ -1205,6 +1255,89 @@ impl Archive {
             params![hash],
         )?;
         Ok(())
+    }
+    /// A favorite sync state, by content hash. Adapted from upstream ZapFast.
+    pub fn favorite_sticker(&self, hash: &str) -> Result<Option<FavoriteStickerSync>> {
+        use rusqlite::OptionalExtension;
+        self.connection
+            .query_row(
+                "SELECT favorite, updated_at, action, pushed FROM favorite_stickers WHERE hash = ?1",
+                params![hash],
+                |row| {
+                    Ok(FavoriteStickerSync {
+                        favorite: row.get(0)?,
+                        updated_at: row.get(1)?,
+                        action: row.get(2)?,
+                        pushed: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+    }
+    /// Records a favorite change. A missing action keeps the references
+    /// already known, since removing a favorite does not carry them.
+    pub fn set_favorite_sticker(
+        &self,
+        hash: &str,
+        favorite: bool,
+        updated_at: i64,
+        action: Option<&[u8]>,
+        pushed: bool,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO favorite_stickers (hash, favorite, updated_at, action, pushed) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(hash) DO UPDATE SET favorite = excluded.favorite, updated_at = excluded.updated_at, action = COALESCE(excluded.action, favorite_stickers.action), pushed = excluded.pushed",
+            params![hash, favorite, updated_at, action, pushed],
+        )?;
+        Ok(())
+    }
+    /// Favorite changes the phone has not been told about yet.
+    pub fn unpushed_favorite_stickers(&self) -> Result<Vec<(String, FavoriteStickerSync)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT hash, favorite, updated_at, action, pushed FROM favorite_stickers WHERE pushed = 0 ORDER BY updated_at",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                FavoriteStickerSync {
+                    favorite: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    action: row.get(3)?,
+                    pushed: row.get(4)?,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+    /// Favorite hashes, newest first.
+    pub fn favorite_hashes(&self) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT hash FROM favorite_stickers WHERE favorite = 1 ORDER BY updated_at DESC",
+        )?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect()
+    }
+    /// Marks a change as delivered to the phone, unless a newer one replaced
+    /// it meanwhile, and keeps the references it was sent with.
+    pub fn favorite_sticker_pushed(
+        &self,
+        hash: &str,
+        updated_at: i64,
+        action: Option<&[u8]>,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE favorite_stickers SET pushed = 1, action = COALESCE(?3, action) WHERE hash = ?1 AND updated_at = ?2",
+            params![hash, updated_at, action],
+        )?;
+        Ok(())
+    }
+    /// Raw sticker messages, newest first, to find a sticker CDN references.
+    pub fn sticker_message_raws(&self, limit: usize) -> Result<Vec<Vec<u8>>> {
+        let mut statement = self.connection.prepare(
+            "SELECT raw FROM messages WHERE json_extract(content, ?1) = ?2 AND raw IS NOT NULL ORDER BY timestamp DESC LIMIT ?3",
+        )?;
+        let rows =
+            statement.query_map(params!["$.kind", "sticker", limit as i64], |row| row.get(0))?;
+        rows.collect()
     }
     /// Moves every row filed under one chat id to another id.
     ///
@@ -2828,6 +2961,77 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn paging_survives_a_deleted_cursor() {
+        // Five messages share timestamp 100; the middle one pages, then
+        // is deleted before the next page runs with the stale cursor.
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "A").expect("chat");
+        archive
+            .insert_message(&message(chat, "before", 99, false), None)
+            .expect("insert");
+        for index in 0..5 {
+            archive
+                .insert_message(&message(chat, &format!("a{index}"), 100, false), None)
+                .expect("insert");
+        }
+        let first = archive.messages(chat, None, 3).expect("messages");
+        assert_eq!(
+            first.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["a2", "a3", "a4"]
+        );
+        // The cursor a2 vanishes before the next page.
+        archive
+            .delete_message_for_me(chat, "a2", 101)
+            .expect("delete");
+        let second = archive
+            .messages(chat, Some((100, "a2")), 10)
+            .expect("messages");
+        // a2 lived on the first page; every other survivor must arrive
+        // now, exactly once, with no jump over the deleted cursor.
+        let mut second_ids: Vec<&str> = second.iter().map(|m| m.id.as_str()).collect();
+        second_ids.sort_unstable();
+        assert_eq!(second_ids, ["a0", "a1", "a3", "a4", "before"]);
+        let mut union: Vec<&str> = first
+            .iter()
+            .chain(second.iter())
+            .map(|m| m.id.as_str())
+            .collect();
+        union.sort_unstable();
+        union.dedup();
+        assert_eq!(union, ["a0", "a1", "a2", "a3", "a4", "before"]);
+        // The range query shares the fallback: deleted cursor, same union.
+        let range = archive
+            .messages_range(chat, 90, (100, "a2"), 10)
+            .expect("range");
+        let mut ids: Vec<&str> = range.iter().map(|m| m.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["a0", "a1", "a3", "a4", "before"]);
+    }
+
+    #[test]
+    fn replay_never_resurrects_a_revoked_message() {
+        // Late history replay of a revoked id must not resurrect it.
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "A").expect("chat");
+        archive
+            .insert_message(&message(chat, "m1", 100, false), None)
+            .expect("insert");
+        archive
+            .set_content(chat, "m1", &Content::Revoked, false)
+            .expect("revoke");
+        archive
+            .insert_message(&message(chat, "m1", 100, false), None)
+            .expect("replay");
+        let row = archive.message(chat, "m1").expect("row").expect("present");
+        assert!(
+            matches!(row.content, Content::Revoked),
+            "revocation sticks across replays"
+        );
+    }
+
+    #[test]
     fn ranges_and_deletion() {
         let archive = Archive::in_memory().expect("opens");
         let chat = "1@s.whatsapp.net";
@@ -2942,6 +3146,146 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn sync_order_survives_a_restart() {
+        let dir = std::env::temp_dir().join(format!("zapfast-sync-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("archive.db");
+        let rev = {
+            let archive = Archive::open(&path).expect("opens");
+            archive.ensure_chat("c", "C").expect("chat");
+            let rev = archive
+                .queue_chat_sync("c", "archived", true, 100)
+                .expect("intent");
+            archive.complete_chat_sync("c", rev).expect("completes");
+            assert_eq!(archive.sync_order("c").expect("order"), Some((100, true)));
+            rev
+        };
+        let _ = rev;
+        let reopened = Archive::open(&path).expect("reopens");
+        assert_eq!(reopened.sync_order("c").expect("order"), Some((100, true)));
+        assert!(
+            reopened
+                .queued_chat_sync("c", "archived")
+                .expect("queue")
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn a_favorite_intent_survives_a_restart_unpushed() {
+        let dir = std::env::temp_dir().join(format!("zapfast-fav-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("archive.db");
+        {
+            let archive = Archive::open(&path).expect("opens");
+            archive
+                .set_favorite_sticker("aa", true, 30, Some(b"refs"), false)
+                .expect("stores");
+        }
+        let reopened = Archive::open(&path).expect("reopens");
+        let stored = reopened
+            .favorite_sticker("aa")
+            .expect("reads")
+            .expect("row");
+        assert!(stored.favorite && !stored.pushed);
+        assert_eq!(stored.action.as_deref(), Some(&b"refs"[..]));
+        assert_eq!(
+            reopened.unpushed_favorite_stickers().expect("lists").len(),
+            1
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tombstone_under_old_id_dies_with_the_row_on_rekey() {
+        // Mutation applied before the mapping was known: tombstone under
+        // one id, row under the other. Learning the mapping must condemn
+        // the row, and a restart must keep it dead.
+        let dir = std::env::temp_dir().join(format!("zapfast-rekey-tomb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("archive.db");
+        let archive = Archive::open(&path).expect("opens");
+        archive.ensure_chat("1@lid", "Old").expect("chat");
+        archive
+            .ensure_chat("55@s.whatsapp.net", "New")
+            .expect("chat");
+        archive
+            .insert_message(&message("1@lid", "m1", 100, false), None)
+            .expect("insert");
+        archive
+            .tombstone_message("55@s.whatsapp.net", "m1", 150)
+            .expect("tombstone");
+        assert!(
+            archive
+                .rekey_chat("1@lid", "55@s.whatsapp.net")
+                .expect("rekey")
+        );
+        assert!(
+            archive
+                .message("55@s.whatsapp.net", "m1")
+                .expect("row")
+                .is_none()
+        );
+        assert!(archive.message("1@lid", "m1").expect("row").is_none());
+        drop(archive);
+        let reopened = Archive::open(&path).expect("reopens");
+        assert!(
+            reopened
+                .message("55@s.whatsapp.net", "m1")
+                .expect("row")
+                .is_none()
+        );
+        assert!(
+            reopened
+                .is_tombstoned("55@s.whatsapp.net", "m1")
+                .expect("tombstone")
+        );
+        reopened
+            .insert_message(&message("55@s.whatsapp.net", "m1", 100, false), None)
+            .expect("replay");
+        assert!(
+            reopened
+                .message("55@s.whatsapp.net", "m1")
+                .expect("row")
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_second_pages_cover_every_row_once() {
+        let archive = Archive::in_memory().expect("opens");
+        let chat = "1@s.whatsapp.net";
+        archive.ensure_chat(chat, "A").expect("chat");
+        for index in 0..5 {
+            archive
+                .insert_message(&message(chat, &format!("m{index}"), 100, false), None)
+                .expect("insert");
+        }
+        let first = archive.messages(chat, None, 2).expect("first");
+        let cursor = (first[0].timestamp, first[0].id.clone());
+        let second = archive
+            .messages(chat, Some((cursor.0, &cursor.1)), 10)
+            .expect("second");
+        let mut union: Vec<String> = first.into_iter().chain(second).map(|row| row.id).collect();
+        union.sort_unstable();
+        union.dedup();
+        assert_eq!(
+            union,
+            vec![
+                "m0".to_owned(),
+                "m1".to_owned(),
+                "m2".to_owned(),
+                "m3".to_owned(),
+                "m4".to_owned()
+            ]
+        );
+    }
+
+    #[test]
     fn rekey_without_queue_reconciles_flag_to_newest_order() {
         // Each row: old flag and time, new flag and time, expected winner.
         for (old_archived, old_ms, new_archived, new_ms, expected) in [
@@ -3025,6 +3369,24 @@ pub(crate) mod tests {
         assert_eq!(archive.alloc_sync_rev().expect("counter"), 8);
     }
 
+    #[test]
+    fn insert_below_a_removal_barrier_stays_gone() {
+        let archive = Archive::in_memory().expect("opens");
+        archive.ensure_chat("c", "C").expect("chat");
+        // History sync writes straight through insert_message, so the
+        // barrier must live here and not only in the live-message guard.
+        archive
+            .remove_chat_through("c", 200, false)
+            .expect("barrier");
+        let mut old = message("c", "old", 100, false);
+        archive.insert_message(&old, None).expect("insert");
+        assert!(archive.message("c", "old").expect("row").is_none());
+        old.id = "new".to_string();
+        // Timestamps are seconds in the archive: 300 stays above 200.
+        old.timestamp = 300;
+        archive.insert_message(&old, None).expect("insert");
+        assert!(archive.message("c", "new").expect("row").is_some());
+    }
     #[test]
     fn sync_rev_never_repeats_after_clear() {
         let archive = Archive::in_memory().expect("opens");
@@ -3539,6 +3901,32 @@ mod sticker_tests {
             .expect("filed");
         let list = archive.phone_stickers().expect("lists");
         assert_eq!(list[1].path.as_deref(), Some(Path::new("/tmp/aa.webp")));
+    }
+    #[test]
+    fn a_favorite_intent_survives_a_late_push_ack() {
+        let archive = Archive::in_memory().expect("opens");
+        assert!(archive.favorite_sticker("aa").expect("reads").is_none());
+        archive
+            .set_favorite_sticker("aa", true, 10, None, false)
+            .expect("stores");
+        archive
+            .favorite_sticker_pushed("aa", 10, Some(b"refs"))
+            .expect("marks");
+        let stored = archive.favorite_sticker("aa").expect("reads").expect("row");
+        assert!(stored.favorite && stored.pushed);
+        assert_eq!(stored.action.as_deref(), Some(&b"refs"[..]));
+        archive
+            .set_favorite_sticker("aa", false, 20, None, false)
+            .expect("stores");
+        archive
+            .favorite_sticker_pushed("aa", 10, None)
+            .expect("marks");
+        let stored = archive.favorite_sticker("aa").expect("reads").expect("row");
+        assert!(!stored.favorite && !stored.pushed);
+        let waiting = archive.unpushed_favorite_stickers().expect("lists");
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].0, "aa");
+        assert_eq!(stored.action.as_deref(), Some(&b"refs"[..]));
     }
 
     #[test]

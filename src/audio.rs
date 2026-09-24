@@ -255,6 +255,250 @@ impl Source for FileSamples {
     }
 }
 
+/// Window, synthesis hop, search radius and search stride of the
+/// streaming time-stretch, in samples at 48 kHz. One synthesis step
+/// emits one hop after scanning a few dozen candidates; all state stays
+/// within a few windows no matter how long the clip is.
+const STRETCH_WINDOW: usize = 2048;
+const STRETCH_HOP: usize = 512;
+const STRETCH_SEARCH: usize = 256;
+const STRETCH_STEP: usize = 8;
+/// Inputs shorter than two hops bypass the stretch and play unchanged:
+/// periodicity is meaningless below one window, so identity beats any
+/// resampling there. Bounded prebuffer, read once at construction.
+const STRETCH_PASSTHROUGH: usize = 2 * STRETCH_HOP;
+/// Output length promise: within one window plus one hop of input over
+/// speed (2560 samples, about 53 ms at 48 kHz). The first frame has no
+/// tail to blend with and the tail flush pads one partial frame at most.
+/// Time-stretch preserving pitch for mono 48 kHz samples: emitted audio
+/// is made of the original samples, so periodicity survives while tempo
+/// follows speed. The sink always runs at 1x; only this source shortens
+/// the stream. Both player inputs are mono 48 kHz by construction, so one
+/// channel-free implementation covers memory and spool sources alike.
+struct Stretched<S> {
+    inner: S,
+    hop_in: usize,
+    /// Lookahead with absolute index origin: buf[0] is input `consumed`.
+    buf: Vec<f32>,
+    consumed: u64,
+    /// Absolute input index of the next analysis frame.
+    next_in: u64,
+    /// Last emitted hop: the next junction blends against it.
+    last_out: [f32; STRETCH_HOP],
+    has_last: bool,
+    /// Input hop after the previous analysis start: the next frame must
+    /// continue this waveform, so similarity runs against it rather than
+    /// against the blended output behind it.
+    prev_cont: [f32; STRETCH_HOP],
+    /// Pending emission, capped well below one hop of backlog per pull.
+    out: Vec<f32>,
+    out_pos: usize,
+    exhausted: bool,
+    emitted: u64,
+    expected_out: u64,
+    /// Short input: drain the prebuffer unchanged and finish.
+    passthrough: bool,
+}
+
+impl<S: Iterator<Item = f32>> Stretched<S> {
+    fn new(mut inner: S, speed: f32, total_in: u64) -> Self {
+        debug_assert!(speed > 1.0);
+        let hop_in = ((STRETCH_HOP as f32) * speed).round().max(1.0) as usize;
+        let mut buf = Vec::with_capacity(STRETCH_WINDOW + hop_in + 2 * STRETCH_SEARCH);
+        let mut ended = false;
+        while buf.len() < STRETCH_PASSTHROUGH {
+            match inner.next() {
+                Some(sample) => buf.push(sample),
+                None => {
+                    ended = true;
+                    break;
+                }
+            }
+        }
+        let passthrough = ended;
+        let expected_out = if passthrough {
+            buf.len() as u64
+        } else {
+            (total_in as f64 / speed.max(1.0) as f64) as u64
+        };
+        Self {
+            inner,
+            hop_in,
+            buf,
+            consumed: 0,
+            next_in: 0,
+            last_out: [0.0; STRETCH_HOP],
+            has_last: false,
+            prev_cont: [0.0; STRETCH_HOP],
+            out: Vec::with_capacity(2 * STRETCH_HOP),
+            out_pos: 0,
+            exhausted: ended,
+            emitted: 0,
+            expected_out,
+            passthrough,
+        }
+    }
+
+    /// Absolute energy of a slice: silence skips the search entirely.
+    fn energy(values: &[f32]) -> f32 {
+        values.iter().map(|sample| sample.abs()).sum()
+    }
+
+    /// Best local offset around the expected analysis start, keeping
+    /// waveform continuity where the new hop joins the old audio.
+    fn best_offset(&self, rel: usize) -> isize {
+        // The frame must continue the input hop after the previous
+        // analysis start, not the blended output behind it: comparing
+        // against the output tail picks phase matches that skip the
+        // wrong amount of input and imprint the hop rate on the tone.
+        if !self.has_last || self.buf.len() < STRETCH_HOP || Self::energy(&self.prev_cont) < 1e-6 {
+            return 0;
+        }
+        let rel = rel.min(self.buf.len() - STRETCH_HOP);
+        let mut best = 0isize;
+        let mut best_cost = f32::INFINITY;
+        let mut delta = -(STRETCH_SEARCH as isize);
+        while delta <= STRETCH_SEARCH as isize {
+            let at = rel
+                .saturating_add_signed(delta)
+                .min(self.buf.len() - STRETCH_HOP);
+            let mut cost = 0.0;
+            for (prev, new) in self
+                .prev_cont
+                .iter()
+                .zip(self.buf[at..at + STRETCH_HOP].iter())
+            {
+                cost += (prev - new).abs();
+            }
+            if cost < best_cost {
+                best_cost = cost;
+                best = delta;
+            }
+            delta += STRETCH_STEP as isize;
+        }
+        best
+    }
+
+    /// One synthesis step: align, blend one hop, advance the pointer.
+    /// Returns false when the input is spent.
+    fn step(&mut self) -> bool {
+        if self.passthrough {
+            return false;
+        }
+        let rel = (self.next_in - self.consumed) as usize;
+        // Keep the search window plus one frame buffered.
+        while self.buf.len() < rel + STRETCH_WINDOW + STRETCH_SEARCH {
+            match self.inner.next() {
+                Some(sample) => self.buf.push(sample),
+                None => {
+                    self.exhausted = true;
+                    break;
+                }
+            }
+        }
+        if rel >= self.buf.len() {
+            return false;
+        }
+        let delta = self.best_offset(rel);
+        // Pad the tail with silence instead of dropping it.
+        let start = rel.saturating_add_signed(delta);
+        let mut aligned = [0.0f32; STRETCH_WINDOW];
+        let have = (self.buf.len() - start.min(self.buf.len())).min(STRETCH_WINDOW);
+        aligned[..have].copy_from_slice(&self.buf[start.min(self.buf.len())..][..have]);
+        if self.has_last {
+            for (index, (prev, new)) in self.last_out.iter().zip(aligned.iter()).enumerate() {
+                let t = (index + 1) as f32 / STRETCH_HOP as f32;
+                self.out.push(prev * (1.0 - t) + new * t);
+            }
+        } else {
+            self.out.extend_from_slice(&aligned[..STRETCH_HOP]);
+        }
+        self.last_out.copy_from_slice(&aligned[..STRETCH_HOP]);
+        self.has_last = true;
+        // Remember the true continuation for the next search: the input
+        // hop right after the 512 samples this step just consumed.
+        let cont = start.saturating_add(STRETCH_HOP).min(self.buf.len());
+        let have_cont = (self.buf.len() - cont).min(STRETCH_HOP);
+        self.prev_cont[..have_cont].copy_from_slice(&self.buf[cont..cont + have_cont]);
+        self.prev_cont[have_cont..].fill(0.0);
+        self.next_in += self.hop_in as u64;
+        // Forget everything the next search cannot reach.
+        let floor = self.next_in.saturating_sub(STRETCH_SEARCH as u64 + 1);
+        if floor > self.consumed {
+            let drop = (floor - self.consumed).min(self.buf.len() as u64) as usize;
+            self.buf.drain(..drop);
+            self.consumed += drop as u64;
+        }
+        true
+    }
+}
+
+impl<S: Iterator<Item = f32>> Iterator for Stretched<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.passthrough {
+            // Short input drains unchanged; out_pos doubles as cursor.
+            if self.out_pos < self.buf.len() {
+                let sample = self.buf[self.out_pos];
+                self.out_pos += 1;
+                self.emitted += 1;
+                return Some(sample);
+            }
+            return None;
+        }
+        if self.out_pos >= self.out.len() {
+            self.out.clear();
+            self.out_pos = 0;
+            if !self.step() {
+                return None;
+            }
+        }
+        let sample = self.out[self.out_pos];
+        self.out_pos += 1;
+        self.emitted += 1;
+        Some(sample)
+    }
+}
+
+impl<S: Iterator<Item = f32> + Send> Source for Stretched<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        // Spans only re-chunk the stream now that the sink never
+        // resamples: report what is actually queued or due.
+        if self.passthrough {
+            return Some(
+                self.buf
+                    .len()
+                    .saturating_sub(self.out_pos)
+                    .clamp(1, SPAN_SAMPLES),
+            );
+        }
+        let queued = self.out.len().saturating_sub(self.out_pos);
+        if queued > 0 {
+            return Some(queued.min(SPAN_SAMPLES));
+        }
+        Some(
+            self.expected_out
+                .saturating_sub(self.emitted)
+                .clamp(1, SPAN_SAMPLES as u64) as usize,
+        )
+    }
+
+    fn channels(&self) -> NonZero<u16> {
+        mono()
+    }
+
+    fn sample_rate(&self) -> NonZero<u32> {
+        rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(clip_length(
+            self.expected_out.min(usize::MAX as u64) as usize
+        ))
+    }
+}
+
 impl Player {
     pub fn new(waker: Waker) -> Self {
         Self {
@@ -270,14 +514,17 @@ impl Player {
 
     /// Sets the speed of one clip and applies it right away.
     ///
-    /// Rodio speeds a clip up by resampling, so the voice rises in pitch the
-    /// same way a tape would: faster means higher. The phone client instead
-    /// compresses time while keeping the pitch; matching that needs an
-    /// offline time-stretch of the decoded samples before they reach the
-    /// sink (see the WSOLA analysis in .local-roadmap). The change reaches the
-    /// clip that is playing at the moment it is made, from where it is.
+    /// Faster speeds compress time while keeping the pitch: the sink
+    /// always runs at 1x and a streaming time-stretch shortens the source
+    /// instead of resampling it. The change reaches the clip that is
+    /// playing at the moment it is made, from where it is on the original
+    /// timeline; a paused clip stays paused.
     pub fn set_speed(&mut self, message: &str, speed: f32) {
         let speed = snap_speed(speed);
+        let old = self.speed_of(message);
+        if speed == old {
+            return;
+        }
         // Rebase the marker first: the new speed only prices output after
         // this instant, so switching mid-clip neither jumps ahead nor rewinds.
         if let Some(loaded) = self.loaded.as_mut()
@@ -286,17 +533,48 @@ impl Player {
             && let Some((_, sink)) = &self.output
         {
             let total = loaded.total;
-            let old = self.speeds.get(message).copied().unwrap_or(1.0);
             loaded.base = speed_position(loaded.base, sink.get_pos(), loaded.base_sink, old, total);
             loaded.base_sink = sink.get_pos();
         }
         self.speeds.insert(message.to_owned(), speed);
-        let playing = self
-            .loaded
-            .as_ref()
-            .is_some_and(|loaded| loaded.message == message);
-        if playing && let Some((_, sink)) = &self.output {
-            sink.set_speed(speed);
+        // Rebuild the playing source at the same original-timeline
+        // position: tempo comes from the new source while the sink stays
+        // at 1x, and the cleared queue drops the stale speed with it.
+        let resume = match &self.loaded {
+            Some(loaded) if loaded.message == message && !loaded.done => {
+                let total = loaded.total;
+                let paused = loaded.paused;
+                match &self.output {
+                    Some((_, sink)) => {
+                        let position = speed_position(
+                            loaded.base,
+                            sink.get_pos(),
+                            loaded.base_sink,
+                            old,
+                            total,
+                        );
+                        Some((position, paused, total))
+                    }
+                    None => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((position, paused, total)) = resume {
+            let fraction = if total.is_zero() {
+                0.0
+            } else {
+                (position.as_secs_f64() / total.as_secs_f64()).clamp(0.0, 1.0) as f32
+            };
+            let _ = self.restart(fraction);
+            if paused {
+                if let Some((_, sink)) = &self.output {
+                    sink.pause();
+                }
+                if let Some(loaded) = self.loaded.as_mut() {
+                    loaded.paused = true;
+                }
+            }
         }
     }
 
@@ -308,6 +586,16 @@ impl Player {
     /// The message that just reached its end, reported once.
     pub fn take_finished(&mut self) -> Option<String> {
         self.finished.take()
+    }
+
+    /// The message with sound held right now, loaded or still decoding,
+    /// whether playing or paused. Deleting it must stop the player; any
+    /// other message keeps playing.
+    pub fn playing_message(&self) -> Option<&str> {
+        self.loaded
+            .as_ref()
+            .map(|loaded| loaded.message.as_str())
+            .or_else(|| self.decoding.as_ref().map(|job| job.message.as_str()))
     }
 
     /// Plays or pauses a message. Finished clips decode again; new clips decode first.
@@ -587,19 +875,31 @@ impl Player {
         }
         let (_, sink) = self.output.as_ref().expect("just opened");
         sink.clear();
-        // Every clip keeps the speed the reader chose for it.
+        // Every clip keeps the speed the reader chose for it. The sink
+        // always runs at 1x: tempo comes from a stretching source, and
+        // 1x keeps the original untouched path.
         let speed = self
             .loaded
             .as_ref()
             .map(|loaded| self.speed_of(&loaded.message))
             .unwrap_or(1.0);
-        sink.set_speed(speed);
+        sink.set_speed(1.0);
+        let stretched = speed != 1.0;
         // Seeking never copies the tail anymore: memory clips play from the
         // shared samples at an offset, file clips stream from their spool.
         let base = match start {
             Start::Memory { samples, offset } => {
                 let base = clip_length(offset);
-                sink.append(SharedSamples::new(samples, offset));
+                let tail = samples.len() - offset;
+                if stretched {
+                    sink.append(Stretched::new(
+                        SharedSamples::new(samples, offset),
+                        speed,
+                        tail as u64,
+                    ));
+                } else {
+                    sink.append(SharedSamples::new(samples, offset));
+                }
                 base
             }
             Start::File {
@@ -608,7 +908,16 @@ impl Player {
                 frames,
             } => {
                 let base = clip_length(skip.min(usize::MAX as u64) as usize);
-                sink.append(FileSamples::open(&spool, skip, frames)?);
+                if stretched {
+                    let total_in = frames.saturating_sub(skip);
+                    sink.append(Stretched::new(
+                        FileSamples::open(&spool, skip, frames)?,
+                        speed,
+                        total_in,
+                    ));
+                } else {
+                    sink.append(FileSamples::open(&spool, skip, frames)?);
+                }
                 base
             }
             Start::Reload { .. } => unreachable!("handled above"),
@@ -1103,6 +1412,79 @@ pub fn recording_path(dir: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    // Stretch fixtures: everything below is mono 48 kHz, the only
+    // shape the player ever feeds the stretcher.
+    const RATE: usize = 48_000;
+    fn sine(seconds: f32, freq: f32) -> Vec<f32> {
+        let total = (seconds * RATE as f32) as usize;
+        (0..total)
+            .map(|n| (2.0 * std::f32::consts::PI * freq * n as f32 / RATE as f32).sin())
+            .collect()
+    }
+    fn silence(seconds: f32) -> Vec<f32> {
+        vec![0.0; (seconds * RATE as f32) as usize]
+    }
+    // Deterministic pseudo-speech: pitch gliding 110 to 140 Hz,
+    // harmonics decaying 1/n, syllable-rate amplitude wobble. A
+    // periodicity probe, never a claim about intelligibility.
+    fn speech(seconds: f32) -> Vec<f32> {
+        let total = (seconds * RATE as f32) as usize;
+        // Phase integrates the gliding pitch, so the instantaneous
+        // frequency really sweeps 110 to 140 Hz.
+        let mut phase = 0.0f32;
+        (0..total)
+            .map(|n| {
+                let t = n as f32 / RATE as f32;
+                let pitch = 110.0 + 30.0 * t / seconds;
+                phase += 2.0 * std::f32::consts::PI * pitch / RATE as f32;
+                let harmonics =
+                    phase.sin() + 0.5 * (2.0 * phase).sin() + 0.33 * (3.0 * phase).sin();
+                let syllable = 0.6 + 0.4 * (2.0 * std::f32::consts::PI * 4.0 * t).sin();
+                0.4 * harmonics * syllable
+            })
+            .collect()
+    }
+    // Dominant frequency by rising zero crossings over the middle
+    // 80 percent, skipping junction and tail edges.
+    fn crossing_freq(samples: &[f32]) -> f32 {
+        let skip = samples.len() / 10;
+        let body = &samples[skip..samples.len() - skip];
+        let mut crossings = 0u32;
+        for pair in body.windows(2) {
+            if pair[0] <= 0.0 && pair[1] > 0.0 {
+                crossings += 1;
+            }
+        }
+        crossings as f32 / (body.len() as f32 / RATE as f32)
+    }
+    // Dominant pitch by normalized autocorrelation over lags for
+    // 60 to 300 Hz, measured on the middle half of the clip.
+    fn autocorr_pitch(samples: &[f32]) -> f32 {
+        let start = samples.len() / 4;
+        let body = &samples[start..start + samples.len() / 2];
+        let min_lag = RATE / 300;
+        let max_lag = RATE / 60;
+        let energy: f32 = body.iter().map(|s| s * s).sum();
+        let mut best_lag = min_lag;
+        let mut best_corr = f32::NEG_INFINITY;
+        for lag in min_lag..=max_lag.min(body.len() - 1) {
+            let mut corr = 0.0;
+            for (a, b) in body.iter().zip(body[lag..].iter()).step_by(7) {
+                corr += a * b;
+            }
+            if corr > best_corr {
+                best_corr = corr;
+                best_lag = lag;
+            }
+        }
+        let _ = energy;
+        RATE as f32 / best_lag as f32
+    }
+    fn stretched(samples: Vec<f32>, speed: f32) -> Vec<f32> {
+        let total = samples.len() as u64;
+        Stretched::new(samples.into_iter(), speed, total).collect()
+    }
+
     #[test]
     fn the_speed_cycle_walks_one_and_a_half_and_two() {
         assert_eq!(snap_speed(1.4), 1.5);
@@ -1116,6 +1498,251 @@ mod tests {
         assert_eq!(next_speed(1.9), 1.0);
     }
 
+    #[test]
+    fn stretch_keeps_tone_and_duration() {
+        // A 440 Hz tone keeps its pitch at every speed: zero crossings
+        // over the middle 80 percent resolve about 2 Hz here, so a 2
+        // percent band holds real preservation with room to spare.
+        // The 1x path is the untouched bare source, identical samples
+        // by construction; the stretcher only ever sees faster speeds.
+        let reference = crossing_freq(&sine(12.0, 440.0));
+        assert!((reference - 440.0).abs() / 440.0 < 0.02);
+        for speed in [1.5, 2.0] {
+            let out = stretched(sine(12.0, 440.0), speed);
+            let freq = crossing_freq(&out);
+            assert!(
+                (freq - reference).abs() / reference < 0.02,
+                "tone holds at {speed}x: {freq} Hz"
+            );
+            let expected = 12.0 * RATE as f32 / speed;
+            assert!(
+                (out.len() as f32 - expected).abs() < 4096.0,
+                "12 s lasts 12, 8, 6 s at {speed}x: {} samples",
+                out.len()
+            );
+        }
+    }
+
+    #[test]
+    fn stretch_silence_and_short_clips() {
+        for speed in [1.5, 2.0] {
+            let out = stretched(silence(1.0), speed);
+            let expected = RATE as f32 / speed;
+            assert!((out.len() as f32 - expected).abs() < 4096.0);
+            assert!(out.iter().all(|sample| *sample == 0.0));
+        }
+        // Below two hops the input drains unchanged: identity beats
+        // resampling where periodicity is meaningless.
+        let tiny: Vec<f32> = (0..100).map(|n| n as f32 / 100.0).collect();
+        for speed in [1.5, 2.0] {
+            let out = stretched(tiny.clone(), speed);
+            assert_eq!(out, tiny);
+        }
+        // Just above the threshold the length still tracks the ratio.
+        let small: Vec<f32> = (0..1500).map(|n| (n as f32 / 48.0).sin()).collect();
+        for speed in [1.5, 2.0] {
+            let out = stretched(small.clone(), speed);
+            assert!((out.len() as f32 - 1500.0 / speed).abs() < 4096.0);
+            assert_eq!(out[..512], small[..512]);
+        }
+    }
+
+    #[test]
+    fn stretch_speech_pitch_and_speech_duration() {
+        // Periodicity probe across speeds, never an intelligibility
+        // claim: the 110 to 140 Hz glide must read back near itself.
+        // The 1x reference is the bare input the untouched path emits.
+        let input = speech(4.0);
+        let reference = autocorr_pitch(&input);
+        assert!((100.0..150.0).contains(&reference));
+        for speed in [1.5, 2.0] {
+            let out = stretched(input.clone(), speed);
+            let pitch = autocorr_pitch(&out);
+            assert!(
+                (100.0..150.0).contains(&pitch),
+                "glide range at {speed}x: {pitch}"
+            );
+            assert!(
+                (pitch - reference).abs() / reference < 0.05,
+                "pitch holds at {speed}x: {pitch} Hz over {reference} Hz"
+            );
+            let expected = 4.0 * RATE as f32 / speed;
+            assert!((out.len() as f32 - expected).abs() < 4096.0);
+        }
+    }
+
+    #[test]
+    fn stretch_restart_offset_keeps_content_and_ratio() {
+        // A speed switch rebuilds from an original-timeline offset, the
+        // same shape restart() uses: the fresh source opens on the input
+        // slice and shortens what follows by the new speed.
+        let input = Arc::new(sine(4.0, 220.0));
+        let offset = 48_000;
+        let tail = input.len() - offset;
+        let out: Vec<f32> = Stretched::new(
+            SharedSamples::new(Arc::clone(&input), offset),
+            1.5,
+            tail as u64,
+        )
+        .collect();
+        assert_eq!(out[..512], input[offset..offset + 512]);
+        assert!((out.len() as f32 - tail as f32 / 1.5).abs() < 4096.0);
+    }
+
+    #[test]
+    fn stretch_memory_stays_bounded_on_long_audio() {
+        // Fifteen minutes as a generator, never a Vec: the stretcher
+        // must pull through with constant state and an exact count.
+        struct Gen(u64);
+        impl Iterator for Gen {
+            type Item = f32;
+            fn next(&mut self) -> Option<f32> {
+                if self.0 == 0 {
+                    return None;
+                }
+                self.0 -= 1;
+                Some(0.25)
+            }
+        }
+        let total_in: u64 = 48_000 * 60 * 15;
+        let mut stretcher = Stretched::new(Gen(total_in), 2.0, total_in);
+        let mut count = 0u64;
+        while stretcher.next().is_some() {
+            count += 1;
+        }
+        assert!((count as f64 - total_in as f64 / 2.0).abs() < 4096.0);
+        assert!(stretcher.buf.capacity() <= 16_384);
+        assert!(stretcher.out.capacity() <= 2 * STRETCH_HOP);
+    }
+
+    /// 48 kHz mono 16-bit WAV bytes for listening samples and fixtures.
+    fn wav_48k(samples: &[f32]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + samples.len() as u32 * 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&48_000u32.to_le_bytes());
+        bytes.extend_from_slice(&96_000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(samples.len() as u32 * 2).to_le_bytes());
+        for sample in samples {
+            let clamped = sample.clamp(-1.0, 1.0);
+            bytes.extend_from_slice(&((clamped * 32767.0) as i16).to_le_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn stretch_spool_source_keeps_tone_and_ratio() {
+        // The production file path: synthetic speech through a WAV
+        // fixture, spool decode, then the same stretcher the sink pulls.
+        let dir = std::env::temp_dir().join(format!("zapfast-stretch-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("speech.wav");
+        std::fs::write(&path, wav_48k(&speech(2.0))).expect("writes");
+        let spool = decode_to_spool(&path).expect("spools");
+        let total_in = spool.frames;
+        let out: Vec<f32> = Stretched::new(
+            FileSamples::open(&spool.path, 0, spool.frames).expect("streams"),
+            2.0,
+            total_in,
+        )
+        .collect();
+        assert!((out.len() as f32 - total_in as f32 / 2.0).abs() < 4096.0);
+        assert!((100.0..150.0).contains(&autocorr_pitch(&out)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generate_listening_samples() {
+        // Same synthetic speech through the production stretcher at
+        // 1x, 1.5x and 2x, for listening by ear. Synthetic prosody
+        // only: natural-voice quality is not claimed by any test here.
+        let dir = std::path::PathBuf::from(".local-roadmap/voice-samples");
+        std::fs::create_dir_all(&dir).expect("creates");
+        let input = speech(4.0);
+        for (name, speed) in [
+            ("speech-1x.wav", 1.0),
+            ("speech-15x.wav", 1.5),
+            ("speech-2x.wav", 2.0),
+        ] {
+            let rendered = if speed == 1.0 {
+                input.clone()
+            } else {
+                stretched(input.clone(), speed)
+            };
+            std::fs::write(dir.join(name), wav_48k(&rendered)).expect("writes");
+        }
+    }
+
+    #[test]
+    fn speed_switch_without_output_only_records() {
+        // Without an output device a speed switch only records: the
+        // device opens later through restart, which reads the choice.
+        // Restart, pause and the rebuilt source need a live sink, so
+        // they stay covered by inspection, not by this headless test.
+        let dir = std::env::temp_dir().join(format!("zapfast-voice-nosink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("note.wav");
+        std::fs::write(&path, wav_bytes()).expect("writes");
+        let mut player = Player::new(crate::backend::Waker::default());
+        player.toggle("m1", &path).expect("loads");
+        player.set_speed("m1", 2.0);
+        assert_eq!(player.speed_of("m1"), 2.0);
+        assert!(player.output.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn deleting_the_playing_message_really_stops() {
+        // Cessation by identity: the setup needs no audio device, only a
+        // decodable file, because loading registers before output opens.
+        let dir = std::env::temp_dir().join(format!("zapfast-voice-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("creates");
+        let path = dir.join("note.wav");
+        std::fs::write(&path, wav_bytes()).expect("writes");
+        let mut player = Player::new(crate::backend::Waker::default());
+        player.toggle("m1", &path).expect("loads");
+        assert_eq!(player.playing_message(), Some("m1"));
+        // An unrelated message keeps its sound.
+        let mut other = Player::new(crate::backend::Waker::default());
+        other.toggle("m2", &path).expect("loads");
+        other.stop();
+        assert_eq!(other.playing_message(), None);
+        assert!(!other.is_playing());
+        player.stop();
+        assert_eq!(player.playing_message(), None);
+        assert!(!player.is_playing());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Half a second of mono 16-bit PCM silence with a header: decodable
+    /// with no device and no dependencies.
+    fn wav_bytes() -> Vec<u8> {
+        let samples: Vec<i16> = (0..4000).map(|_| 0).collect();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + samples.len() as u32 * 2).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8000u32.to_le_bytes());
+        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(samples.len() as u32 * 2).to_le_bytes());
+        for sample in samples {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        bytes
+    }
     #[test]
     fn a_speed_stays_with_the_clip_it_was_set_on() {
         let mut player = Player::new(crate::backend::Waker::default());
