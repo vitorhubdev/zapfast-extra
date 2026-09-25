@@ -1879,7 +1879,7 @@ mod tests {
         }
         let spooled = decode_to_spool(&path).expect("the soundtrack decodes");
         assert!(
-            spooled.frames >= u64::from(PCM_RATE) * 3 / 4,
+            spooled.frames >= u64::from(voice::RATE) * 3 / 4,
             "the whole soundtrack must decode, got only {} frames",
             spooled.frames
         );
