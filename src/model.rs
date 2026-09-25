@@ -143,6 +143,9 @@ pub struct LastMessage {
     /// Group-message sender.
     pub sender_name: Option<String>,
     pub summary: String,
+    /// The whole message behind `summary`, every line of it. Chat rows use
+    /// this only for the hover preview when the one-line text was truncated.
+    pub full: String,
     pub status: Delivery,
 }
 
@@ -442,6 +445,23 @@ impl Content {
         Self::Text {
             text: text.into(),
             preview: None,
+        }
+    }
+
+    /// The complete text behind the one-line chat summary. Text and captions
+    /// keep every line; content without a longer representation reuses summary.
+    pub fn full_summary(&self) -> String {
+        let captioned = |label: &str, caption: &Option<String>| match caption.as_deref() {
+            Some(caption) if !caption.trim().is_empty() => format!("{label}: {caption}"),
+            _ => label.to_owned(),
+        };
+        match self {
+            Self::Text { text, .. } => text.clone(),
+            Self::Image { caption, .. } => captioned("Photo", caption),
+            Self::Video { caption, gif, .. } => {
+                captioned(if *gif { "GIF" } else { "Video" }, caption)
+            }
+            _ => self.summary(),
         }
     }
 
@@ -902,6 +922,8 @@ pub enum Action {
     },
     /// Toggles a message in the multi-select set of the open chat.
     ToggleSelect(String),
+    /// Selects every selectable message from the previous selection anchor to this one.
+    SelectRange(String),
     /// Leaves multi-select mode without doing anything.
     ClearSelection,
     /// Loads an outgoing message into the composer for editing.
