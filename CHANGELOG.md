@@ -2,6 +2,31 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.91] - 2026-09-25
+
+### Fixed
+
+- A phone sticker whose descriptor changes can be fetched again after earlier failures. Bytes that do not parse as sticker metadata do not use up that retry. A fetched file is what the picker lists. A favorite and an imported pack stay.
+
+### Tests
+
+- Voice notes at two minutes use overlap-add. One sample past that still uses the streaming hop blend, which is the path that hissed. A later player could overlap-add windows of about twenty seconds and keep only that window. Listening is still required, including every clip longer than two minutes.
+- The formant samples at 1x, 1.5x and 2x are written again under the local voice-samples folder. The high-band gap is a hint, not proof that the sound is clean.
+
+## [1.0.90] - 2026-09-25
+
+### Tests
+
+- The 1.5x and 2x voice comparison uses a noise burst and a three-formant pulse, not a click on a sine. On that signal the overlap-add has less high-band energy than the old hop blend. A steeper sample step is the pulse, not hiss. The clips are written under the local voice-samples folder. Listening on a device is still required. This does not describe video soundtracks.
+- Sticker recovery is classified: a broken phone-cache copy is removed and its path cleared, a cache path with no file is cleared, a saved file outside that cache stays, and raw bytes that are not sticker metadata are not a download reference.
+
+## [1.0.89] - 2026-09-25
+
+### Fixed
+
+- Arabic-Indic digits in a left-to-right line stay in the order they were typed. `٤٥` no longer paints as `٥٤`.
+- The soundtrack test for an interleaved video checks that about six seconds of audio decode, not merely that some frames exist. The Rodio pin that stops the track after the first video packet was already in place.
+
 ## [1.0.88] - 2026-09-25
 
 ### Fixed

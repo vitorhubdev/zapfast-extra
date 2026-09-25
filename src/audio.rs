@@ -259,11 +259,19 @@ impl Source for FileSamples {
 /// from ZapFast 0.16.2. Longer audio keeps the streaming stretcher.
 const STRETCH_OFFLINE: u64 = 120 * voice::RATE as u64;
 
+/// Clips at or under two minutes use overlap-add. Longer clips still use the
+/// streaming hop blend. A bounded replacement would overlap-add windows of
+/// about twenty seconds and keep only that window, carrying one frame across
+/// each join. That player is not what runs past this limit.
+fn stretch_offline(total_in: u64) -> bool {
+    total_in > 0 && total_in <= STRETCH_OFFLINE
+}
+
 fn append_stretched<S>(sink: &rodio::Player, samples: S, speed: f32, total_in: u64)
 where
     S: Iterator<Item = f32> + Send + 'static,
 {
-    if total_in > 0 && total_in <= STRETCH_OFFLINE {
+    if stretch_offline(total_in) {
         let gathered: Vec<f32> = samples.take(total_in as usize).collect();
         let compressed = crate::timestretch::speed_up(&gathered, speed);
         sink.append(rodio::buffer::SamplesBuffer::new(
@@ -1582,11 +1590,14 @@ mod tests {
             "overlap-add peak {}",
             peak(&upstream)
         );
-        let fork_jump = max_jump(&fork);
-        let upstream_jump = max_jump(&upstream);
+        // A plain sample step is higher for overlap-add on this formant
+        // (about 0.029 against 0.026). That is the pulse slope, not hiss.
+        // The second difference is the high band the hop blend was raising.
+        let fork_hiss = high_band(&fork);
+        let upstream_hiss = high_band(&upstream);
         assert!(
-            upstream_jump < fork_jump,
-            "overlap-add jump {upstream_jump} should be under the hop blend {fork_jump}"
+            upstream_hiss < fork_hiss,
+            "formant overlap-add high band {upstream_hiss} should be under the hop blend {fork_hiss}"
         );
         let dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local-roadmap/voice-samples");
@@ -1598,8 +1609,24 @@ mod tests {
             &dir.join("speech-like-2x-overlap-add.wav"),
             &crate::timestretch::speed_up(&input, 2.0),
         );
+        write_wav(&dir.join("speech-like-2x-hop-blend.wav"), &fork_2x());
     }
 
+    fn fork_2x() -> Vec<f32> {
+        stretched(speech_like(), 2.0)
+    }
+
+    #[test]
+    fn two_minutes_is_the_overlap_add_limit() {
+        let limit = 120 * voice::RATE as u64;
+        assert!(stretch_offline(limit));
+        assert!(!stretch_offline(limit + 1));
+        assert!(!stretch_offline(0));
+    }
+
+    /// A short voiced stretch: a noise burst, then a 120 Hz pulse with three
+    /// formants. This is not a recording of speech. It is the signal the
+    /// stretch comparison is allowed to use.
     fn speech_like() -> Vec<f32> {
         let mut out = Vec::new();
         for i in 0..(voice::RATE as usize / 5) {
@@ -1607,23 +1634,42 @@ mod tests {
             let noise = ((i as u32).wrapping_mul(17).wrapping_mul(1_103_515_245) as f32
                 / u32::MAX as f32)
                 - 0.5;
-            out.push(noise * (1.0 - n * 4.0).max(0.0));
+            out.push(noise * (1.0 - n * 4.0).max(0.0) * 0.3);
         }
+        let rate = voice::RATE as f32;
         for i in 0..(voice::RATE as usize / 2) {
-            let t = i as f32 / voice::RATE as f32;
-            let vowel = (t * 120.0 * std::f32::consts::TAU).sin() * 0.4
-                + (t * 240.0 * std::f32::consts::TAU).sin() * 0.15;
-            let click = if i == 2000 { 0.9 } else { 0.0 };
-            out.push(vowel + click);
+            let t = i as f32 / rate;
+            let cycle = (t * 120.0).fract();
+            let pulse = if cycle < 0.4 {
+                (cycle / 0.4 * std::f32::consts::PI).sin()
+            } else {
+                0.0
+            };
+            let f1 = (t * 700.0 * std::f32::consts::TAU).sin() * 0.35;
+            let f2 = (t * 1220.0 * std::f32::consts::TAU).sin() * 0.2;
+            let f3 = (t * 2600.0 * std::f32::consts::TAU).sin() * 0.08;
+            out.push(pulse * 0.45 + f1 + f2 + f3);
         }
         out
     }
 
-    fn max_jump(samples: &[f32]) -> f32 {
-        samples
-            .windows(2)
-            .map(|pair| (pair[1] - pair[0]).abs())
-            .fold(0.0, f32::max)
+    /// Energy of the second difference over the steady vowel, after the burst.
+    /// That is the high band. A click or a steeper formant slope would dominate
+    /// a plain sample-to-sample maximum and would not describe hiss.
+    fn high_band(samples: &[f32]) -> f32 {
+        let start = voice::RATE as usize / 5;
+        let body = samples.get(start..).unwrap_or(samples);
+        if body.len() < 3 {
+            return 0.0;
+        }
+        let sum: f32 = body
+            .windows(3)
+            .map(|w| {
+                let d = w[2] - 2.0 * w[1] + w[0];
+                d * d
+            })
+            .sum();
+        (sum / (body.len() - 2) as f32).sqrt()
     }
 
     fn peak(samples: &[f32]) -> f32 {
@@ -1975,8 +2021,8 @@ mod tests {
         let path = dir.join("clip.mp4");
         let made = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-y"])
-            .args(["-f", "lavfi", "-i", "color=c=blue:s=64x64:d=1"])
-            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=1"])
+            .args(["-f", "lavfi", "-i", "color=c=blue:s=64x64:d=6:r=10"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=6"])
             .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
             .args(["-c:a", "aac", "-shortest", "-movflags", "+faststart"])
             .arg(&path)
@@ -1986,7 +2032,15 @@ mod tests {
             return;
         }
         let spooled = decode_to_spool(&path).expect("the soundtrack decodes");
-        assert!(spooled.frames > 0, "the clip is not empty");
+        // An interleaved MP4 used to stop the soundtrack after the first
+        // video packet, leaving about a tenth of a second. Frames above
+        // zero do not catch that.
+        let seconds = spooled.frames as f64 / f64::from(voice::RATE);
+        assert!(
+            seconds >= 5.5,
+            "the whole soundtrack decodes, got {seconds:.2}s from {} frames",
+            spooled.frames
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

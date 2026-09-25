@@ -28,13 +28,24 @@ pub fn layout_job(ui: &egui::Ui, job: egui::text::LayoutJob) -> std::sync::Arc<G
     // egui hands back a shared, cached galley, so every mutation below copies
     // it first. Text without a strongly RTL paragraph needs no reordering at
     // all: hand the cached galley back untouched instead of cloning it.
-    if !paragraph_slices(galley.text())
-        .iter()
-        .any(|p| paragraph_rtl(p))
-    {
+    let paragraphs = paragraph_slices(galley.text());
+    let reorder = paragraphs.iter().any(|p| paragraph_rtl(p));
+    // Arabic-Indic digits have no strong direction. egui places that run
+    // right-to-left, so ٤٥ paints as ٥٤. Put those runs back in logical order
+    // when the paragraph itself is not RTL.
+    let indic = paragraphs.iter().any(|p| indic_digits_in_ltr(p));
+    if !reorder && !indic {
         return galley;
     }
-    reorder_rtl_runs(std::sync::Arc::make_mut(&mut galley));
+    {
+        let galley = std::sync::Arc::make_mut(&mut galley);
+        if reorder {
+            reorder_rtl_runs(galley);
+        }
+        if indic {
+            restore_indic_digit_order(galley);
+        }
+    }
     galley
 }
 
@@ -327,6 +338,67 @@ fn shift_decoration_mesh(
 
 fn paragraph_rtl(text: &str) -> bool {
     text.chars().find_map(strong_direction).unwrap_or(false)
+}
+
+fn indic_digits_in_ltr(text: &str) -> bool {
+    !paragraph_rtl(text) && text.chars().any(is_indic_digit)
+}
+
+fn is_indic_digit(c: char) -> bool {
+    CodePointMapData::<BidiClass>::new().get(c) == BidiClass::ArabicNumber
+}
+
+/// egui lays Arabic-Indic digits right-to-left inside an otherwise LTR line.
+/// Move each run back to logical order. RTL paragraphs keep egui's placement.
+fn restore_indic_digit_order(galley: &mut Galley) {
+    let paragraphs: Vec<String> = paragraph_slices(galley.text())
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    if paragraphs.is_empty() {
+        return;
+    }
+    let mut para_index = 0;
+    for placed in &mut galley.rows {
+        let paragraph = paragraphs
+            .get(para_index)
+            .map(String::as_str)
+            .unwrap_or_else(|| paragraphs.last().map(String::as_str).unwrap_or(""));
+        if indic_digits_in_ltr(paragraph) {
+            let row = Arc::make_mut(&mut placed.row);
+            restore_indic_row(&mut row.glyphs, &mut row.visuals, paragraph);
+            row.visuals.mesh_bounds = row.visuals.mesh.calc_bounds();
+        }
+        if placed.ends_with_newline {
+            para_index = (para_index + 1).min(paragraphs.len().saturating_sub(1));
+        }
+    }
+}
+
+fn restore_indic_row(glyphs: &mut [Glyph], visuals: &mut RowVisuals, paragraph: &str) {
+    let mut by_x: Vec<usize> = glyphs
+        .iter()
+        .enumerate()
+        .filter(|(_, glyph)| is_indic_digit(glyph.chr) && glyph.advance_width > 0.01)
+        .map(|(index, _)| index)
+        .collect();
+    if by_x.len() < 2 {
+        return;
+    }
+    by_x.sort_by(|&a, &b| glyphs[a].pos.x.total_cmp(&glyphs[b].pos.x));
+    let visual: Vec<char> = by_x.iter().map(|&index| glyphs[index].chr).collect();
+    let logical: Vec<char> = paragraph.chars().filter(|&c| is_indic_digit(c)).collect();
+    let reversed: Vec<char> = logical.iter().rev().copied().collect();
+    if visual != reversed {
+        return;
+    }
+    let xs: Vec<f32> = by_x.iter().map(|&index| glyphs[index].pos.x).collect();
+    for (index, new_x) in by_x.into_iter().rev().zip(xs) {
+        let glyph = glyphs[index];
+        let delta = egui::Vec2::new(new_x - glyph.pos.x, 0.0);
+        shift_glyph_mesh(&mut visuals.mesh, &glyph, delta);
+        glyphs[index].pos.x = new_x;
+    }
 }
 
 fn strong_direction(c: char) -> Option<bool> {
@@ -982,6 +1054,15 @@ mod tests {
         assert!(is_strong_rtl('ب'));
         assert!(!is_strong_rtl('1'));
         assert!(!is_strong_rtl('٠')); // Arabic-Indic digit, not strong
+        // No strong RTL letter: egui must still keep logical order. The
+        // upstream bug painted ٤٥ as ٥٤.
+        let mut digits = layout_raw("٤٥");
+        restore_indic_digit_order(&mut digits);
+        assert_eq!(
+            visible_by_x_row(&digits, 0),
+            vec!['٤', '٥'],
+            "arabic-indic digits stay in logical order"
+        );
         assert!(!is_strong_ltr('1'));
         assert!(paragraph_rtl("הכלב הגדול קפץ"));
         assert!(!paragraph_rtl("OK הכלב end"));

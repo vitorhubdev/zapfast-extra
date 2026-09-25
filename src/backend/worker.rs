@@ -2867,20 +2867,7 @@ impl Worker {
             );
         }
         for sticker in &parsed.stickers {
-            let Some(hash) = sticker_hash(
-                sticker.file_sha256.as_deref(),
-                sticker.file_enc_sha256.as_deref(),
-            ) else {
-                continue;
-            };
-            if let Err(error) = self.archive.upsert_phone_sticker(
-                &hash,
-                &sticker.encode_to_vec(),
-                seconds(sticker.last_sticker_sent_ts.unwrap_or(0)),
-                sticker.weight.unwrap_or(0.0),
-            ) {
-                log::warn!("could not store sticker {hash}: {error}");
-            }
+            self.store_phone_sticker(sticker);
         }
         for chat in &parsed.chats {
             if let (Some(lid), Some(pn)) = (&chat.lid_jid, &chat.pn_jid)
@@ -3859,16 +3846,7 @@ impl Worker {
             Command::StickerFetched { hash, result } => {
                 self.sticker_fetches.remove(&hash);
                 match result {
-                    Ok(path) => {
-                        // The file name carries the hash the phone announced,
-                        // but the identity the picker uses is the hash of the
-                        // bytes. If they ever disagree, the bytes win, so the
-                        // copy cannot show twice under two names.
-                        let path = self.adopt_fetched_sticker(&hash, &path);
-                        if let Err(error) = self.archive.set_sticker_path(&hash, &path) {
-                            log::warn!("could not file sticker {hash}: {error}");
-                        }
-                    }
+                    Ok(path) => self.file_fetched_sticker(&hash, path),
                     Err(error) => {
                         // Leave a sticker that keeps failing alone for now.
                         *self.sticker_tries.entry(hash.clone()).or_insert(0) += 1;
@@ -4950,6 +4928,45 @@ impl Worker {
         true
     }
 
+    /// Stores a phone sticker. A changed descriptor clears the retry count so
+    /// a renewed reference is fetched again after earlier failures.
+    fn store_phone_sticker(&mut self, sticker: &wa::StickerMetadata) {
+        let Some(hash) = sticker_hash(
+            sticker.file_sha256.as_deref(),
+            sticker.file_enc_sha256.as_deref(),
+        ) else {
+            return;
+        };
+        let raw = sticker.encode_to_vec();
+        let changed = self
+            .archive
+            .phone_stickers()
+            .ok()
+            .and_then(|list| list.into_iter().find(|row| row.hash == hash))
+            .is_none_or(|row| row.raw != raw);
+        if changed {
+            self.sticker_tries.remove(&hash);
+        }
+        if let Err(error) = self.archive.upsert_phone_sticker(
+            &hash,
+            &raw,
+            seconds(sticker.last_sticker_sent_ts.unwrap_or(0)),
+            sticker.weight.unwrap_or(0.0),
+        ) {
+            log::warn!("could not store sticker {hash}: {error}");
+        }
+    }
+
+    /// Files a downloaded sticker and tells the picker. The bytes' own hash
+    /// wins over the name the phone announced.
+    fn file_fetched_sticker(&mut self, hash: &str, path: PathBuf) {
+        let path = self.adopt_fetched_sticker(hash, &path);
+        if let Err(error) = self.archive.set_sticker_path(hash, &path) {
+            log::warn!("could not file sticker {hash}: {error}");
+        }
+        self.emit_stickers();
+    }
+
     /// Downloads missing recent and archived stickers for the picker.
     fn fetch_missing_stickers(&mut self) {
         let Some(client) = self.client.clone() else {
@@ -4966,6 +4983,9 @@ impl Worker {
         for sticker in stickers_to_fetch(phone, &self.sticker_fetches, &self.sticker_tries) {
             self.sticker_fetches.insert(sticker.hash.clone());
             let Ok(meta) = wa::StickerMetadata::decode_from_slice(&sticker.raw) else {
+                // A descriptor that does not parse is not a failed download.
+                // Leave the try count alone so a later, valid descriptor can
+                // still be fetched.
                 self.sticker_fetches.remove(&sticker.hash);
                 continue;
             };
@@ -5527,6 +5547,10 @@ impl Worker {
         let saved = self.dirs.saved_sticker_dir().join(format!("{hash}.webp"));
         if saved.is_file() {
             return Some(saved);
+        }
+        let cached = self.dirs.sticker_cache_dir().join(format!("{hash}.webp"));
+        if cached.is_file() {
+            return Some(cached);
         }
         if let Some(found) = packs
             .iter()
@@ -9718,6 +9742,196 @@ mod tests {
         // Unknown files are ignored instead of erroring.
         worker.heal_sticker(std::path::Path::new("/definitely/not/here.webp"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Four legacy picker failures, each with a different cause. A saved
+    /// file that is neither cache nor a chat attachment is never deleted.
+    #[test]
+    fn legacy_sticker_failures_are_classified_without_deleting_saved_files() {
+        let (mut worker, _events, _inbox, _wa) = worker();
+        let cache = worker.dirs.sticker_cache_dir();
+        std::fs::create_dir_all(&cache).expect("cache");
+        let saved_dir =
+            std::env::temp_dir().join(format!("zapfast-saved-sticker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&saved_dir);
+        std::fs::create_dir_all(&saved_dir).expect("saved");
+        let saved = saved_dir.join("kept.webp");
+        std::fs::write(&saved, b"RIFF").expect("saved bytes");
+
+        let broken = cache.join("aa.webp");
+        std::fs::write(&broken, b"not a webp").expect("broken cache");
+        worker
+            .archive
+            .upsert_phone_sticker("aa", b"not-a-protobuf", 10, 1.0)
+            .expect("row");
+        worker
+            .archive
+            .set_sticker_path("aa", &broken)
+            .expect("path");
+        worker.heal_sticker(&broken);
+        assert!(!broken.exists(), "a broken cache copy is removed");
+        assert!(
+            worker
+                .archive
+                .phone_stickers()
+                .expect("list")
+                .iter()
+                .any(|sticker| sticker.hash == "aa" && sticker.path.is_none()),
+            "the phone row stays, without a file, so a later fetch can try"
+        );
+        assert!(
+            wa::StickerMetadata::decode_from_slice(b"not-a-protobuf").is_err(),
+            "that raw row is not a download reference"
+        );
+
+        let missing = cache.join("bb.webp");
+        worker
+            .archive
+            .upsert_phone_sticker("bb", b"also-not", 9, 1.0)
+            .expect("row");
+        worker
+            .archive
+            .set_sticker_path("bb", &missing)
+            .expect("path");
+        worker.heal_sticker(&missing);
+        assert!(
+            worker
+                .archive
+                .phone_stickers()
+                .expect("list")
+                .iter()
+                .any(|sticker| sticker.hash == "bb" && sticker.path.is_none()),
+            "a cache path with no file is cleared"
+        );
+
+        worker.heal_sticker(&saved);
+        assert_eq!(std::fs::read(&saved).expect("still there"), b"RIFF");
+        let _ = std::fs::remove_dir_all(&saved_dir);
+    }
+
+    /// A valid descriptor, after a bad one used up its tries, downloads into
+    /// the picker. A favorite and an imported pack stay.
+    #[tokio::test]
+    async fn a_renewed_sticker_descriptor_reaches_the_picker() {
+        let (mut worker, events, _inbox, _wa) = worker();
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([20, 180, 90, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::WebP,
+        )
+        .expect("webp");
+        let digest = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(&bytes).to_vec()
+        };
+        let hash = sticker_hash(Some(&digest), None).expect("hash");
+        worker.sticker_tries.insert(hash.clone(), STICKER_TRIES);
+        worker
+            .archive
+            .upsert_phone_sticker(&hash, b"not-a-protobuf", 1, 1.0)
+            .expect("old row");
+        assert!(
+            wa::StickerMetadata::decode_from_slice(b"not-a-protobuf").is_err(),
+            "the old raw is not discarded as a used-up download"
+        );
+        assert!(
+            !worker.sticker_tries.contains_key(&hash)
+                || worker.sticker_tries[&hash] == STICKER_TRIES
+        );
+        let meta = wa::StickerMetadata {
+            file_sha256: Some(digest),
+            mimetype: Some("image/webp".into()),
+            width: Some(8),
+            height: Some(8),
+            direct_path: Some("/synthetic/sticker".into()),
+            file_length: Some(bytes.len() as u64),
+            ..Default::default()
+        };
+        worker.store_phone_sticker(&meta);
+        assert!(
+            !worker.sticker_tries.contains_key(&hash),
+            "a new descriptor clears the retry count"
+        );
+        let listed = stickers_to_fetch(
+            worker.archive.phone_stickers().expect("list"),
+            &HashSet::new(),
+            &worker.sticker_tries,
+        );
+        assert!(listed.iter().any(|sticker| sticker.hash == hash));
+        worker
+            .archive
+            .set_favorite_sticker(&hash, true, 5, Some(b"fav"), true)
+            .expect("favorite");
+        let pack_dir = worker.packs_dir().join("pack");
+        std::fs::create_dir_all(&pack_dir).expect("pack");
+        let mut pack_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([9, 9, 9, 255]),
+        ))
+        .write_to(
+            &mut std::io::Cursor::new(&mut pack_bytes),
+            image::ImageFormat::WebP,
+        )
+        .expect("pack webp");
+        let pack_hash = crate::stickers::hash_of(&pack_bytes);
+        let pack_file = pack_dir.join(format!("{pack_hash}.webp"));
+        std::fs::write(&pack_file, &pack_bytes).expect("pack sticker");
+        let cache = worker.dirs.sticker_cache_dir();
+        std::fs::create_dir_all(&cache).expect("cache");
+        let landed = cache.join(format!("{hash}.webp"));
+        std::fs::write(&landed, &bytes).expect("download");
+        worker.file_fetched_sticker(&hash, landed);
+        let shown = events
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Stickers {
+                    recent,
+                    favorites,
+                    packs,
+                    ..
+                } => Some((recent, favorites, packs)),
+                _ => None,
+            })
+            .last()
+            .expect("picker update");
+        let mut listed = shown
+            .0
+            .iter()
+            .chain(shown.1.iter())
+            .chain(shown.2.iter().flat_map(|pack| pack.stickers.iter()));
+        assert!(
+            listed.any(|path| {
+                path.is_file()
+                    && path.file_stem().and_then(|stem| stem.to_str()) == Some(hash.as_str())
+            }),
+            "the picker receives the downloaded sticker"
+        );
+        assert!(
+            shown.1.iter().any(|path| path.is_file()),
+            "the favorite is still listed"
+        );
+        assert!(
+            shown
+                .2
+                .iter()
+                .any(|pack| pack.stickers.iter().any(|path| path.is_file())),
+            "the imported pack is still listed"
+        );
+        assert!(
+            worker
+                .archive
+                .favorite_sticker(&hash)
+                .expect("reads")
+                .is_some_and(|row| row.favorite),
+            "the favorite row is kept"
+        );
     }
 
     #[test]

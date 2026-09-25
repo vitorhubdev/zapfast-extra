@@ -1,0 +1,9 @@
+[package]
+name = "store-probe-old"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "860744fb634e9b1703d69626180c66ae07c1ff04", default-features = false, features = ["sqlite-storage", "tokio-runtime"] }
