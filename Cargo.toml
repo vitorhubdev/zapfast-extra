@@ -1,6 +1,6 @@
 [package]
 name = "zapfast"
-version = "1.0.61"
+version = "1.0.76"
 authors = ["Vitor (ZapExt fork) <108148783+vitorhubdev@users.noreply.github.com>"]
 edition = "2024"
 rust-version = "1.98"
@@ -55,7 +55,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # on stable and includes snapshot recovery and no-progress conflict handling
 # (upstream #1365, #1374 and #1375). Selected features provide Tokio transport, ureq media downloads,
 # and the SQLite device store. The window handles shutdown instead of `signal`.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "860744fb634e9b1703d69626180c66ae07c1ff04", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 # SQLCipher encrypts the archive; the device store shares the same library.
 # Bundle OpenSSL so all release platforms use the same encryption provider.
@@ -96,13 +96,31 @@ resvg = { version = "0.45", default-features = false }
 notify-rust = { version = "4", default-features = false, features = ["z"] }
 openh264 = "0.9"
 mp4 = "0.14"
-rodio = { version = "0.22", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
+# Rodio 0.22 can stop an interleaved MP4 soundtrack at the first packet from
+# another track. This revision contains RustAudio/rodio#833 and keeps decoding
+# only the selected audio track.
+rodio = { git = "https://github.com/RustAudio/rodio", rev = "e89e685d326a684b298c5138adf94caa49e5568c", default-features = false, features = ["playback", "recording", "mp3", "mp4", "wav", "vorbis"] }
 symphonia = { version = "0.5", default-features = false, features = ["aac", "isomp4", "mp3", "ogg", "wav", "pcm"] }
 opus = "0.4"
 ogg = "0.9"
 # Converts animated Signal APNG stickers to the animated WebP used by WhatsApp.
 webp-animation = "0.10"
 hayro = "0.7.1"
+
+
+[patch.crates-io]
+# ZapFast's egui 0.36 fork carries the RTL shaping fixes used by v0.16.2,
+# including Arabic-Indic digits staying left-to-right when no RTL letters exist.
+ecolor = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+eframe = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+egui = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+egui-wgpu = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+egui-winit = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+egui_extras = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+egui_glow = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+emath = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+epaint = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
+epaint_default_fonts = { git = "https://github.com/crmne/egui", rev = "8e5923482f6882a169b5c74ee6b380089f890391" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = "8.2"
