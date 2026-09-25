@@ -1,0 +1,23 @@
+name: Refresh Cargo lockfile
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Regenerate Cargo.lock
+        run: cargo generate-lockfile
+      - name: Upload Cargo.lock
+        uses: actions/upload-artifact@v7
+        with:
+          name: regenerated-cargo-lock
+          path: Cargo.lock
