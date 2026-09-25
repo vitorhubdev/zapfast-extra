@@ -1532,6 +1532,11 @@ fn messages(app: &mut App, ui: &mut egui::Ui, chat: &Chat) {
                         {
                             if view.selecting {
                                 select_overlay(ui, &view, message, response.rect, &mut actions);
+                            } else if response.clicked()
+                                && ui.input(|input| input.modifiers.command)
+                            {
+                                // Ctrl-click (Command-click on macOS) starts selection mode.
+                                actions.push(Action::ToggleSelect(message.id.clone()));
                             }
                             if view.anchor == Some(message.id.as_str()) {
                                 response.scroll_to_me(Some(Align::Center));
@@ -1942,7 +1947,12 @@ fn select_overlay(
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .clicked()
     {
-        actions.push(Action::ToggleSelect(message.id.clone()));
+        let shift = ui.input(|input| input.modifiers.shift);
+        actions.push(if shift {
+            Action::SelectRange(message.id.clone())
+        } else {
+            Action::ToggleSelect(message.id.clone())
+        });
     }
 }
 
@@ -2242,8 +2252,9 @@ fn bubble_frame(
         .show(|ui| {
             context_menu(ui, view, message, actions);
         });
-    // Store this frame's final rect for later scrolling.
-    inner.response
+    // Store this frame's final rect for later scrolling, joined with the
+    // bubble click response so Ctrl-click and selection clicks are observable.
+    inner.response.union(bubble)
 }
 
 /// Minimum shared width for cards inside message bubbles.

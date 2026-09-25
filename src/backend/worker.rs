@@ -385,6 +385,7 @@ pub async fn run(
         download_retries: HashMap::new(),
         update_checker: crate::updates::Checker::new(),
         link_watch: Default::default(),
+        reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sync_attempts: HashMap::new(),
         sync_in_flight: HashMap::new(),
         sync_aliases: HashMap::new(),
@@ -515,6 +516,9 @@ struct Worker {
     download_retries: HashMap<(ChatId, String), u32>,
     /// Notices a link that stays open after a sleep but carries nothing.
     link_watch: link_watch::LinkWatch,
+    /// One reconnect close at a time. A second request while this is set
+    /// does not start another session teardown.
+    reconnecting: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Update-listing checks: timeout, one flight at a time and an ETag
     /// cache shared across automatic and manual checks.
     update_checker: crate::updates::Checker,
@@ -945,8 +949,25 @@ impl Worker {
                 );
             }
         }
+        self.spawn_reconnect(client);
+    }
+
+    /// Starts one immediate reconnect. A request that arrives while that
+    /// close is still running is ignored, so two watchers cannot open two
+    /// sessions or bounce the link between them.
+    fn spawn_reconnect(&mut self, client: std::sync::Arc<Client>) {
+        if self
+            .reconnecting
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
         self.set_status(LinkStatus::Connecting);
-        tokio::spawn(async move { client.reconnect_immediately().await });
+        let flag = std::sync::Arc::clone(&self.reconnecting);
+        tokio::spawn(async move {
+            client.reconnect_immediately().await;
+            flag.store(false, std::sync::atomic::Ordering::Release);
+        });
     }
 
     fn set_status(&mut self, status: LinkStatus) {
@@ -1558,7 +1579,7 @@ impl Worker {
             .collect();
         let lids = self.lid_to_pn.clone();
         tokio::spawn(async move {
-            match client.groups().get_metadata(&jid).await {
+            match client.groups().fetch_metadata(&jid).await {
                 Ok(metadata) => {
                     let canonical = |jid: &Jid| -> String {
                         if jid.is_lid()
@@ -1589,7 +1610,7 @@ impl Worker {
                     }
                     let _ = commands.send(Command::GroupInfo {
                         chat,
-                        name: (!metadata.subject.is_empty()).then(|| metadata.subject.clone()),
+                        name: metadata.subject.filter(|subject| !subject.is_empty()),
                         participants,
                         read_only: metadata.is_announcement && !admin,
                         community: metadata.is_parent_group,
@@ -1649,7 +1670,7 @@ impl Worker {
                 if exhausted.disconnected
                     && let Some(client) = self.client.clone()
                 {
-                    tokio::spawn(async move { client.reconnect_immediately().await });
+                    self.spawn_reconnect(client);
                 }
             }
             E::PairSuccess(pair) => {
@@ -1781,7 +1802,11 @@ impl Worker {
             }
             E::Messages(batch) => {
                 for inbound in batch.messages.iter() {
-                    self.ingest(&inbound.message, &inbound.info);
+                    self.ingest(
+                        &inbound.message,
+                        &inbound.info,
+                        inbound.ephemeral_expiration,
+                    );
                 }
             }
             E::UndecryptableMessage(undecryptable) => {
@@ -1814,7 +1839,7 @@ impl Worker {
                 if let whatsapp_rust::wacore::stanza::groups::GroupNotificationAction::Ephemeral {
                     expiration,
                     ..
-                } = &update.action
+                } = &*update.action
                 {
                     self.ensure_chat(&chat, None);
                     let timestamp = update.timestamp.timestamp();
@@ -2434,7 +2459,12 @@ impl Worker {
             .collect()
     }
 
-    fn ingest(&mut self, message: &Arc<wa::Message>, info: &MessageInfo) {
+    fn ingest(
+        &mut self,
+        message: &Arc<wa::Message>,
+        info: &MessageInfo,
+        ephemeral_expiration: Option<u32>,
+    ) {
         self.learn_source(&info.source);
         if info.source.chat.is_status_broadcast() {
             return;
@@ -2446,9 +2476,9 @@ impl Worker {
         } else {
             self.canonical(&info.source.sender)
         };
-        let push_name = (!info.push_name.is_empty()).then(|| info.push_name.clone());
+        let push_name = (!info.push_name.is_empty()).then(|| info.push_name.to_string());
         let base = message.get_base_message();
-        if let Some(expiration) = info.ephemeral_expiration
+        if let Some(expiration) = ephemeral_expiration
             && self
                 .archive
                 .ephemeral_expiration(&chat)
@@ -2559,7 +2589,7 @@ impl Worker {
         let quoted = self.quoted_of(base);
         let mentions = self.mentions_of(&mentioned_of(base));
         let row = Message {
-            id: info.id.clone(),
+            id: info.id.to_string(),
             chat: chat.clone(),
             sender,
             sender_name: if from_me { None } else { push_name.clone() },
@@ -2603,9 +2633,9 @@ impl Worker {
         {
             return;
         }
-        let push_name = (!info.push_name.is_empty()).then(|| info.push_name.clone());
+        let push_name = (!info.push_name.is_empty()).then(|| info.push_name.to_string());
         let row = Message {
-            id: info.id.clone(),
+            id: info.id.to_string(),
             chat,
             sender: self.canonical(&info.source.sender),
             sender_name: push_name.clone(),
@@ -4048,7 +4078,7 @@ impl Worker {
             }
             Command::Reconnect => {
                 if let Some(client) = self.client.clone() {
-                    tokio::spawn(async move { client.reconnect_immediately().await });
+                    self.spawn_reconnect(client);
                 } else {
                     self.start_bot().await;
                 }
@@ -7268,7 +7298,7 @@ impl Worker {
 // --- free helpers ----------------------------------------------------------
 
 fn outgoing_forward(original: &wa::Message, expiration: Option<u32>) -> (wa::Message, Option<u32>) {
-    let mut message = *original.get_base_message().prepare_for_forward();
+    let mut message = original.get_base_message().prepare_for_forward();
     if let Some(mut context) = context_of(&message).cloned() {
         // A forward belongs to the destination chat. The library retains the
         // source timer, including when the destination has no timer at all.
@@ -7303,7 +7333,7 @@ async fn send_outgoing(
             // exactly as encryption would. No separate burst of metadata queries.
             let group = client
                 .groups()
-                .query_info(&jid)
+                .routing_info(&jid)
                 .await
                 .map_err(|error| error.to_string())?;
             let lids = group
@@ -8815,6 +8845,17 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .expect("encodes");
         out
+    }
+
+    #[test]
+    fn a_second_reconnect_claim_waits_until_the_first_finishes() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let flag = AtomicBool::new(false);
+        let claim = |flag: &AtomicBool| !flag.swap(true, Ordering::AcqRel);
+        assert!(claim(&flag), "the first close starts");
+        assert!(!claim(&flag), "a second close does not start");
+        flag.store(false, Ordering::Release);
+        assert!(claim(&flag), "after the close returns, another may start");
     }
 
     #[test]
@@ -10353,6 +10394,7 @@ mod receipt_tests {
             download_retries: HashMap::new(),
             update_checker: crate::updates::Checker::new(),
             link_watch: Default::default(),
+        reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_attempts: HashMap::new(),
             sync_in_flight: HashMap::new(),
             sync_aliases: HashMap::new(),
@@ -10462,7 +10504,7 @@ mod receipt_tests {
     fn receipt(chat: &str, ids: &[&str], kind: ReceiptType) -> wa_events::Receipt {
         let chat: Jid = chat.parse().expect("jid");
         wa_events::Receipt::builder()
-            .message_ids(ids.iter().map(|id| (*id).to_owned()).collect())
+            .message_ids(ids.iter().map(|id| (*id).into()).collect())
             .source(MessageSource {
                 chat: chat.clone(),
                 sender: chat,
@@ -10581,7 +10623,7 @@ mod receipt_tests {
                 timestamp: whatsapp_rust::wacore::time::from_secs(envelope_time).unwrap(),
                 ..Default::default()
             };
-            worker.ingest(&Arc::new(raw), &info);
+            worker.ingest(&Arc::new(raw), &info, None);
             assert_eq!(
                 worker
                     .archive
@@ -10617,12 +10659,12 @@ mod receipt_tests {
                 .group_jid(group.parse().unwrap())
                 .timestamp(whatsapp_rust::wacore::time::from_secs(timestamp).unwrap())
                 .is_lid_addressing_mode(false)
-                .action(
+                .action(Box::new(
                     whatsapp_rust::wacore::stanza::groups::GroupNotificationAction::Ephemeral {
                         expiration,
                         trigger: None,
                     },
-                )
+                ))
                 .build();
             worker
                 .handle_wa_event(Arc::new(wa_events::Event::GroupUpdate(update)))

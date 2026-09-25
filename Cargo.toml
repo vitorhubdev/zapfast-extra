@@ -1,6 +1,6 @@
 [package]
 name = "zapfast"
-version = "1.0.91"
+version = "1.0.92"
 authors = ["Vitor (ZapExt fork) <108148783+vitorhubdev@users.noreply.github.com>"]
 edition = "2024"
 rust-version = "1.98"
@@ -55,7 +55,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # on stable and includes snapshot recovery and no-progress conflict handling
 # (upstream #1365, #1374 and #1375). Selected features provide Tokio transport, ureq media downloads,
 # and the SQLite device store. The window handles shutdown instead of `signal`.
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "860744fb634e9b1703d69626180c66ae07c1ff04", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f7468ae2920a2b0aedbd0848cf121de56a07f93c", default-features = false, features = ["sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
 # SQLCipher encrypts the archive; the device store shares the same library.
 # Bundle OpenSSL so all release platforms use the same encryption provider.
@@ -108,6 +108,7 @@ ogg = "0.9"
 # Converts animated Signal APNG stickers to the animated WebP used by WhatsApp.
 webp-animation = "0.10"
 hayro = "0.7.1"
+
 
 [target.'cfg(target_os = "linux")'.dependencies]
 notify = "8.2"

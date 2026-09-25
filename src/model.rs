@@ -926,6 +926,8 @@ pub enum Action {
     },
     /// Toggles a message in the multi-select set of the open chat.
     ToggleSelect(String),
+    /// Selects every selectable message from the previous selection anchor to this one.
+    SelectRange(String),
     /// Leaves multi-select mode without doing anything.
     ClearSelection,
     /// Loads an outgoing message into the composer for editing.

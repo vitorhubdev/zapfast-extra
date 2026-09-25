@@ -69,7 +69,6 @@ jobs:
           fi
         shell: bash
       - uses: Swatinem/rust-cache@v2
-      # The demo feature carries the headless layout test of every screen.
       - name: Tests (default features)
         run: cargo test --locked --all-targets
       - name: Tests (all features)

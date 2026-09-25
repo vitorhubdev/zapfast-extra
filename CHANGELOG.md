@@ -2,6 +2,21 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.92] - 2026-09-25
+
+### Changed
+
+- The device store now follows whatsapp-rust `f7468ae`, with SQLite compiled into that library (`sqlite-storage-bundled`). The message archive stays on SQLCipher and is a different file. A synthetic store migrated by `f7468ae` still opened on `860744fb` and the identity row was still there. A store whose `msg_secrets` table was removed is refused by the new library, and the file is left in place.
+
+### Fixed
+
+- Voice playback uses one overlap-add for every length. Alignment and the overlap tail continue across each block of input, instead of stopping at two minutes or joining separate renders.
+- A second reconnect request while the first close is still running does not start another one.
+
+### Tests
+
+- Formants of 119, 120 and 121 seconds match when fed in one-second blocks and when fed at once. A two-second excerpt around the old two-minute point is written for listening. That excerpt is an artificial pulse, not a recording, and it is not proof the sound is free of hiss.
+
 ## [1.0.91] - 2026-09-25
 
 ### Fixed

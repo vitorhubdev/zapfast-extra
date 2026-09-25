@@ -255,33 +255,118 @@ impl Source for FileSamples {
     }
 }
 
-/// Voice clips at or under this length are compressed with the overlap-add
-/// from ZapFast 0.16.2. Longer audio keeps the streaming stretcher.
-const STRETCH_OFFLINE: u64 = 120 * voice::RATE as u64;
-
-/// Clips at or under two minutes use overlap-add. Longer clips still use the
-/// streaming hop blend. A bounded replacement would overlap-add windows of
-/// about twenty seconds and keep only that window, carrying one frame across
-/// each join. That player is not what runs past this limit.
-fn stretch_offline(total_in: u64) -> bool {
-    total_in > 0 && total_in <= STRETCH_OFFLINE
-}
-
 fn append_stretched<S>(sink: &rodio::Player, samples: S, speed: f32, total_in: u64)
 where
     S: Iterator<Item = f32> + Send + 'static,
 {
-    if stretch_offline(total_in) {
-        let gathered: Vec<f32> = samples.take(total_in as usize).collect();
-        let compressed = crate::timestretch::speed_up(&gathered, speed);
-        sink.append(rodio::buffer::SamplesBuffer::new(
-            mono(),
-            rate(),
-            compressed,
-        ));
-        return;
+    sink.append(OverlapPlay::new(samples, speed, total_in));
+}
+
+/// Plays overlap-add from the incoming samples. The stretcher keeps a few
+/// frames, and the same alignment continues for the whole clip.
+struct OverlapPlay<S> {
+    inner: S,
+    stream: crate::timestretch::Stream,
+    queued: Vec<f32>,
+    pos: usize,
+    fed: u64,
+    total_in: u64,
+    closed: bool,
+    emitted: u64,
+    expected: u64,
+}
+
+impl<S: Iterator<Item = f32>> OverlapPlay<S> {
+    fn new(inner: S, speed: f32, total_in: u64) -> Self {
+        Self {
+            inner,
+            stream: crate::timestretch::Stream::new(speed),
+            queued: Vec::new(),
+            pos: 0,
+            fed: 0,
+            total_in,
+            closed: false,
+            emitted: 0,
+            expected: (total_in as f64 / f64::from(speed.max(1.0))).round() as u64,
+        }
     }
-    sink.append(Stretched::new(samples, speed, total_in));
+
+    fn fill(&mut self) {
+        if self.pos < self.queued.len() {
+            return;
+        }
+        self.queued.clear();
+        self.pos = 0;
+        while self.queued.is_empty() {
+            if let Some(sample) = self.stream.pop() {
+                self.queued.push(sample);
+                while self.queued.len() < 512 {
+                    match self.stream.pop() {
+                        Some(sample) => self.queued.push(sample),
+                        None => break,
+                    }
+                }
+                break;
+            }
+            if self.closed {
+                break;
+            }
+            let mut chunk = Vec::with_capacity(4096);
+            while chunk.len() < 4096 && self.fed < self.total_in {
+                match self.inner.next() {
+                    Some(sample) => {
+                        chunk.push(sample);
+                        self.fed += 1;
+                    }
+                    None => break,
+                }
+            }
+            if chunk.is_empty() || self.fed >= self.total_in {
+                self.stream.close(self.total_in as usize);
+                self.closed = true;
+            }
+            if !chunk.is_empty() {
+                self.stream.push(&chunk);
+            }
+        }
+    }
+}
+
+impl<S: Iterator<Item = f32>> Iterator for OverlapPlay<S> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        self.fill();
+        if self.pos >= self.queued.len() {
+            return None;
+        }
+        let sample = self.queued[self.pos];
+        self.pos += 1;
+        self.emitted += 1;
+        Some(sample)
+    }
+}
+
+impl<S: Iterator<Item = f32> + Send> Source for OverlapPlay<S> {
+    fn current_span_len(&self) -> Option<usize> {
+        Some(
+            self.expected
+                .saturating_sub(self.emitted)
+                .clamp(1, SPAN_SAMPLES as u64) as usize,
+        )
+    }
+
+    fn channels(&self) -> NonZero<u16> {
+        mono()
+    }
+
+    fn sample_rate(&self) -> NonZero<u32> {
+        rate()
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(clip_length(self.expected as usize))
+    }
 }
 
 /// Window, synthesis hop, search radius and search stride of the
@@ -1617,11 +1702,54 @@ mod tests {
     }
 
     #[test]
-    fn two_minutes_is_the_overlap_add_limit() {
-        let limit = 120 * voice::RATE as u64;
-        assert!(stretch_offline(limit));
-        assert!(!stretch_offline(limit + 1));
-        assert!(!stretch_offline(0));
+    fn overlap_add_continues_across_pushes_and_past_two_minutes() {
+        let rate = voice::RATE as usize;
+        for seconds in [119, 120, 121] {
+            let input = long_formant(seconds * rate);
+            let whole = crate::timestretch::speed_up(&input, 1.5);
+            let mut stream = crate::timestretch::Stream::new(1.5);
+            for chunk in input.chunks(10_000) {
+                stream.push(chunk);
+            }
+            stream.close(input.len());
+            let mut parted = Vec::new();
+            while let Some(sample) = stream.pop() {
+                parted.push(sample);
+            }
+            assert_eq!(parted.len(), whole.len(), "{seconds}s length");
+            let max = parted
+                .iter()
+                .zip(whole.iter())
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(max < 1e-4, "{seconds}s streams differ by {max}");
+        }
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local-roadmap/voice-samples");
+        let _ = std::fs::create_dir_all(&dir);
+        let around = long_formant(121 * rate);
+        let played = crate::timestretch::speed_up(&around, 1.5);
+        let at = (120.0 * rate as f32 / 1.5) as usize;
+        let excerpt = &played[at.saturating_sub(rate)..(at + rate).min(played.len())];
+        write_wav(&dir.join("speech-like-120s-join-1.5x.wav"), excerpt);
+    }
+
+    fn long_formant(n: usize) -> Vec<f32> {
+        let rate = voice::RATE as f32;
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / rate;
+                let cycle = (t * 120.0).fract();
+                let pulse = if cycle < 0.4 {
+                    (cycle / 0.4 * std::f32::consts::PI).sin()
+                } else {
+                    0.0
+                };
+                pulse * 0.45
+                    + (t * 700.0 * std::f32::consts::TAU).sin() * 0.35
+                    + (t * 1220.0 * std::f32::consts::TAU).sin() * 0.2
+            })
+            .collect()
     }
 
     /// A short voiced stretch: a noise burst, then a 120 Hz pulse with three
