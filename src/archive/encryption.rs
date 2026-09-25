@@ -37,17 +37,35 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
     );
-    #[cfg(target_os = "linux")]
-    let store = zbus_secret_service_keyring_store::Store::new();
-    #[cfg(target_os = "macos")]
-    let store = apple_native_keyring_store::keychain::Store::new();
-    #[cfg(windows)]
-    let store = windows_native_keyring_store::Store::new();
-    let store = store.context("Unlock your OS keyring and restart ZapExt")?;
-    let entry = store
+    // Tests share one mock so a dropped archive can be opened again without
+    // a desktop secret service. Shipping builds keep the OS keyring.
+    #[cfg(test)]
+    let entry = test_store()?
         .build("rocks.zapfast.ZapFast", &identity, None)
         .context("The OS keyring could not open ZapExt's archive key")?;
+    #[cfg(not(test))]
+    let entry = {
+        #[cfg(target_os = "linux")]
+        let store = zbus_secret_service_keyring_store::Store::new();
+        #[cfg(target_os = "macos")]
+        let store = apple_native_keyring_store::keychain::Store::new();
+        #[cfg(windows)]
+        let store = windows_native_keyring_store::Store::new();
+        let store = store.context("Unlock your OS keyring and restart ZapExt")?;
+        store
+            .build("rocks.zapfast.ZapFast", &identity, None)
+            .context("The OS keyring could not open ZapExt's archive key")?
+    };
     key_from_entry(path, &entry)
+}
+
+#[cfg(test)]
+fn test_store() -> Result<std::sync::Arc<keyring_core::mock::Store>> {
+    use std::sync::{Arc, OnceLock};
+    static STORE: OnceLock<Arc<keyring_core::mock::Store>> = OnceLock::new();
+    Ok(STORE
+        .get_or_init(|| keyring_core::mock::Store::new().expect("mock keyring"))
+        .clone())
 }
 
 fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<[u8; 32]>> {

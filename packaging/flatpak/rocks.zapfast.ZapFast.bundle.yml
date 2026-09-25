@@ -5,7 +5,7 @@ id: rocks.zapfast.ZapFast
 runtime: org.freedesktop.Platform
 runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
-command: zapfast
+command: zapext
 finish-args:
   - --socket=wayland
   - --socket=fallback-x11
@@ -21,7 +21,7 @@ modules:
   - name: zapfast
     buildsystem: simple
     build-commands:
-      - install -Dm755 zapfast /app/bin/zapfast
+      - install -Dm755 zapext /app/bin/zapext
       - install -Dm644 packaging/applications/*.desktop /app/share/applications/rocks.zapfast.ZapFast.desktop
       - sed -i 's/^Icon=.*$/Icon=rocks.zapfast.ZapFast/;s/^StartupWMClass=zapfast$/StartupWMClass=rocks.zapfast.ZapFast/' /app/share/applications/rocks.zapfast.ZapFast.desktop
       - install -Dm644 packaging/icons/*.svg /app/share/icons/hicolor/scalable/apps/rocks.zapfast.ZapFast.svg

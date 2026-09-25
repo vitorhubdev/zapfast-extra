@@ -15,7 +15,7 @@ runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
-command: zapfast
+command: zapext
 finish-args:
   # Wayland first, X11 when that is what there is.
   - --socket=wayland

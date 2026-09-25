@@ -2,6 +2,14 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.88] - 2026-09-25
+
+### Fixed
+
+- CI installs ffmpeg before the video scrub tests, which were failing because the runner had no encoder.
+- Archive restart tests keep their key in a process-local store, so they no longer need a desktop secret service. Installed copies still use the OS keyring.
+- The Flatpak command is `zapext`, matching the binary the manifest installs and the desktop entry launches.
+
 ## [1.0.87] - 2026-09-25
 
 ### Fixed
