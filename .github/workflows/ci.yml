@@ -58,13 +58,32 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev cmake perl gnome-keyring dbus-x11
       - uses: Swatinem/rust-cache@v2
-      # The demo feature carries the headless layout test of every screen.
+      # Archive restart tests use the same Secret Service backend as the app.
+      # Run Linux tests inside a temporary D-Bus session with an unlocked
+      # gnome-keyring so they exercise persistence instead of failing because
+      # GitHub's image has no org.freedesktop.secrets provider.
       - name: Tests (default features)
+        if: runner.os != 'Linux'
         run: cargo test --locked --all-targets
+      - name: Tests (default features, Linux Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -lc '
+            echo -n "" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --all-targets
+          '
       - name: Tests (all features)
+        if: runner.os != 'Linux'
         run: cargo test --locked --all-targets --all-features
+      - name: Tests (all features, Linux Secret Service)
+        if: runner.os == 'Linux'
+        run: |
+          dbus-run-session -- bash -lc '
+            echo -n "" | gnome-keyring-daemon --unlock --components=secrets
+            cargo test --locked --all-targets --all-features
+          '
       - name: Build macOS demo
         if: runner.os == 'macOS'
         run: cargo build --locked --features demo
