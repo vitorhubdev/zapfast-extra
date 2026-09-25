@@ -444,6 +444,7 @@ pub async fn run(
                 worker.emit_chats();
             }
             _ = tick.tick() => {
+                crate::drag_out::sweep_exports(&worker.dirs.media_cache_dir().join("drag-export"));
                 worker.watch_link();
                 worker.pump_chat_sync();
                 worker.expire_older_requests();
@@ -902,6 +903,7 @@ impl Worker {
     fn polish_chat(&self, chat: &mut Chat) {
         if let Some(last) = chat.last.as_mut() {
             last.summary = self.pn_tokens(&last.summary);
+            last.full = self.pn_tokens(&last.full);
         }
     }
 
@@ -5085,8 +5087,17 @@ impl Worker {
     /// attachments. Anything else (saved stickers, imported packs) is the
     /// user's own file and is left alone.
     fn heal_sticker(&mut self, path: &Path) {
+        let cache = path.starts_with(self.dirs.sticker_cache_dir());
+        let listed = self.archive.media_paths().ok().and_then(|list| {
+            list.into_iter()
+                .find(|(_, _, known)| known == path)
+                .map(|(chat, id, _)| (chat, id))
+        });
+        if !cache && listed.is_none() {
+            return;
+        }
         let _ = std::fs::remove_file(path);
-        if path.starts_with(self.dirs.sticker_cache_dir()) {
+        if cache {
             if let Some(hash) = path.file_stem().and_then(|stem| stem.to_str()) {
                 let _ = self.archive.clear_sticker_path(hash);
             }
@@ -5226,6 +5237,11 @@ impl Worker {
             return;
         };
         let mut keep = sweep_keep_set(protected, &[]);
+        keep.extend(
+            crate::drag_out::leased()
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
         tokio::task::spawn_blocking(move || {
             // Interrupted publishes restore before the sweep: a backup
             // whose destination is missing is still the last valid copy,

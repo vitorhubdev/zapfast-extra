@@ -143,6 +143,9 @@ pub struct LastMessage {
     /// Group-message sender.
     pub sender_name: Option<String>,
     pub summary: String,
+    /// The whole message behind `summary`, every line of it: the chat row
+    /// shows it in a tooltip when the one-line preview cannot.
+    pub full: String,
     pub status: Delivery,
 }
 
@@ -449,9 +452,7 @@ impl Content {
         match self {
             Self::Text { text, .. } => text.lines().next().unwrap_or_default().to_owned(),
             Self::Image { caption, .. } => with_caption("Photo", caption),
-            Self::Video { caption, gif, .. } => {
-                with_caption(if *gif { "GIF" } else { "Video" }, caption)
-            }
+            Self::Video { caption, gif, .. } => with_caption(video_label(*gif), caption),
             Self::Audio {
                 voice_note,
                 seconds,
@@ -479,6 +480,22 @@ impl Content {
             Self::Revoked => "This message was deleted".to_owned(),
             Self::StickerPack { name, .. } => format!("Sticker pack: {name}"),
             Self::Unsupported { what } => format!("Unsupported message ({what})"),
+        }
+    }
+
+    /// The whole message as [`Self::summary`] would label it: every line of
+    /// a text or a photo or video caption. Other content has nothing more
+    /// to say than its summary.
+    pub fn full_summary(&self) -> String {
+        let captioned = |label: &str, caption: &Option<String>| match caption.as_deref() {
+            Some(caption) if !caption.trim().is_empty() => format!("{label}: {caption}"),
+            _ => label.to_owned(),
+        };
+        match self {
+            Self::Text { text, .. } => text.clone(),
+            Self::Image { caption, .. } => captioned("Photo", caption),
+            Self::Video { caption, gif, .. } => captioned(video_label(*gif), caption),
+            _ => self.summary(),
         }
     }
 
@@ -512,6 +529,11 @@ impl Content {
             Self::Revoked | Self::Unsupported { .. } | Self::Poll { .. }
         )
     }
+}
+
+/// What a video is called in previews.
+fn video_label(gif: bool) -> &'static str {
+    if gif { "GIF" } else { "Video" }
 }
 
 fn with_caption(label: &str, caption: &Option<String>) -> String {
@@ -835,6 +857,8 @@ pub enum Action {
     CancelRecording,
     SendRecording,
     OpenFile(PathBuf),
+    /// A short error the interface shows, with no other effect.
+    ToastError(String),
     /// Reveals a file in its folder, selecting it. Programs open this way
     /// instead of running: clicking one must never execute it.
     ShowInFolder(PathBuf),
@@ -1093,6 +1117,26 @@ mod tests {
             path: None,
             state: MediaState::Idle,
         }
+    }
+
+    #[test]
+    fn full_summaries_keep_every_line_behind_the_summary_label() {
+        assert_eq!(Content::text("hi\nthere").full_summary(), "hi\nthere");
+        assert_eq!(
+            Content::Image {
+                caption: Some("look\nat this".into()),
+                media: media()
+            }
+            .full_summary(),
+            "Photo: look\nat this"
+        );
+        let voice = Content::Audio {
+            media: media(),
+            seconds: Some(65),
+            voice_note: true,
+            waveform: Vec::new(),
+        };
+        assert_eq!(voice.full_summary(), voice.summary());
     }
 
     #[test]

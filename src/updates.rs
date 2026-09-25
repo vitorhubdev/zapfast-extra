@@ -27,12 +27,42 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub const ZAPEXT_VERSION: &str = include_str!("../VERSION");
+pub const ZAPEXT_VERSION: &str = match option_env!("ZAPEXT_RELEASE_VERSION") {
+    Some(version) => version,
+    None => include_str!("../VERSION"),
+};
 /// Canonical fork version without surrounding whitespace.
-/// `VERSION` is the single source of truth; trimming keeps a trailing newline
-/// from breaking User-Agent headers, title strings, and version comparisons.
+/// `VERSION` is the single source of truth for a local build. A release tag
+/// sets `ZAPEXT_RELEASE_VERSION` so a candidate reports `X.Y.Z-rc.N`.
 pub fn zapext_version() -> &'static str {
     ZAPEXT_VERSION.trim()
+}
+
+/// Commit compiled into a release binary, or `unknown` for a local build.
+/// Release jobs set `ZAPEXT_GIT_SHA`. The string is kept live so the file
+/// itself carries the commit it was built from.
+pub fn zapext_commit() -> &'static str {
+    option_env!("ZAPEXT_GIT_SHA").unwrap_or("unknown")
+}
+
+/// Version a tag must compile into the binary and the package.
+/// `vX.Y.Z` must match `VERSION`. `vX.Y.Z-rc.N` keeps the candidate suffix
+/// even though `VERSION` stays the stable triple.
+pub fn version_for_tag(tag: &str, file_version: &str) -> Option<String> {
+    let bare = tag.strip_prefix('v')?;
+    let file_version = file_version.trim();
+    if bare == file_version {
+        return Some(bare.to_owned());
+    }
+    let (base, suffix) = bare.split_once("-rc.")?;
+    if base == file_version
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Some(bare.to_owned())
+    } else {
+        None
+    }
 }
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";
@@ -539,6 +569,25 @@ mod channel_tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    #[test]
+    fn a_candidate_tag_reports_its_suffix_and_stable_matches_the_file() {
+        let file = "1.0.81\n";
+        assert_eq!(version_for_tag("v1.0.81", file).as_deref(), Some("1.0.81"));
+        assert_eq!(
+            version_for_tag("v1.0.81-rc.2", file).as_deref(),
+            Some("1.0.81-rc.2")
+        );
+        assert!(version_for_tag("v1.0.81-rc.2", "1.0.80").is_none());
+        assert!(version_for_tag("v1.0.82", file).is_none());
+        let testing = Channel::Testing;
+        let stable = Channel::Stable;
+        assert!(is_newer_in(testing, "1.0.81", "1.0.81-rc.2"));
+        assert!(!is_newer_in(testing, "1.0.81-rc.2", "1.0.81-rc.2"));
+        assert!(!is_newer_in(stable, "1.0.81-rc.2", "1.0.80"));
+        assert!(installable(testing, "1.0.81-rc.2"));
+        assert!(!installable(stable, "1.0.81-rc.2"));
+    }
+
     #[test]
     fn stable_channel_matches_the_legacy_compare() {
         let pairs = [

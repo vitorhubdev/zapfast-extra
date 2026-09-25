@@ -6,6 +6,10 @@
 
 **A community mod of ZapFast, native and fast.**
 
+What this fork changes, compared with ZapFast 0.16.2, is listed in
+[English](docs/differences.md), [português](docs/differences.pt-BR.md), and
+[español](docs/differences.es.md).
+
 Release candidates are opt-in builds on the GitHub Releases page, marked
 **Pre-release**. They do not replace the stable download or the updater's
 stable channel. The 1.0.61 candidate includes accumulated fixes for testing;
@@ -41,6 +45,9 @@ without embedding a browser engine.
   Pinned chats stay in pin order (most recently pinned first), regardless of
   new messages. Chat and contact name searches ignore accents, so `Angel`
   finds `Ángel`.
+  When a chat's one-line preview is cut short, resting the pointer on it
+  shows the whole message in a tooltip, as in WhatsApp Web, without opening
+  the chat or marking it read.
   Typing indicators show other participants, excluding your own linked devices.
 - **Read state across devices.** Reading a chat syncs its unread badge with
   your phone and other linked devices, including when read receipts are off.
@@ -144,7 +151,10 @@ without embedding a browser engine.
   the arrow keys walk the pictures of the chat, 0 or F fits it again, and Esc
   closes. The Copy button, or the right-click menu over the picture, puts it on
   the clipboard, and the bar can also save a copy or hand the file to the
-  desktop. A sticker opens
+  desktop. On Windows, drag a downloaded photo, video, or document onto a
+  folder to copy it there. The message and the original file stay put, a
+  missing or unfinished download does not start a drag, and Save a copy
+  remains in the menu. A sticker opens
   bigger in a small dialog instead, with a Save button, and stays out of the
   order walked by the viewer.
   If an attachment has expired, ZapExt asks your phone to upload it again.

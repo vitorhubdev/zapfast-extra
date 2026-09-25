@@ -527,6 +527,8 @@ mod tests {
         assert!(checksum(&valid, "other.zip").is_err());
         assert!(checksum(&(valid.clone() + &valid), "app.zip").is_err());
         assert!(checksum("invalid app.zip", "app.zip").is_err());
+        let marked = format!("# commit abcdef\n{digest} *app.zip\n");
+        assert_eq!(checksum(&marked, "app.zip").unwrap(), digest);
     }
 
     #[test]

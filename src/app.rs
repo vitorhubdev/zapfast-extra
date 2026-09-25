@@ -214,6 +214,52 @@ pub struct Presence {
     pub last_seen: Option<i64>,
 }
 
+/// One frame between turning IME off and destroying the macOS window.
+/// Other platforms close in the same frame, so these states are only
+/// constructed on macOS (and in the unit test).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(any(test, target_os = "macos")), expect(dead_code))]
+enum HideStage {
+    #[default]
+    None,
+    /// IME is off. The next frame queues the close.
+    PendingClose,
+    /// Close was queued. The following `close_requested` is that command.
+    Closing,
+}
+
+/// The frame that arms a hide does not close. The next one queues it.
+/// The stage stays `Closing` so that close is not cancelled.
+#[cfg_attr(not(any(test, target_os = "macos")), expect(dead_code))]
+fn finish_deferred_hide(stage: HideStage) -> (HideStage, bool) {
+    if stage == HideStage::PendingClose {
+        (HideStage::Closing, true)
+    } else {
+        (stage, false)
+    }
+}
+
+#[cfg(test)]
+mod hide_stage_tests {
+    use super::*;
+
+    #[test]
+    fn a_tray_hide_does_not_close_on_the_frame_that_armed_it() {
+        assert_eq!(
+            finish_deferred_hide(HideStage::None),
+            (HideStage::None, false)
+        );
+        assert_eq!(
+            finish_deferred_hide(HideStage::PendingClose),
+            (HideStage::Closing, true)
+        );
+        assert_eq!(
+            finish_deferred_hide(HideStage::Closing),
+            (HideStage::Closing, false)
+        );
+    }
+}
+
 pub struct App {
     pub dirs: AppDirs,
     pub settings: Settings,
@@ -425,6 +471,8 @@ pub struct App {
     pub window_hidden: bool,
     /// Whether window close should keep the process running.
     pub hide_intent: bool,
+    /// macOS hides on the next frame, after IME is turned off on a live window.
+    hide_stage: HideStage,
     /// Whether a headless app should create a window.
     pub wants_show: bool,
     /// Deadline and next attempt for bringing the window to the front.
@@ -641,6 +689,7 @@ impl App {
             tray: None,
             window_hidden: false,
             hide_intent: false,
+            hide_stage: HideStage::None,
             wants_show: false,
             #[cfg(target_os = "windows")]
             raise_deadline: None,
@@ -684,11 +733,41 @@ impl App {
         }
     }
 
+    /// Hides to the tray. On macOS the window stays up for one frame so AppKit
+    /// can turn IME off before the view is torn down.
+    fn arm_tray_hide(&mut self, ctx: &egui::Context) {
+        self.hide_intent = true;
+        #[cfg(target_os = "macos")]
+        if self.hide_stage != HideStage::Closing {
+            self.hide_stage = HideStage::PendingClose;
+            ctx.send_viewport_cmd(egui::ViewportCommand::IMEAllowed(false));
+            ctx.request_repaint();
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Whether this frame should destroy the window. The frame that armed the
+    /// hide does not: that one only disables IME.
+    fn take_deferred_close(&mut self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            let (stage, close) = finish_deferred_hide(self.hide_stage);
+            self.hide_stage = stage;
+            return close;
+        }
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
     /// Updates the linked app while no window exists.
     pub fn window_gone(&mut self) {
         self.window_hidden = true;
         self.window_focused = false;
         self.hide_intent = false;
+        self.hide_stage = HideStage::None;
         self.wants_show = false;
         if let Some(tray) = &mut self.tray {
             tray.hidden();
@@ -2879,6 +2958,7 @@ impl App {
                 }
                 self.backend.send(Command::Download { chat, message });
             }
+            Action::ToastError(message) => self.toast_error(message),
             Action::OpenFile(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     self.toast_error(format!("Could not open {}: {error}", path.display()));
@@ -3572,8 +3652,7 @@ impl App {
             }
             Action::HideWindow => {
                 if self.tray.is_some() {
-                    self.hide_intent = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    self.arm_tray_hide(ctx);
                 }
             }
             // Route through the configured window-close behavior.
@@ -3733,6 +3812,9 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
         self.apply_theme(ctx);
+        if self.take_deferred_close() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         let focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
         let regained_focus = focused && !self.window_focused;
         // Mark messages received while hidden as read on window return.
@@ -3752,7 +3834,18 @@ impl App {
             && !self.quit_requested
             && self.hides_to_tray()
         {
-            self.hide_intent = true;
+            #[cfg(target_os = "macos")]
+            if self.hide_stage == HideStage::Closing {
+                // This close was queued by the previous frame. Let it destroy the window.
+                self.hide_stage = HideStage::None;
+            } else {
+                self.arm_tray_hide(ctx);
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.hide_intent = true;
+            }
         }
         self.lock_scroll_axis(ctx);
         self.take_drops_and_pastes(ctx);

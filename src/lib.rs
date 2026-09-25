@@ -10,6 +10,7 @@ pub mod cache;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
 pub mod diagnostics;
+pub mod drag_out;
 pub mod emoji;
 pub mod image_cache;
 #[cfg(target_os = "macos")]
@@ -27,6 +28,7 @@ pub mod sticker_search;
 pub mod stickers;
 pub mod system_fonts;
 pub mod theme;
+pub mod timestretch;
 pub mod transcript;
 #[cfg(target_os = "linux")]
 pub mod tray;

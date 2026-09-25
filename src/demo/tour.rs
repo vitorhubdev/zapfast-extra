@@ -311,6 +311,8 @@ pub struct Tour {
     next: usize,
     previous: f32,
     pointer: Pos2,
+    /// Last position handed to egui. A repeated move restarts tooltip delay.
+    reported: Option<Pos2>,
     motion: Option<(f32, Pos2, Pos2)>,
     labels: HashMap<String, Pos2>,
     trace: Vec<Trace>,
@@ -328,6 +330,7 @@ impl Tour {
             next: 0,
             previous: 0.0,
             pointer: pos2(680.0, 440.0),
+            reported: None,
             motion: None,
             labels: HashMap::new(),
             trace: Vec::new(),
@@ -466,7 +469,13 @@ impl Tour {
                 phase: egui::TouchPhase::Move,
             });
         }
-        input.events.insert(0, Event::PointerMoved(self.pointer));
+        // Moves the pointer only while it is elsewhere: each move restarts
+        // egui's tooltip delay, so a fake pointer that kept moving in place
+        // would never show one.
+        if self.reported != Some(self.pointer) {
+            input.events.insert(0, Event::PointerMoved(self.pointer));
+            self.reported = Some(self.pointer);
+        }
         if self.trace.last().is_none_or(|event| {
             !matches!(event.event,
             TraceEvent::Pointer { x, y } if x == self.pointer.x && y == self.pointer.y)

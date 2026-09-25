@@ -1046,6 +1046,25 @@ fn sticker_picture(
                 theme::paint_spinner(ui, rect, 20.0, palette.accent);
             }
         }
-        _ => image.paint_at(ui, rect),
+        _ => {
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, 8.0, palette.surface);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Couldn't load",
+                    theme::regular(11.0),
+                    palette.dim,
+                );
+            }
+            ui.interact(
+                rect,
+                ui.id().with(("sticker-unreadable", path)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(
+                "This sticker file is missing or damaged. A saved sticker is not deleted.",
+            );
+        }
     }
 }

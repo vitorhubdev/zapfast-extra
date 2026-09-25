@@ -89,6 +89,10 @@ fn build_menu() -> tray_icon::menu::Result<Menu> {
     Ok(menu)
 }
 
+pub fn detach() {
+    *REPAINT.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 pub fn attach(ctx: &egui::Context) {
     // Layout tests use headless contexts on test threads, without an NSApp.
     if objc2::MainThreadMarker::new().is_none() {

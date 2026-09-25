@@ -1,5 +1,6 @@
 /target/
 **/target/
+/target-rel*/
 __pycache__/
 .idea/
 .vscode/

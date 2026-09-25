@@ -2,6 +2,70 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.87] - 2026-09-25
+
+### Fixed
+
+- On macOS, hiding to the tray turns input methods off and waits one frame before the window is destroyed. Closing the window no longer shares the frame in which AppKit delivers the close. The menu repaint handle is cleared when that window is gone. This targets the input-method crash while the view is being torn down (winit 0.30.13, the same family as winit #4333 and #4626). It is not validated on macOS 26 here.
+
+## [1.0.86] - 2026-09-25
+
+### Fixed
+
+- Voice at 1.5x and 2x for clips up to two minutes uses the same overlap-add as ZapFast 0.16.2. The previous hop blend made larger sample jumps on speech-like audio with a click and noise. Listening on a device is still required. Longer clips keep the streaming stretcher.
+- A sticker tile that cannot be drawn says so, instead of the toolkit's error mark. Healing a sticker no longer deletes a file that is neither a cache copy nor a chat attachment.
+- The drag data object is covered by a test that calls format listing, format query, and GetData.
+
+## [1.0.85] - 2026-09-24
+
+### Fixed
+
+- Dragging a file out no longer stays in "continue" when the mouse button is released, and the data object lists `CF_HDROP` so a folder can see the file. The path in the drop is absolute. If the folder refuses it, ZapExt says so and points at Save a copy. Accepting the drop is not reported as a finished copy.
+
+## [1.0.84] - 2026-09-24
+
+### Fixed
+
+- An accepted drag no longer deletes the staged file on a timer. `DoDragDrop` only reports that `Drop` returned or that the drag was cancelled. A cancel removes the staged name. A copy stays in `drag-export` until a later sweep, which removes idle files older than a day and leaves open files alone. The original is not deleted. A consumer that waits more than a day to open the export, and is not holding it open, finds the name gone. The native drop into Explorer is not validated.
+
+## [1.0.83] - 2026-09-24
+
+### Fixed
+
+- A drag that returns keeps the staged link until the reader lets go, or for two minutes, and never deletes the original. A second drag of the same name does not remove the first link. If the link cannot be created, ZapExt says so and points at Save a copy. The file does not open on the same gesture.
+
+### Note
+
+- The native drop into Explorer was not exercised here. See the manual steps recorded with this version.
+- The staged name is removed at two minutes even while a reader has it open. That drops the name only: an already-open read still returns the bytes, and a reader that has not opened it yet finds nothing. Preparing an 8 MB hard link on this machine took 1 ms. That measurement is not a smoothness result.
+
+## [1.0.82] - 2026-09-24
+
+### Added
+
+- On Windows, drag a downloaded photo, video, or document onto a folder to copy it. The chat message and the original file stay. The drag uses the system shell, does not read the file on the interface thread, and holds the file out of cache cleanup until the drop finishes. A missing or empty file does not start a drag. Save a copy remains available. Names keep accents and drop characters Windows rejects.
+
+### Fixed
+
+- Release checksums may start with a `# commit` line. The updater still finds the file hash.
+- A release binary is compiled with the tag's commit and, for a candidate tag, with the `X.Y.Z-rc.N` version. Archives are accepted only when the binary inside contains that commit. Rerunning a workflow may finish a draft and refuses a release that is already published.
+
+## [1.0.81] - 2026-09-24
+
+### Changed
+
+- A version tag now stops in a draft GitHub release. The draft is created only after every platform artifact exists, and its checksums are tied to that commit. An already published release for the same tag is left untouched. Native packages are built and install-checked without being published.
+
+## [1.0.80] - 2026-09-24
+
+### Added
+
+- Resting the pointer on a chat-list preview that was cut short, or that hides further lines, shows the whole last message in a tooltip (group sender first), without opening the chat or marking it read.
+
+### Tests
+
+- Full-summary lines stay behind the one-line label, and a headless hover shows the cut-short message, skips a preview that already fits, and skips a row that is typing.
+
 ## [1.0.79] - 2026-09-24
 
 ### Fixed

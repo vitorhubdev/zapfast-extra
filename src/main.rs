@@ -9,9 +9,17 @@ use clap::Parser;
 const APP_NAME: &str = "ZapExt";
 const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;
 
+// Referenced so a release binary keeps the commit it was compiled from.
+#[used]
+static COMPILED_COMMIT: &str = match option_env!("ZAPEXT_GIT_SHA") {
+    Some(sha) => sha,
+    None => "unknown",
+};
+
 fn app_title(demo: bool) -> String {
     // Trim once so a trailing newline in VERSION never leaks into the window
-    // title or `--version` output.
+    // title or `--version` output. Reading the commit keeps it in the binary.
+    let _commit = COMPILED_COMMIT;
     let version = zapfast::updates::zapext_version();
     if demo {
         format!("{APP_NAME} Demo - {version}")
@@ -250,6 +258,8 @@ fn main() -> eframe::Result<()> {
             }),
         )?;
         waker.detach();
+        #[cfg(target_os = "macos")]
+        zapfast::macos::detach();
 
         let hide = {
             let guard = slot.lock().unwrap_or_else(|p| p.into_inner());

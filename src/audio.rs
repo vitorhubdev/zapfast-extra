@@ -255,6 +255,27 @@ impl Source for FileSamples {
     }
 }
 
+/// Voice clips at or under this length are compressed with the overlap-add
+/// from ZapFast 0.16.2. Longer audio keeps the streaming stretcher.
+const STRETCH_OFFLINE: u64 = 120 * voice::RATE as u64;
+
+fn append_stretched<S>(sink: &rodio::Player, samples: S, speed: f32, total_in: u64)
+where
+    S: Iterator<Item = f32> + Send + 'static,
+{
+    if total_in > 0 && total_in <= STRETCH_OFFLINE {
+        let gathered: Vec<f32> = samples.take(total_in as usize).collect();
+        let compressed = crate::timestretch::speed_up(&gathered, speed);
+        sink.append(rodio::buffer::SamplesBuffer::new(
+            mono(),
+            rate(),
+            compressed,
+        ));
+        return;
+    }
+    sink.append(Stretched::new(samples, speed, total_in));
+}
+
 /// Window, synthesis hop, search radius and search stride of the
 /// streaming time-stretch, in samples at 48 kHz. One synthesis step
 /// emits one hop after scanning a few dozen candidates; all state stays
@@ -892,11 +913,12 @@ impl Player {
                 let base = clip_length(offset);
                 let tail = samples.len() - offset;
                 if stretched {
-                    sink.append(Stretched::new(
+                    append_stretched(
+                        sink,
                         SharedSamples::new(samples, offset),
                         speed,
                         tail as u64,
-                    ));
+                    );
                 } else {
                     sink.append(SharedSamples::new(samples, offset));
                 }
@@ -910,11 +932,12 @@ impl Player {
                 let base = clip_length(skip.min(usize::MAX as u64) as usize);
                 if stretched {
                     let total_in = frames.saturating_sub(skip);
-                    sink.append(Stretched::new(
+                    append_stretched(
+                        sink,
                         FileSamples::open(&spool, skip, frames)?,
                         speed,
                         total_in,
-                    ));
+                    );
                 } else {
                     sink.append(FileSamples::open(&spool, skip, frames)?);
                 }
@@ -1544,6 +1567,91 @@ mod tests {
             let out = stretched(small.clone(), speed);
             assert!((out.len() as f32 - 1500.0 / speed).abs() < 4096.0);
             assert_eq!(out[..512], small[..512]);
+        }
+    }
+
+    #[test]
+    fn stretch_speech_like_audio_is_less_jagged_with_overlap_add() {
+        let input = speech_like();
+        let fork = stretched(input.clone(), 1.5);
+        let upstream = crate::timestretch::speed_up(&input, 1.5);
+        assert!(fork.iter().all(|sample| sample.is_finite()));
+        assert!(upstream.iter().all(|sample| sample.is_finite()));
+        assert!(
+            peak(&upstream) < 1.5,
+            "overlap-add peak {}",
+            peak(&upstream)
+        );
+        let fork_jump = max_jump(&fork);
+        let upstream_jump = max_jump(&upstream);
+        assert!(
+            upstream_jump < fork_jump,
+            "overlap-add jump {upstream_jump} should be under the hop blend {fork_jump}"
+        );
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local-roadmap/voice-samples");
+        let _ = std::fs::create_dir_all(&dir);
+        write_wav(&dir.join("speech-like-1x.wav"), &input);
+        write_wav(&dir.join("speech-like-1.5x-hop-blend.wav"), &fork);
+        write_wav(&dir.join("speech-like-1.5x-overlap-add.wav"), &upstream);
+        write_wav(
+            &dir.join("speech-like-2x-overlap-add.wav"),
+            &crate::timestretch::speed_up(&input, 2.0),
+        );
+    }
+
+    fn speech_like() -> Vec<f32> {
+        let mut out = Vec::new();
+        for i in 0..(voice::RATE as usize / 5) {
+            let n = i as f32 / voice::RATE as f32;
+            let noise = ((i as u32).wrapping_mul(17).wrapping_mul(1_103_515_245) as f32
+                / u32::MAX as f32)
+                - 0.5;
+            out.push(noise * (1.0 - n * 4.0).max(0.0));
+        }
+        for i in 0..(voice::RATE as usize / 2) {
+            let t = i as f32 / voice::RATE as f32;
+            let vowel = (t * 120.0 * std::f32::consts::TAU).sin() * 0.4
+                + (t * 240.0 * std::f32::consts::TAU).sin() * 0.15;
+            let click = if i == 2000 { 0.9 } else { 0.0 };
+            out.push(vowel + click);
+        }
+        out
+    }
+
+    fn max_jump(samples: &[f32]) -> f32 {
+        samples
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .map(|sample| sample.abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn write_wav(path: &std::path::Path, samples: &[f32]) {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path).expect("wav");
+        let data_len = samples.len() as u32 * 2;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(36 + data_len).to_le_bytes()).unwrap();
+        file.write_all(b"WAVEfmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&voice::RATE.to_le_bytes()).unwrap();
+        file.write_all(&(voice::RATE * 2).to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&data_len.to_le_bytes()).unwrap();
+        for sample in samples {
+            let clipped = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+            file.write_all(&clipped.to_le_bytes()).unwrap();
         }
     }
 

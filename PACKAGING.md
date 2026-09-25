@@ -8,8 +8,10 @@ Application assets and native recipes stay in `packaging/`.
 ZapExt is a fork of ZapFast. The fork product version lives in `VERSION`
 (`1.0.x`) and GitHub tags are `v1.0.x` in
 `vitorhubdev/zapfast-extra`; source archives extract into
-`zapfast-extra-VERSION`. The Cargo package stays `zapfast 0.14.0` for
-compatibility (executable, storage, AppUserModelID, bundle ID). Use the
+`zapfast-extra-VERSION`. The Cargo package name stays `zapfast`; its version
+matches `VERSION`. Executable, storage, AppUserModelID, and bundle ID stay
+`zapfast` for compatibility. A tag push builds a draft release and does not
+publish it. Use the
 configuration from the matching tag to rebuild a release. Existing release
 files keep their original `zapfast-v*` names; the Windows direct portable
 `ZapExt-v*-windows-*-portable.exe` is additive.

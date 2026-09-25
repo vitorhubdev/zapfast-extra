@@ -543,6 +543,7 @@ pub fn populate(app: &mut App) {
                 sender: last.sender.clone(),
                 sender_name: last.sender_name.clone(),
                 summary: last.summary(),
+                full: last.content.full_summary(),
                 status: last.status,
             });
         app.conversations.insert(sample.id.to_owned(), conversation);
@@ -842,6 +843,7 @@ pub fn populate(app: &mut App) {
                 sender: last.sender.clone(),
                 sender_name: last.sender_name.clone(),
                 summary: last.summary(),
+                full: last.content.full_summary(),
                 status: last.status,
             });
         }
@@ -1414,6 +1416,153 @@ mod tests {
                 .any(|m| matches!(m.content, Content::Revoked))
         );
         assert!(ada.messages.iter().any(|m| m.quoted.is_some()));
+    }
+
+    /// Resting the pointer on a chat row's cut-short preview shows the whole
+    /// last message, sender first in a group; a preview that already fits
+    /// shows nothing more, and neither does a row showing typing or a row
+    /// whose menu is open.
+    #[test]
+    fn hovering_a_cut_short_preview_shows_the_whole_last_message() {
+        let mut app = app();
+        let ctx = egui::Context::default();
+        app.attach(&ctx);
+        let group = SAMPLES[6].id;
+        let direct = SAMPLES[2].id;
+        // The sample has someone typing here, which the row shows instead.
+        let typing = SAMPLES[1].id;
+        let long = "The venue moved to the courtyard because the hall is being painted, \
+                    bring a jacket since it gets cold after sunset and the tail marker";
+        let sender = "4930111222333@s.whatsapp.net";
+        for chat in app.chats.iter_mut() {
+            if chat.id == group || chat.id == typing {
+                chat.last = Some(crate::model::LastMessage {
+                    from_me: false,
+                    sender: sender.into(),
+                    sender_name: Some("Linus Example".into()),
+                    summary: long.into(),
+                    full: long.into(),
+                    status: crate::model::Delivery::Read,
+                });
+            } else if chat.id == direct {
+                chat.last = Some(crate::model::LastMessage {
+                    from_me: false,
+                    sender: direct.into(),
+                    sender_name: None,
+                    summary: "Short one".into(),
+                    full: "Short one".into(),
+                    status: crate::model::Delivery::Read,
+                });
+            }
+        }
+        let name = app.display_name_or(sender, Some("Linus Example"));
+        let prefix = format!("{}: ", name.split_whitespace().next().unwrap());
+        render(&mut app, &ctx);
+        let long_area = ctx
+            .read_response(crate::ui::chats::preview_id(group))
+            .expect("a cut-short preview registers its hover area")
+            .rect;
+        assert!(
+            ctx.read_response(crate::ui::chats::preview_id(direct))
+                .is_none(),
+            "a preview that fits registers none"
+        );
+        assert!(
+            ctx.read_response(crate::ui::chats::preview_id(typing))
+                .is_none(),
+            "a row showing typing offers no tooltip"
+        );
+        let clock = std::cell::Cell::new(10.0);
+        let rest_on = |app: &mut App, chat: &str, click: bool| -> Vec<String> {
+            let index = |id: &str| {
+                app.visible_chats()
+                    .iter()
+                    .position(|row| row.id == id)
+                    .unwrap()
+            };
+            let offset = (index(chat) as f32 - index(group) as f32) * crate::theme::ROW_HEIGHT;
+            let pos = long_area.left_center() + egui::vec2(20.0, offset);
+            let mut shapes = Vec::new();
+            for step in 0..8 {
+                clock.set(clock.get() + 0.3);
+                let mut events = if step == 0 {
+                    vec![egui::Event::PointerMoved(pos)]
+                } else {
+                    Vec::new()
+                };
+                if click && step == 0 {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                if click && step == 1 {
+                    events.push(egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Secondary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1180.0, 780.0),
+                        )),
+                        time: Some(clock.get()),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let ctx = ui.ctx().clone();
+                        app.background_frame(&ctx);
+                        app.frame_ui(ui);
+                    },
+                );
+                output.textures_delta.clear();
+                shapes = output.shapes;
+            }
+            shapes
+                .into_iter()
+                .filter_map(|clipped| match clipped.shape {
+                    egui::Shape::Text(text) => Some(text.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let count = |texts: &[String], needle: &str| {
+            texts.iter().filter(|text| text.contains(needle)).count()
+        };
+        let texts = rest_on(&mut app, group, false);
+        assert!(
+            texts
+                .iter()
+                .any(|text| text.starts_with(&prefix) && text.contains("tail marker")),
+            "the tooltip shows the whole message after the group sender: {texts:?}"
+        );
+
+        let texts = rest_on(&mut app, direct, false);
+        assert_eq!(
+            count(&texts, "Short one"),
+            1,
+            "a preview that fits shows no tooltip"
+        );
+        assert_eq!(
+            count(&texts, "tail marker"),
+            1,
+            "only the group row shows it"
+        );
+
+        let texts = rest_on(&mut app, group, true);
+        assert_eq!(
+            count(&texts, "tail marker"),
+            1,
+            "an open menu hides the tooltip"
+        );
     }
 
     #[test]

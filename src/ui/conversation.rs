@@ -3543,6 +3543,9 @@ fn picture(
                                         24.0,
                                         palette.danger,
                                     );
+                                    response.clone().on_hover_text(
+                                        "Could not draw this sticker. The saved file is unchanged. Open it to try again.",
+                                    );
                                 } else {
                                     // The broken copy is gone and its
                                     // replacement is on its way.
@@ -3593,11 +3596,26 @@ fn picture(
                     image
                         .fit_to_exact_size(size)
                         .corner_radius(if sticker.is_some() { 0.0 } else { 6.0 })
-                        .sense(Sense::click()),
+                        .sense(Sense::click_and_drag()),
                 );
-                if response
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
+                let dragged = if sticker.is_none() {
+                    crate::drag_out::nudge(
+                        &response,
+                        path,
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("photo"),
+                    )
+                } else {
+                    crate::drag_out::Nudge::Idle
+                };
+                if let Some(message) = drag_notice(dragged) {
+                    actions.push(Action::ToastError(message.to_owned()));
+                }
+                if click_still_open(dragged)
+                    && response
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
                 {
                     actions.push(if sticker.is_some() {
                         Action::PeekSticker(path.clone())
@@ -3761,7 +3779,23 @@ fn display_seconds(seconds: Option<u32>) -> Option<u32> {
     seconds.filter(|seconds| *seconds > 0)
 }
 
-/// Draws a video poster and opens the downloaded video in the default player.
+fn click_still_open(nudge: crate::drag_out::Nudge) -> bool {
+    matches!(nudge, crate::drag_out::Nudge::Idle)
+}
+
+fn drag_notice(nudge: crate::drag_out::Nudge) -> Option<&'static str> {
+    match nudge {
+        crate::drag_out::Nudge::Accepted => {
+            Some("The folder accepted the file. ZapExt does not confirm when that copy finishes.")
+        }
+        crate::drag_out::Nudge::Refused => Some(
+            "That spot did not take the file. Use Save a copy in the message menu to choose a folder.",
+        ),
+        crate::drag_out::Nudge::Failed(message) => Some(message),
+        crate::drag_out::Nudge::Idle | crate::drag_out::Nudge::Began => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn video(
     ui: &mut egui::Ui,
@@ -3798,7 +3832,19 @@ fn video(
     let uri = thumbnail_uri(ui.ctx(), &message.chat, &message.id, thumbnail);
     let size = frame_size(media, Some((16, 9)), width.min(PICTURE_WIDTH));
     // Play downloaded GIFs in place; keep a poster for other videos.
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
+    let dragged = if let Some(path) = &media.path {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("video");
+        crate::drag_out::nudge(&response, path, name)
+    } else {
+        crate::drag_out::Nudge::Idle
+    };
+    if let Some(message) = drag_notice(dragged) {
+        actions.push(Action::ToastError(message.to_owned()));
+    }
     let playing = match (&media.path, gif) {
         (Some(path), true) => Some(animation::frame(ui, path, rect)),
         _ => None,
@@ -3812,9 +3858,10 @@ fn video(
                 Color32::WHITE,
             );
         }
-        if response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
+        if click_still_open(dragged)
+            && response
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
             && let Some(path) = &media.path
         {
             actions.push(Action::OpenFile(path.clone()));
@@ -3889,9 +3936,10 @@ fn video(
             chat: view.chat.id.clone(),
             message: message.id.clone(),
         });
-    } else if response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
+    } else if click_still_open(dragged)
+        && response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
     {
         match &media.path {
             Some(path) if gif => actions.push(Action::OpenFile(path.clone())),
@@ -4056,10 +4104,20 @@ fn attachment(
         .interact(
             response.rect,
             ui.id().with(("attachment", &message.id)),
-            Sense::click(),
+            Sense::click_and_drag(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    if response.clicked() && !auto {
+    let dragged = if let Some(path) = &media.path
+        && !crate::model::FileKind::of(&media.mime, title).runs_code()
+    {
+        crate::drag_out::nudge(&response, path, title)
+    } else {
+        crate::drag_out::Nudge::Idle
+    };
+    if let Some(message) = drag_notice(dragged) {
+        actions.push(Action::ToastError(message.to_owned()));
+    }
+    if response.clicked() && !auto && click_still_open(dragged) {
         match &media.path {
             // A PDF opens in the app's own viewer; other files keep going to
             // the desktop.
