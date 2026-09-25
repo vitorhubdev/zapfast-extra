@@ -2819,7 +2819,7 @@ impl App {
                 }
                 self.reply_to = None;
                 self.selected.clear();
-            self.selection_anchor = None;
+                self.selection_anchor = None;
                 self.emoji_start = None;
                 self.mention_start = None;
                 // Nobody is open: every conversation is inactive budget now.
@@ -3072,7 +3072,7 @@ impl App {
                 self.dialog = None;
                 self.forward_search.clear();
                 self.selected.clear();
-            self.selection_anchor = None;
+                self.selection_anchor = None;
             }
             Action::ToggleSelect(id) => {
                 self.selection_anchor = Some(id.clone());
@@ -3174,7 +3174,7 @@ impl App {
                         }
                     }
                     self.selected.clear();
-            self.selection_anchor = None;
+                    self.selection_anchor = None;
                     self.dialog = None;
                     match (revoked, local) {
                         (0, 0) => {}
