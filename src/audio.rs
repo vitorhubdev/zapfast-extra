@@ -1878,7 +1878,11 @@ mod tests {
             return;
         }
         let spooled = decode_to_spool(&path).expect("the soundtrack decodes");
-        assert!(spooled.frames > 0, "the clip is not empty");
+        assert!(
+            spooled.frames >= u64::from(PCM_RATE) * 3 / 4,
+            "the whole soundtrack must decode, got only {} frames",
+            spooled.frames
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
