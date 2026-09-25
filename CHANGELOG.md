@@ -2,6 +2,12 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.93] - 2026-09-25
+
+### Added
+
+- `Ctrl+Shift+[` and `Ctrl+Shift+]` switch to the previous and next chat, the same as `Alt+Up` and `Alt+Down`. On macOS the shortcut uses Command.
+
 ## [1.0.92] - 2026-09-25
 
 ### Changed

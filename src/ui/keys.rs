@@ -185,9 +185,18 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
     }
     // Alt+Up/Down switches chats without leaving the composer.
     let step = ctx.input_mut(|input| {
-        if input.consume_key(Modifiers::ALT, Key::ArrowDown) {
+        let brackets = Modifiers {
+            command: true,
+            shift: true,
+            ..Default::default()
+        };
+        if input.consume_key(Modifiers::ALT, Key::ArrowDown)
+            || input.consume_key(brackets, Key::CloseBracket)
+        {
             1
-        } else if input.consume_key(Modifiers::ALT, Key::ArrowUp) {
+        } else if input.consume_key(Modifiers::ALT, Key::ArrowUp)
+            || input.consume_key(brackets, Key::OpenBracket)
+        {
             -1
         } else {
             0
@@ -217,6 +226,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+F / Ctrl+K", "Search chats"),
     ("Ctrl+L", "Focus the message input"),
     ("Alt+↑ / Alt+↓", "Previous / next chat"),
+    ("Ctrl+Shift+[ / Ctrl+Shift+]", "Previous / next chat"),
     ("Enter", "Send (Shift+Enter for a new line)"),
     (
         "Escape",
