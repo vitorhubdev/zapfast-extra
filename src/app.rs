@@ -6151,10 +6151,10 @@ mod tests {
                 .status()
                 .is_ok_and(|status| status.success());
             if !made {
-            // GitHub runners do not all ship an H.264/libx264 encoder.
-            // Keep this as a real decoder test wherever the codec is available.
-            return;
-        }
+                // GitHub runners do not all ship an H.264/libx264 encoder.
+                // Keep this as a real decoder test wherever the codec is available.
+                return;
+            }
             let mut body = message("1@s.whatsapp.net", id, 10);
             body.content = Content::Video {
                 caption: None,
