@@ -6138,7 +6138,7 @@ mod tests {
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
-        let real = |id: &str| {
+        let real = |id: &str| -> Option<(std::path::PathBuf, Message)> {
             let path = root.join(format!("{id}.mp4"));
             let made = std::process::Command::new("ffmpeg")
                 .args(["-v", "error", "-y"])
@@ -6153,7 +6153,7 @@ mod tests {
             if !made {
                 // GitHub runners do not all ship an H.264/libx264 encoder.
                 // Keep this as a real decoder test wherever the codec is available.
-                return;
+                return None;
             }
             let mut body = message("1@s.whatsapp.net", id, 10);
             body.content = Content::Video {
@@ -6169,10 +6169,14 @@ mod tests {
                 seconds: None,
                 gif: false,
             };
-            (path, body)
+            Some((path, body))
         };
-        let (first_path, first) = real("m1");
-        let (_, second) = real("m2");
+        let Some((first_path, first)) = real("m1") else {
+            return;
+        };
+        let Some((_, second)) = real("m2") else {
+            return;
+        };
         app.conversations
             .entry("1@s.whatsapp.net".into())
             .or_default()
