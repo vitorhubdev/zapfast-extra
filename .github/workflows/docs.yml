@@ -19,12 +19,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pages:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" >/dev/null 2>&1; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "GitHub Pages is not enabled. The site is built and not deployed."
+          fi
+
   build:
+    needs: pages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/configure-pages@v6
+        if: needs.pages.outputs.enabled == 'true'
 
       - uses: ruby/setup-ruby@v1
         with:
@@ -45,11 +63,13 @@ jobs:
         run: bundle exec jekyll build --destination ./_site
 
       - uses: actions/upload-pages-artifact@v5
+        if: needs.pages.outputs.enabled == 'true'
         with:
           path: ./docs/_site
 
   deploy:
-    needs: build
+    needs: [pages, build]
+    if: needs.pages.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

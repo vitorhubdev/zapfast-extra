@@ -2,6 +2,13 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.94] - 2026-09-25
+
+### Fixed
+
+- The release workflow is valid again: the macOS job had two `env` blocks, so GitHub rejected the file before any job started.
+- The docs workflow builds the site when GitHub Pages is off, and deploys only after Pages is enabled. A disabled Pages site no longer fails the push.
+
 ## [1.0.93] - 2026-09-25
 
 ### Added

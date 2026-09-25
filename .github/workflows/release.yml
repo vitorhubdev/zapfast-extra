@@ -155,7 +155,6 @@ jobs:
     runs-on: macos-latest
     env:
       ZAPEXT_GIT_SHA: ${{ github.sha }}
-    env:
       # Complete Apple credentials enable native-packages signing/notarization.
       APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
