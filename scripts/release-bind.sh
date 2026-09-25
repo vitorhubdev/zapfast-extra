@@ -6,6 +6,7 @@ set -euo pipefail
 dist=${1:?dist directory}
 sha=${2:?commit sha}
 tag=${3:?tag}
+root=$(cd "$(dirname "$0")" && pwd)
 
 cd "$dist"
 mapfile -t stamps < <(find . -name 'release-commit-*.txt' -print | sort)
@@ -41,7 +42,6 @@ for name in "${required[@]}"; do
     exit 1
   fi
 done
-root=$(cd "$(dirname "$0")" && pwd)
 for name in "${required[@]}"; do
   case "$name" in
     *.tar.gz|*.zip|*-portable.exe) bash "$root/release-origin.sh" "$sha" "$name" ;;

@@ -5,6 +5,22 @@ const ADDRESS: &str = "15551212001.0:1@s.whatsapp.net";
 #[tokio::main]
 async fn main() {
     let path = std::env::args().nth(1).expect("db path");
+    let mode = std::env::args().nth(2).unwrap_or_else(|| "create".into());
+    if mode == "rollback" {
+        match SqliteStore::new(&path).await {
+            Ok(store) => {
+                let loaded = store
+                    .load_identity_for_device(ADDRESS, 1)
+                    .await
+                    .expect("read");
+                println!("rollback opened, identity {loaded:?}");
+            }
+            Err(error) => {
+                println!("rollback refused: {error}");
+            }
+        }
+        return;
+    }
     let store = SqliteStore::new(&path).await.expect("old store opens");
     store
         .put_identity_for_device(ADDRESS, [7u8; 32], 1)

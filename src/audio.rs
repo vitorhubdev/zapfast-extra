@@ -370,16 +370,21 @@ impl<S: Iterator<Item = f32> + Send> Source for OverlapPlay<S> {
 }
 
 /// Window, synthesis hop, search radius and search stride of the
-/// streaming time-stretch, in samples at 48 kHz. One synthesis step
-/// emits one hop after scanning a few dozen candidates; all state stays
-/// within a few windows no matter how long the clip is.
+/// comparison hop-blend, in samples at 48 kHz. Playback uses
+/// [`crate::timestretch::Stream`]. This path only feeds listening
+/// samples and the long-clip memory check.
+#[cfg(test)]
 const STRETCH_WINDOW: usize = 2048;
+#[cfg(test)]
 const STRETCH_HOP: usize = 512;
+#[cfg(test)]
 const STRETCH_SEARCH: usize = 256;
+#[cfg(test)]
 const STRETCH_STEP: usize = 8;
 /// Inputs shorter than two hops bypass the stretch and play unchanged:
 /// periodicity is meaningless below one window, so identity beats any
 /// resampling there. Bounded prebuffer, read once at construction.
+#[cfg(test)]
 const STRETCH_PASSTHROUGH: usize = 2 * STRETCH_HOP;
 /// Output length promise: within one window plus one hop of input over
 /// speed (2560 samples, about 53 ms at 48 kHz). The first frame has no
@@ -389,6 +394,7 @@ const STRETCH_PASSTHROUGH: usize = 2 * STRETCH_HOP;
 /// follows speed. The sink always runs at 1x; only this source shortens
 /// the stream. Both player inputs are mono 48 kHz by construction, so one
 /// channel-free implementation covers memory and spool sources alike.
+#[cfg(test)]
 struct Stretched<S> {
     inner: S,
     hop_in: usize,
@@ -414,6 +420,7 @@ struct Stretched<S> {
     passthrough: bool,
 }
 
+#[cfg(test)]
 impl<S: Iterator<Item = f32>> Stretched<S> {
     fn new(mut inner: S, speed: f32, total_in: u64) -> Self {
         debug_assert!(speed > 1.0);
@@ -547,6 +554,7 @@ impl<S: Iterator<Item = f32>> Stretched<S> {
     }
 }
 
+#[cfg(test)]
 impl<S: Iterator<Item = f32>> Iterator for Stretched<S> {
     type Item = f32;
 
@@ -575,6 +583,7 @@ impl<S: Iterator<Item = f32>> Iterator for Stretched<S> {
     }
 }
 
+#[cfg(test)]
 impl<S: Iterator<Item = f32> + Send> Source for Stretched<S> {
     fn current_span_len(&self) -> Option<usize> {
         // Spans only re-chunk the stream now that the sink never
@@ -1704,9 +1713,21 @@ mod tests {
     #[test]
     fn overlap_add_continues_across_pushes_and_past_two_minutes() {
         let rate = voice::RATE as usize;
+        let mut metrics = Vec::new();
         for seconds in [119, 120, 121] {
             let input = long_formant(seconds * rate);
             let whole = crate::timestretch::speed_up(&input, 1.5);
+            let mut stream = crate::timestretch::Stream::new(1.5);
+            let mut held = 0usize;
+            for chunk in input.chunks(10_000) {
+                stream.push(chunk);
+                while stream.pop().is_some() {}
+                held = held.max(stream.retained());
+            }
+            assert!(
+                held < 48_000,
+                "{seconds}s retained {held} samples, above one second of audio"
+            );
             let mut stream = crate::timestretch::Stream::new(1.5);
             for chunk in input.chunks(10_000) {
                 stream.push(chunk);
@@ -1723,6 +1744,10 @@ mod tests {
                 .map(|(a, b)| (a - b).abs())
                 .fold(0.0, f32::max);
             assert!(max < 1e-4, "{seconds}s streams differ by {max}");
+            metrics.push(format!(
+                "{seconds}s held={held} max_abs_diff={max:.3e} samples={}",
+                parted.len()
+            ));
         }
         let dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".local-roadmap/voice-samples");
@@ -1732,6 +1757,13 @@ mod tests {
         let at = (120.0 * rate as f32 / 1.5) as usize;
         let excerpt = &played[at.saturating_sub(rate)..(at + rate).min(played.len())];
         write_wav(&dir.join("speech-like-120s-join-1.5x.wav"), excerpt);
+        let played_fast = crate::timestretch::speed_up(&around, 2.0);
+        let at_fast = (120.0 * rate as f32 / 2.0) as usize;
+        let excerpt_fast =
+            &played_fast[at_fast.saturating_sub(rate)..(at_fast + rate).min(played_fast.len())];
+        write_wav(&dir.join("speech-like-120s-join-2x.wav"), excerpt_fast);
+        std::fs::write(dir.join("speech-like-120s-metrics.txt"), metrics.join("\n"))
+            .expect("metrics");
     }
 
     fn long_formant(n: usize) -> Vec<f32> {

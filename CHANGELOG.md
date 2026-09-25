@@ -2,6 +2,19 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.95] - 2026-09-25
+
+### Fixed
+
+- Long voice playback drops samples already handed to the player, so the overlap buffer stays near a few frames. New frames still land on the overlap that has not been played.
+- The release binder resolves its own directory before it enters the artifact folder. A relative `scripts/release-bind.sh` no longer fails while checking that the archives contain the commit.
+- Formatting on the reconnect flag and the stretcher, which failed the 1.0.94 quality job.
+
+### Tests
+
+- Formants of 119, 120 and 121 seconds, pushed in blocks of 10,000 samples and played between blocks, keep under one second of audio in memory and match one `speed_up` within 0.0001. Excerpts around the old two-minute point are written at 1.5x and 2x. They are an artificial pulse, and listening is still required.
+- The older hop-blend stretcher stays available for those comparison samples and for the fifteen-minute memory check. Playback does not use it.
+
 ## [1.0.94] - 2026-09-25
 
 ### Fixed

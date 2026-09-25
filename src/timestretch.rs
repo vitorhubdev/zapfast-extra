@@ -58,8 +58,11 @@ pub struct Stream {
     previous: Option<usize>,
     acc: Vec<f32>,
     weight: Vec<f32>,
-    /// Absolute output index of `acc[0]`.
+    /// Absolute output index of the next sample `pop` returns.
     head: usize,
+    /// Next unread index inside `acc`. Drained in blocks so a long clip
+    /// does not slide the whole buffer one sample at a time.
+    emit: usize,
     /// Absolute output index where the next frame is added.
     place: usize,
     closed: bool,
@@ -88,6 +91,7 @@ impl Stream {
             acc: Vec::new(),
             weight: Vec::new(),
             head: 0,
+            emit: 0,
             place: 0,
             closed: false,
             total_in: 0,
@@ -110,24 +114,35 @@ impl Stream {
         self.pump();
     }
 
+    /// Input samples plus overlap still held. Playback stays near a few
+    /// frames, not the length of the clip.
+    pub fn retained(&self) -> usize {
+        self.input.len() + self.acc.len()
+    }
+
     pub fn pop(&mut self) -> Option<f32> {
         self.pump();
         let ready = self.ready();
         if self.head >= ready {
             return None;
         }
-        let sample = self.acc[0] / self.weight[0].max(1e-3);
-        self.acc.remove(0);
-        self.weight.remove(0);
+        let sample = self.acc[self.emit] / self.weight[self.emit].max(1e-3);
+        self.emit += 1;
         self.head += 1;
+        if self.emit >= 4096 {
+            self.acc.drain(..self.emit);
+            self.weight.drain(..self.emit);
+            self.emit = 0;
+        }
         Some(sample)
     }
 
     fn ready(&self) -> usize {
+        let end = self.head - self.emit + self.acc.len();
         if !self.closed {
-            return self.place.min(self.head + self.acc.len());
+            return self.place.min(end);
         }
-        self.target.min(self.head + self.acc.len())
+        self.target.min(end)
     }
 
     fn pump(&mut self) {
@@ -149,7 +164,8 @@ impl Stream {
             let chosen = if can_search {
                 self.previous
                     .map(|prev| {
-                        let shift = best_alignment_raw(&self.input, self.origin, self.nominal, prev);
+                        let shift =
+                            best_alignment_raw(&self.input, self.origin, self.nominal, prev);
                         (self.nominal as isize + shift).clamp(0, last_start as isize) as usize
                     })
                     .unwrap_or(self.nominal)
@@ -185,12 +201,12 @@ impl Stream {
 
     fn add_frame(&mut self, chosen: usize) {
         let local = chosen - self.origin;
-        let need = self.place + FRAME - self.head;
+        let start = self.place - self.head + self.emit;
+        let need = start + FRAME;
         if self.acc.len() < need {
             self.acc.resize(need, 0.0);
             self.weight.resize(need, 0.0);
         }
-        let start = self.place - self.head;
         for i in 0..FRAME {
             let sample = self.input.get(local + i).copied().unwrap_or(0.0);
             self.acc[start + i] += sample * self.window[i];
@@ -258,4 +274,3 @@ fn best_alignment_raw(input: &[f32], origin: usize, nominal: usize, previous: us
     }
     best
 }
-

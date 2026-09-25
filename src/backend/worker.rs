@@ -10394,7 +10394,7 @@ mod receipt_tests {
             download_retries: HashMap::new(),
             update_checker: crate::updates::Checker::new(),
             link_watch: Default::default(),
-        reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            reconnecting: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             sync_attempts: HashMap::new(),
             sync_in_flight: HashMap::new(),
             sync_aliases: HashMap::new(),
