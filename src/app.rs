@@ -50,6 +50,14 @@ const TYPING_TIMEOUT: Duration = Duration::from_secs(12);
 const CHAT_SEARCH_PAUSE: Duration = Duration::from_millis(250);
 /// Extra width a PDF page may be short of before it is rendered again.
 const PDF_SHARP_ENOUGH: u32 = 200;
+/// A window narrower or shorter than this is a poisoned restore, not a real
+/// size: the minimum inner size is 720x480.
+const HEALTHY_MIN_W: f32 = 400.0;
+const HEALTHY_MIN_H: f32 = 300.0;
+/// Size used when no healthy size was ever recorded. Matches `main`.
+const FALLBACK_SIZE: [f32; 2] = [1180.0, 780.0];
+/// Frames spent asking a tiny window to grow before giving up.
+const MAX_TINY_FRAMES: u32 = 120;
 
 /// Uploaded scrub preview picture: the file and drag generation it was
 /// decoded for, the fraction it shows, and its texture slot.
@@ -236,6 +244,395 @@ fn finish_deferred_hide(stage: HideStage) -> (HideStage, bool) {
         (HideStage::Closing, true)
     } else {
         (stage, false)
+    }
+}
+
+/// What the current inner size says about the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum WindowHealth {
+    Healthy(egui::Vec2),
+    /// Smaller than any size the user can drag to: an inadequate persisted
+    /// size (64x64 seen in the wild). Never a real window.
+    Tiny,
+    /// Minimized, maximized, fullscreen, or unknown: not a size to keep.
+    /// A tiny window in these states is not repaired either.
+    Ignored,
+}
+
+/// Classifies the flags as reported: unknown (`None`) counts as off, which is
+/// safe because the flags only ever suppress. A healthy size is always worth
+/// remembering however little is known, and a tiny size is never legitimate:
+/// it sits below the minimum the window manager enforces, so repairing it
+/// cannot fight a real window on any backend.
+fn window_health(
+    size: Option<egui::Vec2>,
+    minimized: bool,
+    maximized: bool,
+    fullscreen: bool,
+) -> WindowHealth {
+    match size {
+        _ if minimized || maximized || fullscreen => WindowHealth::Ignored,
+        None => WindowHealth::Ignored,
+        Some(size) if size.x < HEALTHY_MIN_W || size.y < HEALTHY_MIN_H => WindowHealth::Tiny,
+        Some(size) => WindowHealth::Healthy(size),
+    }
+}
+
+/// A stored size worth restoring: finite, plausible, and big enough to be a
+/// real window. Guards a hand-edited settings file.
+fn sane_stored_size(size: [f32; 2]) -> Option<[f32; 2]> {
+    let [width, height] = size;
+    (width.is_finite()
+        && height.is_finite()
+        && width >= HEALTHY_MIN_W
+        && height >= HEALTHY_MIN_H
+        && width <= 16_384.0
+        && height <= 16_384.0)
+        .then_some(size)
+}
+
+#[cfg(test)]
+mod window_size_tests {
+    use super::*;
+
+    #[test]
+    fn window_health_flags_a_poisoned_restore() {
+        let size = |w, h| Some(egui::vec2(w, h));
+        assert_eq!(
+            window_health(size(64.0, 64.0), false, false, false),
+            WindowHealth::Tiny
+        );
+        assert_eq!(
+            window_health(size(0.0, 0.0), false, false, false),
+            WindowHealth::Tiny
+        );
+        assert_eq!(
+            window_health(size(1180.0, 780.0), false, false, false),
+            WindowHealth::Healthy(egui::vec2(1180.0, 780.0))
+        );
+        assert_eq!(
+            window_health(None, false, false, false),
+            WindowHealth::Ignored
+        );
+        assert_eq!(
+            window_health(size(64.0, 64.0), true, false, false),
+            WindowHealth::Ignored
+        );
+        assert_eq!(
+            window_health(size(2560.0, 1400.0), false, true, false),
+            WindowHealth::Ignored
+        );
+        assert_eq!(
+            window_health(size(2560.0, 1440.0), false, false, true),
+            WindowHealth::Ignored,
+            "a fullscreen size is never kept as the normal size"
+        );
+        assert_eq!(
+            window_health(size(64.0, 64.0), false, false, true),
+            WindowHealth::Ignored
+        );
+    }
+
+    #[test]
+    fn window_size_survives_a_settings_round_trip() {
+        let settings = Settings {
+            window_size: Some([1024.0, 700.0]),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let parsed: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.window_size, Some([1024.0, 700.0]));
+        let older: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(older.window_size, None);
+    }
+
+    fn window_app(settings: Settings) -> App {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("zapfast-window-{}-{n}", std::process::id()));
+        App::headless(AppDirs::under(&root), settings).0
+    }
+
+    /// Runs one frame with the given viewport state and returns the commands
+    /// the frame queued, exercising capture and repair together. Flags are
+    /// `Option` so tests also cover backends that never report them.
+    fn viewport_frame_flags(
+        app: &mut App,
+        inner: Option<[f32; 2]>,
+        minimized: Option<bool>,
+        maximized: Option<bool>,
+        fullscreen: Option<bool>,
+        monitor: Option<[f32; 2]>,
+    ) -> Vec<egui::ViewportCommand> {
+        let ctx = egui::Context::default();
+        let mut info = egui::ViewportInfo::default();
+        if let Some([width, height]) = inner {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, height));
+            info.inner_rect = Some(rect);
+        }
+        info.minimized = minimized;
+        info.maximized = maximized;
+        info.fullscreen = fullscreen;
+        info.monitor_size = monitor.map(|[width, height]| egui::vec2(width, height));
+        let mut input = egui::RawInput::default();
+        if let Some([width, height]) = inner {
+            input.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, height),
+            ));
+        }
+        input.viewports.insert(egui::ViewportId::ROOT, info);
+        let mut output = ctx.run_ui(input, |ui| app.track_window_size(ui.ctx()));
+        output.textures_delta.clear();
+        output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .clone()
+    }
+
+    fn viewport_frame(
+        app: &mut App,
+        inner: Option<[f32; 2]>,
+        minimized: bool,
+        maximized: bool,
+        monitor: Option<[f32; 2]>,
+    ) -> Vec<egui::ViewportCommand> {
+        viewport_frame_flags(
+            app,
+            inner,
+            Some(minimized),
+            Some(maximized),
+            Some(false),
+            monitor,
+        )
+    }
+
+    fn inner_size(command: &egui::ViewportCommand) -> Option<[f32; 2]> {
+        match command {
+            egui::ViewportCommand::InnerSize(size) => Some([size.x, size.y]),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_healthy_frame_is_remembered_without_commands() {
+        let mut app = window_app(Settings::default());
+        let commands = viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "nothing to repair: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+        assert_eq!(app.settings.window_size, Some([1280.0, 800.0]));
+        assert!(
+            app.settings_dirty,
+            "a valid change uses the normal save path"
+        );
+    }
+
+    #[test]
+    fn a_tiny_window_grows_back_to_the_last_good_size() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        let commands = viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None);
+        assert_eq!(
+            commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+            vec![[1280.0, 800.0]]
+        );
+    }
+
+    #[test]
+    fn a_tiny_window_without_history_uses_the_default_size() {
+        let mut app = window_app(Settings::default());
+        let commands = viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None);
+        assert_eq!(
+            commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+            vec![FALLBACK_SIZE]
+        );
+    }
+
+    #[test]
+    fn an_invalid_saved_size_is_never_restored() {
+        for bad in [
+            [0.0, 0.0],
+            [-50.0, 800.0],
+            [f32::NAN, 800.0],
+            [1280.0, f32::INFINITY],
+            [100_000.0, 800.0],
+        ] {
+            let mut app = window_app(Settings {
+                window_size: Some(bad),
+                ..Settings::default()
+            });
+            assert_eq!(app.last_window_size, None, "seed rejects {bad:?}");
+            let commands = viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None);
+            assert_eq!(
+                commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+                vec![FALLBACK_SIZE],
+                "fallback for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_minimized_window_is_left_alone() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        // Minimized frames report a 0x0 client area: neither stored nor grown.
+        let commands = viewport_frame(&mut app, Some([0.0, 0.0]), true, false, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "no repair while minimized: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+    }
+
+    #[test]
+    fn a_maximized_window_keeps_the_last_normal_size() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        // Fullscreen size is not a size to keep, and restore must not shrink it.
+        let commands = viewport_frame(&mut app, Some([2560.0, 1440.0]), false, true, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "maximized is never resized: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+    }
+
+    #[test]
+    fn hide_and_show_after_minimize_repairs_the_window() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        viewport_frame(&mut app, Some([0.0, 0.0]), true, false, None);
+        // Hiding destroys the window; showing recreates it, possibly tiny.
+        app.attach(&egui::Context::default());
+        let commands = viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None);
+        assert_eq!(
+            commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+            vec![[1280.0, 800.0]]
+        );
+    }
+
+    #[test]
+    fn hide_and_show_after_maximize_keeps_it_maximized() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        app.attach(&egui::Context::default());
+        // eframe restores the maximized flag itself; no resize may fight it.
+        let commands = viewport_frame(&mut app, Some([2560.0, 1440.0]), false, true, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "maximized restore is untouched: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+    }
+
+    #[test]
+    fn a_repair_fits_the_current_monitor() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(
+            &mut app,
+            Some([1920.0, 1080.0]),
+            false,
+            false,
+            Some([2560.0, 1440.0]),
+        );
+        let commands = viewport_frame(
+            &mut app,
+            Some([64.0, 64.0]),
+            false,
+            false,
+            Some([1366.0, 768.0]),
+        );
+        assert_eq!(
+            commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+            vec![[1366.0, 768.0]]
+        );
+    }
+
+    #[test]
+    fn an_unknown_size_sends_no_commands() {
+        let mut app = window_app(Settings::default());
+        let commands = viewport_frame(&mut app, None, false, false, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "nothing known: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn the_repair_stops_after_its_frame_budget() {
+        let mut app = window_app(Settings::default());
+        let mut sent = 0;
+        for _ in 0..(MAX_TINY_FRAMES + 10) {
+            sent += viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None)
+                .iter()
+                .filter(|command| inner_size(command).is_some())
+                .count();
+        }
+        assert_eq!(sent as u32, MAX_TINY_FRAMES);
+    }
+
+    #[test]
+    fn the_repair_stops_once_the_size_is_applied() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        // Three tiny frames ask for the same size: no oscillation.
+        let mut asked = Vec::new();
+        for _ in 0..3 {
+            asked.extend(
+                viewport_frame(&mut app, Some([64.0, 64.0]), false, false, None)
+                    .iter()
+                    .filter_map(inner_size),
+            );
+        }
+        assert_eq!(asked, vec![[1280.0, 800.0]; 3]);
+        // The window manager applies it: the next healthy frame is quiet and
+        // a later tiny frame starts over from a reset budget.
+        let quiet = viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        assert!(
+            quiet.iter().filter_map(inner_size).next().is_none(),
+            "applied size silences the repair: {quiet:?}"
+        );
+        assert_eq!(app.tiny_window_frames, 0);
+    }
+
+    #[test]
+    fn a_fullscreen_size_is_never_kept() {
+        let mut app = window_app(Settings::default());
+        viewport_frame(&mut app, Some([1280.0, 800.0]), false, false, None);
+        let commands = viewport_frame_flags(
+            &mut app,
+            Some([2560.0, 1440.0]),
+            Some(false),
+            Some(false),
+            Some(true),
+            None,
+        );
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "fullscreen is never resized: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+    }
+
+    #[test]
+    fn unknown_flags_trust_a_live_size() {
+        let mut app = window_app(Settings::default());
+        // Backends that never report flags still report the live size.
+        let commands =
+            viewport_frame_flags(&mut app, Some([1280.0, 800.0]), None, None, None, None);
+        assert!(
+            commands.iter().filter_map(inner_size).next().is_none(),
+            "nothing to repair: {commands:?}"
+        );
+        assert_eq!(app.last_window_size, Some([1280.0, 800.0]));
+        // And a tiny size is repaired even when nothing is known about it.
+        let commands = viewport_frame_flags(&mut app, Some([64.0, 64.0]), None, None, None, None);
+        assert_eq!(
+            commands.iter().filter_map(inner_size).collect::<Vec<_>>(),
+            vec![[1280.0, 800.0]]
+        );
     }
 }
 
@@ -466,6 +863,10 @@ pub struct App {
     pub focus_search: bool,
     pub quit_requested: bool,
     pub window_focused: bool,
+    /// Last healthy inner size of the window, in logical points.
+    last_window_size: Option<[f32; 2]>,
+    /// Frames spent repairing a tiny window since it was last healthy.
+    tiny_window_frames: u32,
     /// Cross-thread window repaint handle.
     waker: Waker,
     tray: Option<TrayService>,
@@ -564,6 +965,7 @@ impl App {
                 _ => Palette::dark(),
             });
         let open_chat = settings.last_chat.clone();
+        let last_window_size = settings.window_size.and_then(sane_stored_size);
         Self {
             dirs,
             settings,
@@ -688,6 +1090,8 @@ impl App {
             focus_search: false,
             quit_requested: false,
             window_focused: false,
+            last_window_size,
+            tiny_window_frames: 0,
             waker,
             tray: None,
             window_hidden: false,
@@ -809,6 +1213,7 @@ impl App {
             match command {
                 ControlCommand::Show => self.actions.push(Action::ShowWindow),
                 ControlCommand::ReloadThemes => self.actions.push(Action::ReloadThemes),
+                ControlCommand::Quit => self.actions.push(Action::Quit),
             }
         }
     }
@@ -898,6 +1303,7 @@ impl App {
             .ok();
         self.applied_dark = None;
         self.zoom_applied = false;
+        self.tiny_window_frames = 0;
         self.window_hidden = false;
         self.hide_intent = false;
         self.wants_show = false;
@@ -2745,6 +3151,52 @@ impl App {
         }
     }
 
+    /// Remembers the last healthy window size and grows a window that eframe
+    /// restored at an inadequate persisted size.
+    fn track_window_size(&mut self, ctx: &egui::Context) {
+        let (inner, minimized, maximized, fullscreen, monitor) = ctx.input(|input| {
+            let viewport = input.viewport();
+            (
+                viewport.inner_rect.map(|rect| rect.size()),
+                viewport.minimized == Some(true),
+                viewport.maximized == Some(true),
+                viewport.fullscreen == Some(true),
+                viewport.monitor_size,
+            )
+        });
+        match window_health(inner, minimized, maximized, fullscreen) {
+            WindowHealth::Healthy(size) => {
+                let size = [size.x.round(), size.y.round()];
+                self.last_window_size = Some(size);
+                if self.settings.window_size != Some(size) {
+                    self.settings.window_size = Some(size);
+                    self.mark_settings_dirty();
+                }
+                self.tiny_window_frames = 0;
+            }
+            WindowHealth::Tiny => {
+                if self.tiny_window_frames < MAX_TINY_FRAMES {
+                    self.tiny_window_frames += 1;
+                    let mut size = self
+                        .last_window_size
+                        .and_then(sane_stored_size)
+                        .or(self.settings.window_size.and_then(sane_stored_size))
+                        .unwrap_or(FALLBACK_SIZE);
+                    // The repair bypasses eframe's load-time clamp, so fit
+                    // the smaller monitor here instead of overshooting it.
+                    if let Some(monitor) = monitor {
+                        size = [
+                            size[0].min(monitor.x.max(HEALTHY_MIN_W)),
+                            size[1].min(monitor.y.max(HEALTHY_MIN_H)),
+                        ];
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size.into()));
+                }
+            }
+            WindowHealth::Ignored => {}
+        }
+    }
+
     pub fn mark_settings_dirty(&mut self) {
         self.settings_dirty = true;
     }
@@ -2972,6 +3424,7 @@ impl App {
                 self.backend.send(Command::Download { chat, message });
             }
             Action::ToastError(message) => self.toast_error(message),
+            Action::ToastInfo(message) => self.toast(message),
             Action::OpenFile(path) => {
                 if let Err(error) = open::that_detached(&path) {
                     self.toast_error(format!("Could not open {}: {error}", path.display()));
@@ -3866,6 +4319,7 @@ impl App {
             .lock()
             .unwrap_or_else(|p| p.into_inner()) = None;
         self.apply_theme(ctx);
+        self.track_window_size(ctx);
         if self.take_deferred_close() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -4823,6 +5277,41 @@ mod tests {
             commands.try_recv().unwrap(),
             Command::MarkPlayed { receipts: true, .. }
         ));
+    }
+
+    #[test]
+    fn a_shared_contact_opens_its_chat_without_touching_the_address_book() {
+        // Synthetic card; the waid is the account WhatsApp resolved.
+        let cards = crate::vcard::parse(
+            "BEGIN:VCARD\nVERSION:3.0\nFN:Ada Demo\n\
+             item1.TEL;waid=15550100101:+1 555-010-0101\nEND:VCARD",
+        );
+        let chats = crate::ui::conversation::card_chats("Ada Demo", &cards);
+        assert_eq!(chats.len(), 1);
+        let mut app = app();
+        let (backend, mut commands) = Backend::recording();
+        app.backend = backend;
+        app.actions
+            .push(crate::ui::conversation::open_card_chat(&chats[0]));
+        app.apply_actions(&egui::Context::default());
+        let id = "15550100101@s.whatsapp.net";
+        assert_eq!(app.open_chat.as_deref(), Some(id));
+        assert!(app.chat(id).is_some());
+        let mut sent = Vec::new();
+        while let Ok(command) = commands.try_recv() {
+            sent.push(command);
+        }
+        assert!(sent.iter().any(|command| matches!(
+            command,
+            Command::EnsureChat { chat, name } if chat == id && name == "Ada Demo"
+        )));
+        // No registration check and nothing written to the phone's contacts.
+        assert!(!sent.iter().any(|command| matches!(
+            command,
+            Command::NewContact { .. }
+                | Command::ContactChecked { .. }
+                | Command::SaveContact { .. }
+        )));
     }
 
     fn message(chat: &str, id: &str, timestamp: i64) -> Message {

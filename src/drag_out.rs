@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 static LEASES: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
 /// Idle export files older than this are residue. DoDragDrop does not report
@@ -209,11 +210,18 @@ fn file_busy(path: &Path) -> bool {
     }
 }
 
+/// How long the pointer must stay down on a file before a drag can leave the
+/// window. A quick flick stays a click or a scroll.
+pub const HOLD_TO_DRAG: Duration = Duration::from_millis(400);
+/// How far the pointer must travel, once held, before the shell drag starts.
+const DRAG_DISTANCE: f32 = 10.0;
+
 /// What a drag gesture did on this frame.
 #[derive(Clone, Copy)]
 pub enum Nudge {
     Idle,
-    /// The shell drag ran. Do not also open the file.
+    /// The file is held or dragged but the shell drag has not started, or a
+    /// long press just ended. Do not also open the file.
     Began,
     /// The target accepted a copy. The shell does not report where it wrote it.
     Accepted,
@@ -223,32 +231,62 @@ pub enum Nudge {
     Failed(&'static str),
 }
 
-/// Drag the pointer a short way on a ready file to start a copy drag once.
+/// Hold the pointer on a ready file, then drag it a short way, to start a copy
+/// drag once. Until both the hold and the distance are met the gesture is
+/// `Began`, so callers suppress the click and can paint `paint_hint`.
 pub fn nudge(response: &egui::Response, path: &Path, name: &str) -> Nudge {
     let once = response.id.with("export-drag");
     let travel_id = response.id.with("export-travel");
+    let press_id = response.id.with("export-press");
+    let ctx = &response.ctx;
     if !response.dragged() {
-        response.ctx.data_mut(|data| {
+        if response.is_pointer_button_down_on() && exportable(path, false) {
+            let held = ctx.data_mut(|data| {
+                data.get_temp_mut_or_insert_with(press_id, Instant::now)
+                    .elapsed()
+            });
+            if held >= HOLD_TO_DRAG {
+                return Nudge::Began;
+            }
+            // Wake when the hold is met so the hint shows without motion.
+            ctx.request_repaint_after(HOLD_TO_DRAG - held);
+            return Nudge::Idle;
+        }
+        let held = ctx.data_mut(|data| {
+            let held = data.get_temp::<Instant>(press_id).map(|at| at.elapsed());
             data.remove::<bool>(once);
             data.remove::<f32>(travel_id);
+            data.remove::<Instant>(press_id);
+            held
         });
+        // A long press released in place is not a click either.
+        return if held.is_some_and(|held| held >= HOLD_TO_DRAG) {
+            Nudge::Began
+        } else {
+            Nudge::Idle
+        };
+    }
+    // Read before locking: `drag_delta` takes the context read lock, which
+    // deadlocks inside `data_mut`'s write lock.
+    let delta = response.drag_delta().length();
+    let (travel, held, ran) = ctx.data_mut(|data| {
+        let travel = data.get_temp::<f32>(travel_id).unwrap_or(0.0) + delta;
+        data.insert_temp(travel_id, travel);
+        let held = data
+            .get_temp_mut_or_insert_with(press_id, Instant::now)
+            .elapsed();
+        (travel, held, data.get_temp::<bool>(once).unwrap_or(false))
+    });
+    if ran {
         return Nudge::Idle;
     }
-    let travel = response
-        .ctx
-        .data(|data| data.get_temp::<f32>(travel_id).unwrap_or(0.0))
-        + response.drag_delta().length();
-    response
-        .ctx
-        .data_mut(|data| data.insert_temp(travel_id, travel));
-    if travel < 12.0
-        || response
-            .ctx
-            .data(|data| data.get_temp::<bool>(once).unwrap_or(false))
-    {
-        return Nudge::Idle;
+    if held < HOLD_TO_DRAG || travel < DRAG_DISTANCE {
+        if held < HOLD_TO_DRAG {
+            ctx.request_repaint_after(HOLD_TO_DRAG - held);
+        }
+        return Nudge::Began;
     }
-    response.ctx.data_mut(|data| data.insert_temp(once, true));
+    ctx.data_mut(|data| data.insert_temp(once, true));
     if !exportable(path, false) {
         return Nudge::Failed("This file is not ready to drag. Use Save a copy after it finishes.");
     }
@@ -259,6 +297,40 @@ pub fn nudge(response: &egui::Response, path: &Path, name: &str) -> Nudge {
             "Could not start the drag. The original is unchanged. Use Save a copy instead.",
         ),
     }
+}
+
+/// A small card beside the pointer while a file is held or dragged, before
+/// the shell drag takes over. Uses the current visuals, not the app theme.
+pub fn paint_hint(ui: &mut egui::Ui, response: &egui::Response, display_name: &str, detail: &str) {
+    if !response.dragged() && !response.is_pointer_button_down_on() {
+        return;
+    }
+    let Some(pointer) = ui.ctx().pointer_latest_pos() else {
+        return;
+    };
+    let arming = ui.ctx().data(|data| {
+        data.get_temp::<Instant>(response.id.with("export-press"))
+            .is_none_or(|at| at.elapsed() < HOLD_TO_DRAG)
+    });
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    let weak = ui.visuals().weak_text_color();
+    egui::Area::new(response.id.with("export-hint"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(pointer + egui::vec2(16.0, 16.0))
+        .interactable(false)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_max_width(260.0);
+                ui.add(egui::Label::new(egui::RichText::new(display_name).strong()).truncate());
+                ui.label(egui::RichText::new(detail).small().color(weak));
+                let status = if arming {
+                    "Hold a moment, then drop it on a folder."
+                } else {
+                    "Release over a folder to copy."
+                };
+                ui.label(egui::RichText::new(status).small());
+            });
+        });
 }
 
 /// Start a native copy drag. Returns false when this platform has no shell
@@ -291,6 +363,7 @@ mod windows {
 
     use std::os::windows::ffi::OsStrExt;
 
+    use windows_sys::Win32::Foundation::GlobalFree;
     use windows_sys::Win32::System::Memory::{
         GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
     };
@@ -720,6 +793,11 @@ mod windows {
         }
         let locked = unsafe { GlobalLock(handle) };
         if locked.is_null() {
+            // The block stays allocated after a failed lock; free it here
+            // so a failed drop does not leak an HGLOBAL per attempt.
+            unsafe {
+                GlobalFree(handle);
+            }
             return None;
         }
         unsafe {
@@ -874,6 +952,85 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Runs one frame with `events` and returns what `nudge` said about a
+    /// file tile at the top left. The path does not exist, so a gesture that
+    /// passes the gate ends in `Failed` instead of a native drag.
+    fn frame(ctx: &egui::Context, events: Vec<egui::Event>) -> Nudge {
+        let mut result = Nudge::Idle;
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 400.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            let (_, response) =
+                ui.allocate_exact_size(egui::vec2(200.0, 200.0), egui::Sense::click_and_drag());
+            result = nudge(&response, Path::new("missing-drag-file.bin"), "file.bin");
+        });
+        output.textures_delta.clear();
+        result
+    }
+
+    fn press(pos: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn the_hold_gate_is_between_300_and_500_ms() {
+        assert!(HOLD_TO_DRAG >= Duration::from_millis(300));
+        assert!(HOLD_TO_DRAG <= Duration::from_millis(500));
+    }
+
+    #[test]
+    fn a_quick_flick_arms_but_never_starts_the_shell_drag() {
+        let ctx = egui::Context::default();
+        let start = egui::pos2(50.0, 50.0);
+        frame(&ctx, vec![egui::Event::PointerMoved(start)]);
+        frame(&ctx, vec![press(start, true)]);
+        let mut seen = Vec::new();
+        for step in 1..6 {
+            let at = start + egui::vec2(step as f32 * 12.0, 0.0);
+            seen.push(frame(&ctx, vec![egui::Event::PointerMoved(at)]));
+        }
+        assert!(seen.iter().any(|nudge| matches!(nudge, Nudge::Began)));
+        assert!(
+            seen.iter()
+                .all(|nudge| matches!(nudge, Nudge::Idle | Nudge::Began))
+        );
+        frame(&ctx, vec![press(start + egui::vec2(60.0, 0.0), false)]);
+    }
+
+    #[test]
+    fn a_held_drag_that_travels_reaches_the_export() {
+        let ctx = egui::Context::default();
+        let start = egui::pos2(50.0, 50.0);
+        frame(&ctx, vec![egui::Event::PointerMoved(start)]);
+        frame(&ctx, vec![press(start, true)]);
+        let first = frame(
+            &ctx,
+            vec![egui::Event::PointerMoved(start + egui::vec2(12.0, 0.0))],
+        );
+        assert!(matches!(first, Nudge::Began));
+        std::thread::sleep(HOLD_TO_DRAG + Duration::from_millis(50));
+        let mut ended = Nudge::Idle;
+        for step in 2..5 {
+            let at = start + egui::vec2(step as f32 * 12.0, 0.0);
+            let nudge = frame(&ctx, vec![egui::Event::PointerMoved(at)]);
+            if matches!(nudge, Nudge::Failed(_)) {
+                ended = nudge;
+            }
+        }
+        assert!(matches!(ended, Nudge::Failed(_)));
+    }
 
     #[cfg(target_os = "windows")]
     #[test]

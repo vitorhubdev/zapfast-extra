@@ -274,6 +274,14 @@ pub fn verify_version(executable: &Path, expected: &str) -> Result<()> {
 }
 
 pub fn handoff(prepared: &Prepared, arguments: Vec<String>) -> Result<()> {
+    // Stage updates only for the installation running right now, like the
+    // startup acknowledgement checks the other way round. A job for any
+    // other installation is refused before anything is written or spawned.
+    ensure!(
+        std::env::current_exe()?.canonicalize()?
+            == prepared.installation.executable.canonicalize()?,
+        "The staged update targets a different installation"
+    );
     ensure!(
         hash(&prepared.payload)? == prepared.sha256,
         "The staged update changed. Download it again."
@@ -511,6 +519,12 @@ pub fn run_helper(job: &Path) -> Result<()> {
         prepared.directory.parent() == prepared.installation.root()?.parent(),
         "Invalid installation directory"
     );
+    // These checks keep honest runs away from crossed, stale, or foreign
+    // job files. They do not authenticate the consumer path: every field
+    // above, hash included, is read from the job file itself, so a forged
+    // job is only as trustworthy as its writer. Writer-side binding lives
+    // in `handoff()`; destination and arguments stay attacker-controlled
+    // until release signatures cover the manifest, not just the payload.
     ensure!(
         hash(&prepared.payload)? == prepared.sha256,
         "The staged update checksum changed"
@@ -782,6 +796,38 @@ mod tests {
         assert_eq!(
             installer_path(Path::new(r"\\?\UNC\server\share\ZapFast")),
             r"\\server\share\ZapFast"
+        );
+    }
+
+    /// A job for another installation is refused before the helper is
+    /// copied, the job is written, or anything is spawned.
+    #[test]
+    fn handoff_refuses_a_foreign_installation_before_touching_disk() {
+        let stage = tempfile::tempdir().expect("scratch stage");
+        let foreign_root = stage.path().join("elsewhere");
+        std::fs::create_dir_all(&foreign_root).unwrap();
+        let foreign_exe = foreign_root.join("zapext.exe");
+        std::fs::write(&foreign_exe, b"not this app").unwrap();
+        let payload = stage.path().join("next");
+        std::fs::write(&payload, b"payload-bytes").unwrap();
+        let foreign = Prepared {
+            installation: Installation {
+                executable: foreign_exe,
+                kind: Kind::Portable,
+            },
+            directory: stage.path().to_owned(),
+            payload: payload.clone(),
+            sha256: hash(&payload).unwrap(),
+            version: "99.0.0".into(),
+        };
+        let error = handoff(&foreign, Vec::new()).expect_err("foreign installation");
+        assert!(
+            error.to_string().contains("different installation"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !stage.path().join("handoff.json").exists(),
+            "no job may be staged"
         );
     }
 

@@ -298,7 +298,11 @@ impl Archive {
     }
 
     fn prepare(connection: Connection) -> Result<Self> {
-        connection.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+        // A second writer waits instead of failing at once. Single-writer
+        // today, so this only removes a latent SQLITE_BUSY trap.
+        connection.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000;",
+        )?;
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(polls::SCHEMA)?;
         for (table, column, definition) in MIGRATIONS {
@@ -2615,6 +2619,36 @@ pub(crate) mod tests {
             .map(|hit| hit.id)
             .collect();
         assert_eq!(there, vec!["m4".to_owned()]);
+    }
+
+    /// M3: global-search latency over 100k synthetic rows. Asserts
+    /// correctness (the needle is found) and reports the elapsed time
+    /// without an absolute gate: CI runners vary too much for one.
+    #[test]
+    fn global_search_latency_on_100k_synthetic_messages() {
+        let archive = Archive::in_memory().expect("opens");
+        archive
+            .ensure_chat("1@s.whatsapp.net", "Ada")
+            .expect("chat");
+        for index in 0..100_000u32 {
+            let mut row = message(
+                "1@s.whatsapp.net",
+                &format!("m{index}"),
+                i64::from(index),
+                false,
+            );
+            row.content = Content::text(format!("filler message number {index}"));
+            archive.insert_message(&row, None).expect("insert");
+        }
+        let mut needle = message("1@s.whatsapp.net", "needle", 100_001, false);
+        needle.content = Content::text("the needle has zebra stripes".to_owned());
+        archive.insert_message(&needle, None).expect("insert");
+        let start = std::time::Instant::now();
+        let hits = archive.search_messages("zebra", 10).expect("search");
+        let elapsed = start.elapsed();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "needle");
+        eprintln!("M3: 100k-row global search took {elapsed:?}");
     }
 
     #[test]

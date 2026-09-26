@@ -38,6 +38,7 @@ pub mod tray;
 pub mod ui;
 pub mod updates;
 pub mod util;
+pub mod vcard;
 pub mod video;
 pub mod voice;
 #[cfg(target_os = "windows")]

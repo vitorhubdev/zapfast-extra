@@ -93,6 +93,9 @@ pub struct Settings {
     /// Last page read of each PDF, keyed by file name and size.
     #[serde(default)]
     pub pdf_pages: HashMap<String, usize>,
+    /// Last healthy window size in logical points, used to repair a poisoned
+    /// eframe restore.
+    pub window_size: Option<[f32; 2]>,
 }
 
 impl Default for Settings {
@@ -124,6 +127,7 @@ impl Default for Settings {
             video_volume: default_volume(),
             video_muted: false,
             pdf_pages: HashMap::new(),
+            window_size: None,
         }
     }
 }

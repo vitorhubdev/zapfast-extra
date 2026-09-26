@@ -2406,6 +2406,182 @@ fn mirrored_row(
     });
 }
 
+/// A chat a shared contact card can open.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct CardChat {
+    pub(crate) name: String,
+    /// The number, formatted for reading.
+    pub(crate) number: String,
+    pub(crate) id: ChatId,
+}
+
+/// The name of `card`; a lone card without one takes the message's.
+fn card_name(
+    display_name: &str,
+    cards: &[crate::vcard::Card],
+    card: &crate::vcard::Card,
+) -> Option<String> {
+    card.name.clone().or_else(|| {
+        (cards.len() == 1 && !display_name.trim().is_empty()).then(|| display_name.to_owned())
+    })
+}
+
+/// Every chat a shared contact can open, one per usable number.
+pub(crate) fn card_chats(display_name: &str, cards: &[crate::vcard::Card]) -> Vec<CardChat> {
+    let mut chats = Vec::new();
+    for card in cards {
+        for number in &card.numbers {
+            let (Ok(digits), Some(id)) = (&number.dial, number.chat_id()) else {
+                continue;
+            };
+            let number = crate::util::phone(digits);
+            chats.push(CardChat {
+                // A nameless card names the new chat by its number.
+                name: card_name(display_name, cards, card).unwrap_or_else(|| number.clone()),
+                number,
+                id,
+            });
+        }
+    }
+    chats
+}
+
+/// Opens the chat directly, like tapping a mention: nothing is checked
+/// over the network and nothing is saved to the address book.
+pub(crate) fn open_card_chat(chat: &CardChat) -> Action {
+    Action::StartChat {
+        id: chat.id.clone(),
+        name: chat.name.clone(),
+    }
+}
+
+/// A shared contact: each person with their numbers, and a button to
+/// message them. Several usable numbers open a menu to pick one.
+///
+/// Returns the button's response, when there is a button.
+fn contact_card(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    own: bool,
+    id: egui::Id,
+    display_name: &str,
+    vcard: &str,
+    actions: &mut Vec<Action>,
+) -> Option<egui::Response> {
+    let cards = crate::vcard::parse(vcard);
+    let chats = card_chats(display_name, &cards);
+    let icon = |ui: &mut egui::Ui| {
+        theme::icon(ui, Icon::Contact, 18.0, palette.accent);
+    };
+    let mut button = None;
+    mirrored_row(ui, own, icon, |ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            if cards.is_empty() {
+                widgets::rich_text(ui, display_name, theme::medium(14.0), palette.text);
+            }
+            for (index, card) in cards.iter().enumerate() {
+                if index > 0 {
+                    ui.add_space(6.0);
+                }
+                let name = card_name(display_name, &cards, card);
+                let name = name.as_deref().unwrap_or(card.name());
+                widgets::rich_text(ui, name, theme::medium(14.0), palette.text);
+                for number in &card.numbers {
+                    let line = match &number.dial {
+                        Ok(digits) => crate::util::phone(digits),
+                        Err(why) => format!("{} · {}", number.text, why.reason()),
+                    };
+                    theme::text(ui, line, theme::regular(12.5), palette.secondary);
+                }
+            }
+            ui.add_space(6.0);
+            match chats.as_slice() {
+                [] => {
+                    let why = if cards.iter().any(|card| !card.numbers.is_empty()) {
+                        "No number with a country code to message"
+                    } else {
+                        "No phone number to message"
+                    };
+                    theme::text(ui, why, theme::regular(12.5), palette.dim);
+                }
+                [only] => {
+                    let response = theme::soft_button(
+                        ui,
+                        palette,
+                        Some(Icon::MessageCircle),
+                        "Message",
+                        false,
+                    );
+                    if response.clicked() {
+                        actions.push(open_card_chat(only));
+                    }
+                    button = Some(response);
+                }
+                several => {
+                    let response = theme::soft_button(
+                        ui,
+                        palette,
+                        Some(Icon::MessageCircle),
+                        "Message",
+                        false,
+                    );
+                    let labels: Vec<String> = several
+                        .iter()
+                        .map(|chat| format!("Message {} {}", chat.name, chat.number))
+                        .collect();
+                    let widest: Vec<&str> = labels.iter().map(String::as_str).collect();
+                    let width = widgets::menu_width(ui, &widest, false).min(360.0);
+                    egui::Popup::menu(&response)
+                        .id(id.with("menu"))
+                        .width(width)
+                        .frame(widgets::menu_frame(palette))
+                        .show(|ui| {
+                            for (chat, label) in several.iter().zip(&labels) {
+                                if card_chat_row(ui, palette, label) {
+                                    actions.push(open_card_chat(chat));
+                                }
+                            }
+                        });
+                    button = Some(response);
+                }
+            }
+        });
+    });
+    button
+}
+
+/// One entry in the shared contact's menu, drawn with colour emoji.
+fn card_chat_row(ui: &mut egui::Ui, palette: &Palette, label: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
+        }
+        let line = widgets::line(
+            ui,
+            label,
+            theme::regular(13.5),
+            palette.text,
+            (rect.width() - 20.0).max(1.0),
+            1,
+        );
+        line.paint(
+            ui,
+            pos2(rect.left() + 10.0, rect.center().y - line.size().y / 2.0),
+            palette.text,
+        );
+    }
+    let clicked = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked();
+    if clicked {
+        ui.close();
+    }
+    clicked
+}
+
 /// Width of the message footer.
 fn footer_width(ui: &egui::Ui, message: &Message) -> f32 {
     let font = theme::regular(11.0);
@@ -2998,24 +3174,8 @@ fn content(
             display_name,
             vcard,
         } => {
-            let icon = |ui: &mut egui::Ui| {
-                theme::icon(ui, Icon::Contact, 18.0, palette.accent);
-            };
-            mirrored_row(ui, own, icon, |ui| {
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 1.0;
-                    widgets::rich_text(ui, display_name, theme::medium(14.0), palette.text);
-                    let phone = vcard
-                        .lines()
-                        .find(|line| line.starts_with("TEL"))
-                        .and_then(|line| line.rsplit(':').next())
-                        .map(str::trim)
-                        .unwrap_or("");
-                    if !phone.is_empty() {
-                        theme::text(ui, phone, theme::regular(12.5), palette.secondary);
-                    }
-                });
-            });
+            let id = bubble_id(&message.chat, &message.id).with("contact");
+            contact_card(ui, &palette, own, id, display_name, vcard, actions);
             None
         }
         Content::Poll { .. } => {
@@ -3609,20 +3769,24 @@ fn picture(
                         .corner_radius(if sticker.is_some() { 0.0 } else { 6.0 })
                         .sense(Sense::click_and_drag()),
                 );
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("photo");
                 let dragged = if sticker.is_none() {
-                    crate::drag_out::nudge(
-                        &response,
-                        path,
-                        path.file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("photo"),
-                    )
+                    crate::drag_out::nudge(&response, path, name)
                 } else {
                     crate::drag_out::Nudge::Idle
                 };
-                if let Some(message) = drag_notice(dragged) {
-                    actions.push(Action::ToastError(message.to_owned()));
+                if arming(dragged) {
+                    crate::drag_out::paint_hint(
+                        ui,
+                        &response,
+                        name,
+                        &crate::util::bytes(media.size),
+                    );
                 }
+                actions.extend(drag_toast(dragged));
                 if click_still_open(dragged)
                     && response
                         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -3794,17 +3958,38 @@ fn click_still_open(nudge: crate::drag_out::Nudge) -> bool {
     matches!(nudge, crate::drag_out::Nudge::Idle)
 }
 
-fn drag_notice(nudge: crate::drag_out::Nudge) -> Option<&'static str> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Notice {
+    Info,
+    Error,
+}
+
+/// The toast a finished drag shows. An accepted drop is good news: the shell
+/// returns once the folder takes the path, and Explorer writes it afterwards.
+fn drag_notice(nudge: crate::drag_out::Nudge) -> Option<(Notice, &'static str)> {
     match nudge {
-        crate::drag_out::Nudge::Accepted => {
-            Some("The folder accepted the file. ZapExt does not confirm when that copy finishes.")
-        }
-        crate::drag_out::Nudge::Refused => Some(
+        crate::drag_out::Nudge::Accepted => Some((
+            Notice::Info,
+            "Copied. Explorer finishes writing it in the background.",
+        )),
+        crate::drag_out::Nudge::Refused => Some((
+            Notice::Error,
             "That spot did not take the file. Use Save a copy in the message menu to choose a folder.",
-        ),
-        crate::drag_out::Nudge::Failed(message) => Some(message),
+        )),
+        crate::drag_out::Nudge::Failed(message) => Some((Notice::Error, message)),
         crate::drag_out::Nudge::Idle | crate::drag_out::Nudge::Began => None,
     }
+}
+
+fn drag_toast(nudge: crate::drag_out::Nudge) -> Option<Action> {
+    drag_notice(nudge).map(|(notice, message)| match notice {
+        Notice::Info => Action::ToastInfo(message.to_owned()),
+        Notice::Error => Action::ToastError(message.to_owned()),
+    })
+}
+
+fn arming(nudge: crate::drag_out::Nudge) -> bool {
+    matches!(nudge, crate::drag_out::Nudge::Began)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3849,13 +4034,15 @@ fn video(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("video");
-        crate::drag_out::nudge(&response, path, name)
+        let dragged = crate::drag_out::nudge(&response, path, name);
+        if arming(dragged) {
+            crate::drag_out::paint_hint(ui, &response, name, &crate::util::bytes(media.size));
+        }
+        dragged
     } else {
         crate::drag_out::Nudge::Idle
     };
-    if let Some(message) = drag_notice(dragged) {
-        actions.push(Action::ToastError(message.to_owned()));
-    }
+    actions.extend(drag_toast(dragged));
     let playing = match (&media.path, gif) {
         (Some(path), true) => Some(animation::frame(ui, path, rect)),
         _ => None,
@@ -4125,9 +4312,10 @@ fn attachment(
     } else {
         crate::drag_out::Nudge::Idle
     };
-    if let Some(message) = drag_notice(dragged) {
-        actions.push(Action::ToastError(message.to_owned()));
+    if arming(dragged) {
+        crate::drag_out::paint_hint(ui, &response, title, detail);
     }
+    actions.extend(drag_toast(dragged));
     if response.clicked() && !auto && click_still_open(dragged) {
         match &media.path {
             // A PDF opens in the app's own viewer; other files keep going to
@@ -4246,7 +4434,7 @@ fn voice_player(
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 let (rect, response) =
-                    ui.allocate_exact_size(vec2(wave_width, bar_height), Sense::click());
+                    ui.allocate_exact_size(vec2(wave_width, bar_height), Sense::click_and_drag());
                 let pitch = 3.0;
                 let count = ((rect.width() / pitch).floor() as usize).max(1);
                 let fraction = if status.total > Duration::ZERO {
@@ -4280,8 +4468,24 @@ fn voice_player(
                     );
                 }
                 if let Some(path) = &media.path {
+                    let fallback = format!("voice-{}.ogg", message.id);
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(&fallback);
+                    let dragged = crate::drag_out::nudge(&response, path, name);
+                    if arming(dragged) {
+                        crate::drag_out::paint_hint(
+                            ui,
+                            &response,
+                            name,
+                            &format!("Audio · {}", crate::util::bytes(media.size)),
+                        );
+                    }
+                    actions.extend(drag_toast(dragged));
                     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
                     if response.clicked()
+                        && click_still_open(dragged)
                         && let Some(pointer) = response.interact_pointer_pos()
                     {
                         let fraction = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -4451,6 +4655,27 @@ fn chat_of(chat: &ChatId) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_accepted_drop_is_good_news_and_a_refusal_is_an_error() {
+        let (notice, message) = drag_notice(crate::drag_out::Nudge::Accepted).unwrap();
+        assert_eq!(notice, Notice::Info);
+        assert!(!message.contains("does not confirm"));
+        assert!(matches!(
+            drag_toast(crate::drag_out::Nudge::Accepted),
+            Some(Action::ToastInfo(_))
+        ));
+        assert!(matches!(
+            drag_toast(crate::drag_out::Nudge::Refused),
+            Some(Action::ToastError(_))
+        ));
+        assert!(matches!(
+            drag_toast(crate::drag_out::Nudge::Failed("x")),
+            Some(Action::ToastError(_))
+        ));
+        assert!(drag_toast(crate::drag_out::Nudge::Began).is_none());
+        assert!(!click_still_open(crate::drag_out::Nudge::Began));
+    }
 
     #[test]
     fn a_missing_length_is_omitted_never_shown_as_zero() {
@@ -4655,6 +4880,149 @@ mod tests {
         assert_eq!(emoji_match_score(grinning, "grin"), Some(1));
         assert_eq!(emoji_match_score(grinning, "face"), Some(3));
         assert_eq!(emoji_match_score(grinning, "rocket"), None);
+    }
+}
+
+#[cfg(test)]
+mod contact_card_tests {
+    use super::*;
+
+    /// One synthetic person, with WhatsApp's `waid` on a grouped number.
+    const ONE: &str = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada Demo\r\n\
+        item1.TEL;waid=15550100101:+1 555-010-0101\r\nitem1.X-ABLabel:Mobile\r\nEND:VCARD";
+    /// Two synthetic people, three usable numbers, as a contacts array.
+    const TWO: &str = "BEGIN:VCARD\nVERSION:3.0\nFN:Ada Demo\nTEL:+1 555 010 0101\nEND:VCARD\n\
+        BEGIN:VCARD\nVERSION:3.0\nFN:Bea Demo\nTEL;type=CELL:+1 555 010 0102\n\
+        item2.TEL:+1 555 010 0103\nEND:VCARD";
+
+    fn menu_id() -> egui::Id {
+        egui::Id::new("card").with("menu")
+    }
+
+    fn frame(
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        vcard: &str,
+        actions: &mut Vec<Action>,
+    ) -> Option<Rect> {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(480.0, 480.0))),
+            events,
+            ..Default::default()
+        };
+        let mut button = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            button = contact_card(
+                ui,
+                &Palette::dark(),
+                false,
+                egui::Id::new("card"),
+                "Shared",
+                vcard,
+                actions,
+            )
+            .map(|response| response.rect);
+        });
+        output.textures_delta.clear();
+        button
+    }
+
+    /// A real pointer click: move, press, and release on separate frames.
+    fn click(ctx: &egui::Context, at: egui::Pos2, vcard: &str, actions: &mut Vec<Action>) {
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        frame(ctx, vec![egui::Event::PointerMoved(at)], vcard, actions);
+        frame(ctx, vec![press(true)], vcard, actions);
+        frame(ctx, vec![press(false)], vcard, actions);
+    }
+
+    fn saves_or_checks(actions: &[Action]) -> bool {
+        actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::NewContact { .. } | Action::EditContact(_) | Action::SaveContact { .. }
+            )
+        })
+    }
+
+    #[test]
+    fn clicking_message_opens_the_chat_without_saving_the_contact() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut actions = Vec::new();
+        let button = frame(&ctx, Vec::new(), ONE, &mut actions).expect("a Message button");
+        assert!(actions.is_empty(), "drawing alone does nothing");
+        click(&ctx, button.center(), ONE, &mut actions);
+        assert_eq!(
+            actions,
+            [Action::StartChat {
+                id: "15550100101@s.whatsapp.net".into(),
+                name: "Ada Demo".into(),
+            }]
+        );
+        assert!(!saves_or_checks(&actions));
+    }
+
+    #[test]
+    fn several_numbers_open_a_menu_to_pick_one() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut actions = Vec::new();
+        let button = frame(&ctx, Vec::new(), TWO, &mut actions).expect("a Message button");
+        click(&ctx, button.center(), TWO, &mut actions);
+        assert!(actions.is_empty(), "the button only opens the menu");
+        assert!(egui::Popup::is_id_open(&ctx, menu_id()));
+        // Let the menu finish its sizing pass before aiming at a row.
+        frame(&ctx, Vec::new(), TWO, &mut actions);
+        let menu = ctx
+            .memory(|memory| memory.area_rect(menu_id()))
+            .expect("menu drawn");
+        // The last row, inside the 6-point frame margin, is Bea's second number.
+        let last = pos2(menu.center().x, menu.bottom() - 6.0 - 14.0);
+        click(&ctx, last, TWO, &mut actions);
+        assert_eq!(
+            actions,
+            [Action::StartChat {
+                id: "15550100103@s.whatsapp.net".into(),
+                name: "Bea Demo".into(),
+            }]
+        );
+        assert!(!saves_or_checks(&actions));
+        frame(&ctx, Vec::new(), TWO, &mut actions);
+        assert!(
+            !egui::Popup::is_id_open(&ctx, menu_id()),
+            "picking closes it"
+        );
+    }
+
+    #[test]
+    fn a_card_without_a_usable_number_has_no_button() {
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        let mut actions = Vec::new();
+        let local = "BEGIN:VCARD\nFN:Local Demo\nTEL:(555) 010-0104\nEND:VCARD";
+        assert!(frame(&ctx, Vec::new(), local, &mut actions).is_none());
+        assert!(frame(&ctx, Vec::new(), "", &mut actions).is_none());
+        assert!(actions.is_empty());
+    }
+
+    #[test]
+    fn nameless_cards_borrow_the_message_name_or_the_number() {
+        let lone = crate::vcard::parse("BEGIN:VCARD\nTEL:+1 555 010 0105\nEND:VCARD");
+        let chats = card_chats("Shared", &lone);
+        assert_eq!(chats[0].name, "Shared");
+        assert_eq!(chats[0].id, "15550100105@s.whatsapp.net");
+        let pair = crate::vcard::parse(
+            "BEGIN:VCARD\nTEL:+1 555 010 0105\nEND:VCARD\n\
+             BEGIN:VCARD\nFN:Named\nTEL:+1 555 010 0106\nEND:VCARD",
+        );
+        let chats = card_chats("2 contacts", &pair);
+        assert_eq!(chats[0].name, crate::util::phone("15550100105"));
+        assert_eq!(chats[1].name, "Named");
     }
 }
 

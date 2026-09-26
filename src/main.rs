@@ -147,6 +147,12 @@ fn main() -> eframe::Result<()> {
     // directories have been created and secured successfully.
     dirs.ensure()
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
+    // Reap audio spool files orphaned by a crash. Only files whose owner
+    // process is provably dead go; live owners are never touched. Demo
+    // runs keep to their own sandbox and never sweep the real TEMP.
+    if !demo {
+        zapfast::audio::sweep_stale_spool();
+    }
     let mut logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter));
     // Write desktop-session logs to disk. Demo runs use stderr so they do not

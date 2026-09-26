@@ -7444,6 +7444,7 @@ fn sanitize(id: &str) -> String {
 
 fn extension_for(mime: &str, file_name: Option<&str>) -> String {
     if let Some(extension) = file_name
+        .map(crate::model::canonical_file_name)
         .and_then(|name| Path::new(name).extension())
         .and_then(|extension| extension.to_str())
         .filter(|extension| !extension.is_empty() && extension.len() <= 8)
@@ -7471,6 +7472,7 @@ fn extension_for(mime: &str, file_name: Option<&str>) -> String {
 }
 
 fn media_path(dir: &Path, chat: &str, id: &str, mime: &str, file_name: Option<&str>) -> PathBuf {
+    let file_name = file_name.map(crate::model::canonical_file_name);
     let extension = extension_for(mime, file_name);
     let stem = match file_name.and_then(|name| Path::new(name).file_stem()?.to_str()) {
         Some(name) => format!("{}-{}", sanitize(id), sanitize(name)),
@@ -10004,6 +10006,45 @@ mod tests {
         );
         assert_eq!(extension_for("audio/ogg; codecs=opus", None), "ogg");
         assert_eq!(extension_for("application/x-unknown", None), "x-unknown");
+    }
+
+    /// The classifier and the saved file must agree about what runs.
+    /// Fixtures are inert names only; nothing here is ever executed.
+    /// Keep `dangerous` in step with `FileKind::of`'s blocklist.
+    #[test]
+    fn saved_names_agree_with_classification_on_tricky_names() {
+        let dir = Path::new("/cache");
+        let dangerous = [
+            "exe", "msi", "bat", "cmd", "com", "scr", "ps1", "jar", "apk", "dmg", "appimage",
+            "deb", "rpm", "pif", "lnk", "vbs", "vbe", "jse", "wsf", "wsh",
+        ];
+        for (name, mime, runs) in [
+            ("evil.bat ", "application/octet-stream", true),
+            ("evil.exe.", "application/octet-stream", true),
+            ("evil.bat. . ", "application/octet-stream", true),
+            ("EVIL.PS1 ", "application/octet-stream", true),
+            ("note.vbs", "text/plain", true),
+            ("shortcut.lnk", "application/octet-stream", true),
+            ("setup.msi", "application/x-msi", true),
+            ("report.pdf.", "application/pdf", false),
+            ("report.pdf ", "application/pdf", false),
+            ("photo.jpg", "image/jpeg", false),
+            ("archive.tar.gz", "application/gzip", false),
+        ] {
+            let kind = crate::model::FileKind::of(mime, name);
+            assert_eq!(kind.runs_code(), runs, "classify {name:?}");
+            let saved = media_path(dir, "c", "ID", mime, Some(name));
+            let saved_ext = saved
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assert_eq!(
+                dangerous.contains(&saved_ext.as_str()),
+                runs,
+                "saved {saved:?}"
+            );
+        }
     }
 
     #[test]

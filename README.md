@@ -151,8 +151,10 @@ without embedding a browser engine.
   the arrow keys walk the pictures of the chat, 0 or F fits it again, and Esc
   closes. The Copy button, or the right-click menu over the picture, puts it on
   the clipboard, and the bar can also save a copy or hand the file to the
-  desktop. On Windows, drag a downloaded photo, video, or document onto a
-  folder to copy it there. The message and the original file stay put, a
+  desktop. On Windows, hold a downloaded photo, video, document, or voice
+  message waveform for a moment, then drag it onto a folder to copy it there.
+  A card by the pointer shows the file while you hold it, and a quick flick
+  stays a click. The message and the original file stay put, a
   missing or unfinished download does not start a drag, and Save a copy
   remains in the menu. A sticker opens
   bigger in a small dialog instead, with a Save button, and stays out of the
@@ -369,7 +371,9 @@ stay on the same network.
 Right-click a chat or message to open its menu. Open Settings from the gear or
 with `Ctrl+,`. Use the pencil to message a new number or save a contact. You
 can also open a group member's contact card. Saved names sync through WhatsApp
-to your phone and linked devices.
+to your phone and linked devices. A contact someone shares with you has a
+Message button that opens a chat with that number without saving it to your
+contacts; a card with several numbers lets you pick one.
 
 ## Files
 

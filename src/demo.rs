@@ -741,6 +741,20 @@ pub fn populate(app: &mut App) {
                 address: Some("12 St James's Square, London".into()),
             },
         ),
+        message(
+            ada,
+            "ada-contact",
+            false,
+            older + 60 * 21,
+            Content::Contact {
+                display_name: "Charles Babbage".into(),
+                vcard: "BEGIN:VCARD\r\nVERSION:3.0\r\nN:Babbage;Charles;;;\r\n\
+                        FN:Charles Babbage\r\n\
+                        item1.TEL;waid=15550100142:+1 555-010-0142\r\n\
+                        item1.X-ABLabel:Mobile\r\nEND:VCARD"
+                    .into(),
+            },
+        ),
         message(ada, "ada-deleted", false, older + 60 * 25, Content::Revoked),
     ];
     let conversation = app.conversations.get_mut(ada).expect("sample chat");

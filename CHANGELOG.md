@@ -2,6 +2,79 @@
 
 All notable changes to the ZapExt fork are recorded here.
 
+## [1.0.105] - 2026-09-26
+
+### Fixed
+
+- Audit follow-ups: the Linux port owner reads the right table column, the spool sweep proves a dead owner before deleting (errors preserve), and the startup sweep skips demo runs.
+
+## [1.0.104] - 2026-09-26
+
+### Fixed
+
+- Audit follow-ups: the Linux port owner is read from the right table column, the updater refuses foreign installations before staging, tricky attachment names cannot dodge the program check, and crashed audio spool files are reaped at startup without touching live ones.
+
+## [1.0.103] - 2026-09-26
+
+### Fixed
+
+- Replacing the previous copy on Linux no longer gives up when a process cannot be inspected; the running copy is found through its listening port.
+- Update staging is refused for any installation other than the one running.
+- Attachment names with trailing dots or spaces, and script or shortcut types (vbs, lnk, pif and others), are treated as programs and revealed in their folder instead of opening directly.
+- Audio spool files orphaned by a crash are cleaned up at startup.
+
+## [1.0.102] - 2026-09-26
+
+### Fixed
+
+- Shared contact cards now read numbers stored in quoted-printable form, opening the same chat as the plain number.
+
+## [1.0.101] - 2026-09-26
+
+### Added
+
+- A shared contact card now has a Message button that opens a private chat with that person, like on the phone. When the card holds several people or numbers, a menu lets you pick which one. Opening the chat never saves the contact to your address book.
+
+### Fixed
+
+- Shared contact cards now show every person and every number they carry, including numbers stored in labelled groups (such as `item1.TEL`) and folded vCard lines. A number without a country code is shown with a short explanation instead of being guessed.
+
+## [1.0.100] - 2026-09-25
+
+### Fixed
+
+- Window restore follow-ups: a fullscreen window no longer replaces the remembered normal size, an invalid saved size is never restored, and the repair fits the current monitor instead of overshooting it. Restoring from the tray still never unmaximizes the window.
+
+## [1.0.99] - 2026-09-25
+
+### Fixed
+
+- The window no longer sometimes comes back from the tray as a tiny 64-pixel square. An inadequate size had been persisted (64x64 observed in the stored window settings), and that size was restored when the window came back. ZapExt now remembers the last normal window size and restores it when a window opens too small.
+
+## [1.0.98] - 2026-09-25
+
+### Changed
+
+- Dragging a file out to a folder now shows a green "Copied" confirmation. Before, a successful copy looked like an error. A refused drop or a failed drag still shows an error.
+- A drag out starts only after you hold the pointer on the file for a moment (400 ms) and move it a little. A quick flick no longer opens the viewer by accident or starts a drag that fails.
+- While you hold or drag a file, a small card by the pointer shows its name and size and says when it is ready to drop.
+
+### Added
+
+- Voice and audio messages can be dragged out to a folder from their waveform. Clicking the waveform still seeks.
+
+## [1.0.97] - 2026-09-25
+
+### Fixed
+
+- Opening a versioned copy such as `zapext-1.0.96.exe` now closes a running `zapext-1.0.95.exe` and shows the launch you started. The previous build only recognized the exact file names `zapext`, `zapfast`, and `fastsapp`, so it brought the older window forward.
+
+## [1.0.96] - 2026-09-25
+
+### Changed
+
+- Opening ZapExt closes the copy that is already running and shows this launch. A current build is asked to quit. A copy that does not understand that request is stopped when its program file is `zapext`, `zapfast`, or `fastsapp`.
+
 ## [1.0.95] - 2026-09-25
 
 ### Fixed

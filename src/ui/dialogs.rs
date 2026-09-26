@@ -72,43 +72,63 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn confirm_delete_many(app: &mut App, ui: &mut egui::Ui, ids: Vec<String>, revocable: usize) {
-    let palette = app.palette;
-    let total = ids.len();
-    title(ui, app, &format!("Delete {} messages?", total.max(1)));
-    let body = if revocable == 0 {
-        format!(
-            "These {total} messages are too old or not yours to revoke. They will be deleted for you."
+/// Copy and buttons for the delete-many dialog, kept pure so tests lock
+/// the split between revoking for everyone and deleting locally.
+pub(crate) struct DeleteManyCopy {
+    pub title: String,
+    pub note: String,
+    /// Whether "Delete for everyone" is offered at all.
+    pub revocable: bool,
+    /// Label of the local-delete button.
+    pub local_label: &'static str,
+}
+
+pub(crate) fn delete_many_copy(total: usize, revocable: usize) -> DeleteManyCopy {
+    let revocable = revocable.min(total);
+    let title = format!("Delete {} messages?", total.max(1));
+    let (note, local_label) = if revocable == 0 {
+        (
+            format!(
+                "These {total} messages are too old or not yours to revoke. They will be deleted for you."
+            ),
+            "Delete",
         )
     } else if revocable == total {
-        format!("These {total} messages will be deleted for everyone.")
+        (
+            format!("These {total} messages will be deleted for everyone."),
+            "Delete for me",
+        )
     } else {
-        format!(
-            "{revocable} of {total} are still recent enough to delete for everyone; the rest will be deleted for you."
+        (
+            format!(
+                "{revocable} of {total} are still recent enough to delete for everyone; the rest will be deleted for you."
+            ),
+            "Delete for me",
         )
     };
-    theme::paragraph(ui, &body, theme::regular(13.5), palette.text);
+    DeleteManyCopy {
+        title,
+        note,
+        revocable: revocable > 0,
+        local_label,
+    }
+}
+
+fn confirm_delete_many(app: &mut App, ui: &mut egui::Ui, ids: Vec<String>, revocable: usize) {
+    let palette = app.palette;
+    let copy = delete_many_copy(ids.len(), revocable);
+    title(ui, app, &copy.title);
+    theme::paragraph(ui, &copy.note, theme::regular(13.5), palette.text);
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if revocable > 0 && danger_button(ui, app, "Delete for everyone") {
+            if copy.revocable && danger_button(ui, app, "Delete for everyone") {
                 app.actions.push(Action::DeleteMany {
                     ids: ids.clone(),
                     for_everyone: true,
                 });
             }
-            if theme::pill_button(
-                ui,
-                &palette,
-                if revocable > 0 {
-                    "Delete for me"
-                } else {
-                    "Delete"
-                },
-                revocable == 0,
-            )
-            .clicked()
-            {
+            if theme::pill_button(ui, &palette, copy.local_label, !copy.revocable).clicked() {
                 app.actions.push(Action::DeleteMany {
                     ids: ids.clone(),
                     for_everyone: false,
@@ -1070,4 +1090,41 @@ fn danger_button(ui: &mut egui::Ui, app: &mut App, label: &str) -> bool {
     response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_dialog_splits_revoke_and_local() {
+        let all = delete_many_copy(5, 5);
+        assert_eq!(all.title, "Delete 5 messages?");
+        assert_eq!(all.note, "These 5 messages will be deleted for everyone.");
+        assert!(all.revocable);
+        assert_eq!(all.local_label, "Delete for me");
+
+        let none = delete_many_copy(3, 0);
+        assert!(!none.revocable);
+        assert_eq!(none.local_label, "Delete");
+        assert!(
+            none.note.contains("too old or not yours"),
+            "unrevocable says why: {}",
+            none.note
+        );
+
+        let mixed = delete_many_copy(5, 2);
+        assert!(mixed.revocable);
+        assert_eq!(mixed.local_label, "Delete for me");
+        assert!(
+            mixed.note.starts_with("2 of 5"),
+            "mixed names both parts: {}",
+            mixed.note
+        );
+
+        // An inconsistent caller cannot offer revoking more than everything.
+        let clamped = delete_many_copy(2, 9);
+        assert!(clamped.revocable);
+        assert_eq!(clamped.local_label, "Delete for me");
+    }
 }

@@ -1100,6 +1100,190 @@ fn spool_path() -> PathBuf {
     std::env::temp_dir().join(format!("zapfast-audio-{}-{id}.pcm", std::process::id()))
 }
 
+/// Deletes spool files whose owner process no longer exists.
+///
+/// Crash leftovers (release builds abort on panic, running no destructors)
+/// share the OS temporary directory, so recovery happens here, at startup,
+/// instead of in `Drop`. Only files proving their owner dead go: a live
+/// pid, our own pid, or an unparseable name is always kept.
+///
+/// Called once from the binary entry point, not from the interface loop.
+pub fn sweep_stale_spool() {
+    #[cfg(target_os = "linux")]
+    if !std::path::Path::new("/proc/self").exists() {
+        // Hidden process table: no pid can be proven dead, so nothing goes.
+        return;
+    }
+    sweep_spool_in(&std::env::temp_dir(), &process_liveness);
+}
+
+/// The sweep over an explicit directory with an injectable liveness
+/// query, so tests never touch the real temporary directory. Only
+/// `Liveness::Dead` reaps; alive, unknown, and our own pid keep the file.
+fn sweep_spool_in(dir: &std::path::Path, liveness: &dyn Fn(u32) -> Liveness) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(pid) = spool_pid(name) else { continue };
+        if pid == std::process::id() {
+            continue;
+        }
+        if liveness(pid) == Liveness::Dead {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// The owner pid in `zapfast-audio-{pid}-{seq}.pcm`, if well formed.
+fn spool_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("zapfast-audio-")?;
+    let (pid, seq) = rest.split_once('-')?;
+    let seq = seq.strip_suffix(".pcm")?;
+    if seq.is_empty() || !seq.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse().ok()
+}
+
+/// What a liveness probe proved about a pid. Anything but `Dead` keeps
+/// the spool file: errors and unknown states preserve, never reap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Liveness {
+    Alive,
+    Dead,
+    Unknown,
+}
+
+/// Liveness of `pid` on this platform. Unknown platforms report unknown.
+fn process_liveness(pid: u32) -> Liveness {
+    #[cfg(target_os = "linux")]
+    {
+        proc_liveness(std::path::Path::new("/proc"), pid)
+    }
+    #[cfg(windows)]
+    {
+        windows_process_liveness(pid)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        macos_process_liveness(pid)
+    }
+    #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+    {
+        let _ = pid;
+        Liveness::Unknown
+    }
+}
+
+/// Liveness from a process table rooted at `proc` (normally `/proc`).
+/// A present entry is certainly alive and an absent one certainly dead:
+/// `/proc` directory entries are world-visible (only link *targets* are
+/// permission-gated, and those are never consulted). Any other failure is
+/// unknown, never dead. Tests pass a scratch root to drive the error path
+/// for real; a hidden or broken table is caught up front by the
+/// `/proc/self` guard in `sweep_stale_spool`, never per pid.
+#[cfg(any(target_os = "linux", test))]
+fn proc_liveness(proc: &std::path::Path, pid: u32) -> Liveness {
+    match std::fs::symlink_metadata(proc.join(pid.to_string())) {
+        Ok(_) => Liveness::Alive,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Liveness::Dead,
+        Err(_) => Liveness::Unknown,
+    }
+}
+
+/// Maps an `OpenProcess` outcome. A null handle means dead only with
+/// `ERROR_INVALID_PARAMETER`; access-denied and friends mean a live
+/// process we may not query.
+#[cfg(any(windows, test))]
+fn windows_liveness(opened: bool, error: u32) -> Liveness {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    if opened {
+        Liveness::Alive
+    } else if error == ERROR_INVALID_PARAMETER {
+        Liveness::Dead
+    } else {
+        Liveness::Unknown
+    }
+}
+
+/// Maps a `kill(pid, 0)` outcome. Zero means alive and ESRCH means dead;
+/// `error` is only meaningful when `signalled` is false.
+#[cfg(any(target_os = "macos", test))]
+fn macos_liveness(signalled: bool, error: i32) -> Liveness {
+    const ESRCH: i32 = 3;
+    if signalled {
+        Liveness::Alive
+    } else if error == ESRCH {
+        Liveness::Dead
+    } else {
+        Liveness::Unknown
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_liveness(pid: u32) -> Liveness {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    // SAFETY: plain integers in and out; the handle (if any) is closed below.
+    let handle = unsafe { windows_process_open(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // SAFETY: no arguments; returns the calling thread's error code.
+        let error = unsafe { windows_last_error() };
+        windows_liveness(false, error)
+    } else {
+        // SAFETY: handle came from a successful open just above.
+        unsafe {
+            windows_close_handle(handle);
+        }
+        windows_liveness(true, 0)
+    }
+}
+
+// Linked as kernel32 OpenProcess/CloseHandle/GetLastError; separate
+// declarations keep audio.rs free of a Windows-only dependency.
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    #[link_name = "OpenProcess"]
+    fn windows_process_open(
+        desired_access: u32,
+        inherit_handle: i32,
+        pid: u32,
+    ) -> *mut std::ffi::c_void;
+    #[link_name = "CloseHandle"]
+    fn windows_close_handle(handle: *mut std::ffi::c_void) -> i32;
+    #[link_name = "GetLastError"]
+    fn windows_last_error() -> u32;
+}
+
+/// Signal 0 performs no action; only its reported outcome is mapped.
+#[cfg(target_os = "macos")]
+fn macos_process_liveness(pid: u32) -> Liveness {
+    let Ok(pid) = i32::try_from(pid) else {
+        // Unrepresentable pid: nothing can be proven, preserve.
+        return Liveness::Unknown;
+    };
+    // SAFETY: signal 0 only reports; the error code is read on this thread.
+    if unsafe { macos_kill(pid, 0) } == 0 {
+        return macos_liveness(true, 0);
+    }
+    // SAFETY: no arguments; dereferenced immediately on this thread.
+    let error = unsafe { *macos_errno() };
+    macos_liveness(false, error)
+}
+
+// Linked as libc kill/__error without taking a libc dependency.
+#[cfg(target_os = "macos")]
+#[link(name = "c")]
+unsafe extern "C" {
+    #[link_name = "kill"]
+    fn macos_kill(pid: i32, sig: i32) -> i32;
+    #[link_name = "__error"]
+    fn macos_errno() -> *mut i32;
+}
+
 fn remove_quiet(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
@@ -2339,4 +2523,119 @@ mod tests {
         );
         assert!(levels.len() >= 15, "{}", levels.len());
     }
+}
+
+#[test]
+fn spool_names_parse_to_their_owner() {
+    assert_eq!(spool_pid("zapfast-audio-123-4.pcm"), Some(123));
+    assert_eq!(spool_pid("zapfast-audio-123.pcm"), None);
+    assert_eq!(spool_pid("zapfast-audio--4.pcm"), None);
+    assert_eq!(spool_pid("zapfast-audio-12x-4.pcm"), None);
+    assert_eq!(spool_pid("zapfast-audio-123-.pcm"), None);
+    assert_eq!(spool_pid("zapfast-audio-123-x.pcm"), None);
+    assert_eq!(spool_pid("other-123-4.pcm"), None);
+}
+
+/// A real abrupt death in an isolated subprocess: it exits without
+/// running any cleanup, and the sweep must reap what it orphaned while
+/// keeping a live owner's file. Everything happens in an exclusive
+/// temporary directory; the real TEMP is never swept in tests.
+#[test]
+fn sweep_keeps_live_spool_and_reaps_the_dead() {
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--definitely-not-a-test")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn test child");
+    let dead = child.id();
+    let _ = child.wait();
+    // Dropping the last handle lets the OS retire the pid; while any
+    // handle is open the pid still names the (exited) process.
+    drop(child);
+    let dir = tempfile::tempdir().expect("scratch spool dir");
+    let orphan = dir.path().join(format!("zapfast-audio-{dead}-4242.pcm"));
+    std::fs::write(&orphan, b"orphan").unwrap();
+    let live = dir
+        .path()
+        .join(format!("zapfast-audio-{}-4243.pcm", std::process::id()));
+    std::fs::write(&live, b"live").unwrap();
+    sweep_spool_in(dir.path(), &process_liveness);
+    assert!(!orphan.exists(), "dead owner's spool is reaped");
+    assert!(live.exists(), "live owner's spool is kept");
+}
+
+/// An undecided owner (query error, unknown platform) keeps its file;
+// only a proven dead one reaps.
+#[test]
+fn sweep_keeps_spool_on_query_error() {
+    let dir = tempfile::tempdir().expect("scratch spool dir");
+    let undecided = dir.path().join("zapfast-audio-424242-1.pcm");
+    std::fs::write(&undecided, b"undecided").unwrap();
+    sweep_spool_in(dir.path(), &|_| Liveness::Unknown);
+    assert!(undecided.exists(), "unknown state preserves the file");
+    sweep_spool_in(dir.path(), &|_| Liveness::Dead);
+    assert!(!undecided.exists(), "proven dead reaps the file");
+}
+
+/// The OS-result mapping both platforms share: open success and signal
+/// zero mean alive, the not-found codes mean dead, anything else keeps.
+#[test]
+fn liveness_mapping_covers_present_absent_and_error() {
+    assert_eq!(windows_liveness(true, 0), Liveness::Alive);
+    assert_eq!(windows_liveness(false, 87), Liveness::Dead);
+    assert_eq!(windows_liveness(false, 5), Liveness::Unknown);
+    assert_eq!(windows_liveness(false, 2), Liveness::Unknown);
+    assert_eq!(macos_liveness(true, 0), Liveness::Alive);
+    assert_eq!(macos_liveness(false, 3), Liveness::Dead);
+    assert_eq!(macos_liveness(false, 1), Liveness::Unknown);
+}
+
+/// The table probe itself, against a scratch root: a present entry is
+/// alive, a missing one is dead. No platform table is touched.
+#[test]
+fn proc_probe_reads_present_absent_and_error_for_real() {
+    let dir = tempfile::tempdir().expect("scratch proc root");
+    std::fs::create_dir(dir.path().join("424242")).unwrap();
+    assert_eq!(
+        proc_liveness(dir.path(), 424242),
+        Liveness::Alive,
+        "present entry"
+    );
+    assert_eq!(
+        proc_liveness(dir.path(), 424243),
+        Liveness::Dead,
+        "absent entry"
+    );
+    assert_eq!(
+        proc_liveness(&dir.path().join("gone"), 424242),
+        Liveness::Dead,
+        "missing table reads as absent, like a dead pid"
+    );
+}
+
+/// On a real Linux table, this process is alive.
+#[cfg(target_os = "linux")]
+#[test]
+fn proc_probe_sees_this_process() {
+    use std::path::Path;
+    assert_eq!(
+        proc_liveness(Path::new("/proc"), std::process::id()),
+        Liveness::Alive
+    );
+}
+
+/// Stray names never match the spool pattern and are left alone, as are
+/// missing directories.
+#[test]
+fn sweep_ignores_stray_names_and_missing_dirs() {
+    let dir = tempfile::tempdir().expect("scratch spool dir");
+    let stray = dir.path().join("notes.txt");
+    std::fs::write(&stray, b"not spool").unwrap();
+    let broken = dir.path().join("zapfast-audio-x-1.pcm");
+    std::fs::write(&broken, b"not a pid").unwrap();
+    sweep_spool_in(dir.path(), &|_| Liveness::Dead);
+    assert!(stray.exists(), "unrelated file is kept");
+    assert!(broken.exists(), "invalid name is kept");
+    sweep_spool_in(&dir.path().join("gone"), &|_| Liveness::Dead);
 }

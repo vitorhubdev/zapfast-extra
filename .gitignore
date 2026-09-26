@@ -19,3 +19,4 @@ __pycache__/
 
 # Private planning documents, never included in releases.
 /.local-roadmap/
+.alma-snapshots

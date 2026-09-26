@@ -22,16 +22,26 @@ pub enum FileKind {
     Other,
 }
 
+/// A sender file name as Windows will treat it on disk: trailing dots and
+/// spaces are stripped from the final component, so `evil.bat ` opens as
+/// `evil.bat`. Every parser that decides what a name is (classification,
+/// saved extension, saved stem) must read this form, or the three disagree
+/// about what runs.
+pub fn canonical_file_name(name: &str) -> &str {
+    name.trim_end_matches([' ', '.'])
+}
+
 impl FileKind {
     /// Reads the kind from the MIME type, with the name as the tie breaker.
     pub fn of(mime: &str, name: &str) -> Self {
-        let extension = name
+        let extension = canonical_file_name(name)
             .rsplit_once('.')
             .map(|(_, extension)| extension.to_ascii_lowercase())
             .unwrap_or_default();
         match extension.as_str() {
             "exe" | "msi" | "bat" | "cmd" | "com" | "scr" | "ps1" | "jar" | "apk" | "dmg"
-            | "appimage" | "deb" | "rpm" => return Self::Installer,
+            | "appimage" | "deb" | "rpm" | "pif" | "lnk" | "vbs" | "vbe" | "jse" | "wsf"
+            | "wsh" => return Self::Installer,
             "zip" | "rar" | "7z" | "tar" | "gz" | "xz" | "bz2" => return Self::Archive,
             _ => {}
         }
@@ -859,6 +869,8 @@ pub enum Action {
     OpenFile(PathBuf),
     /// A short error the interface shows, with no other effect.
     ToastError(String),
+    /// A short confirmation the interface shows, with no other effect.
+    ToastInfo(String),
     /// Reveals a file in its folder, selecting it. Programs open this way
     /// instead of running: clicking one must never execute it.
     ShowInFolder(PathBuf),
@@ -1085,6 +1097,21 @@ pub enum Action {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trailing_dots_and_spaces_do_not_hide_programs() {
+        // Windows strips trailing dots and spaces on disk, so the check
+        // reads the name the same way.
+        assert!(FileKind::of("application/octet-stream", "evil.bat ").runs_code());
+        assert!(FileKind::of("application/octet-stream", "evil.exe.").runs_code());
+        assert!(FileKind::of("application/octet-stream", "EVIL.PS1 . ").runs_code());
+        assert!(FileKind::of("application/octet-stream", "note.vbs").runs_code());
+        assert!(FileKind::of("application/octet-stream", "shortcut.lnk").runs_code());
+        assert!(!FileKind::of("application/pdf", "report.pdf.").runs_code());
+        assert!(!FileKind::of("image/jpeg", "photo.jpg ").runs_code());
+        assert_eq!(canonical_file_name("evil.bat. . "), "evil.bat");
+        assert_eq!(canonical_file_name("..."), "");
+    }
 
     #[test]
     fn polls_validate_trimmed_questions_and_distinct_bounded_answers() {
