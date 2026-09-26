@@ -1,7 +1,7 @@
 ; Windows installer built from a release binary with Inno Setup 6.3 or newer:
 ;
-;   iscc /DVersion=0.1.0 /DArch=x86_64 /DBinary=...\zapfast.exe ^
-;        /DOutputDir=dist packaging\windows\zapfast.iss
+;   iscc /DVersion=0.1.0 /DArch=x86_64 /DBinary=...\vespera.exe ^
+;        /DOutputDir=dist packaging\windows\vespera.iss
 ;
 ; Arch matches the Rust target: x86_64 or aarch64. Installation uses the
 ; current user's Programs folder and does not need administrator rights.
@@ -25,15 +25,15 @@
   #define InnoArch "x64compatible"
 #endif
 
-#define AppName "ZapExt"
+#define AppName "Vespera"
 #ifndef NumericVersion
   #define NumericVersion Version
 #endif
-#define AppExeName "zapext.exe"
+#define AppExeName "vespera.exe"
 
 [Setup]
-; Never change: this is how Windows tells an update from a new program.
-AppId={{F2512314-384A-4002-9933-AB840FD01639}
+; New program id. An update of this installer keeps this value.
+AppId={{7E4C1A90-2B58-4D6F-8A13-5C9E0B7D2F46}
 AppName={#AppName}
 AppVersion={#Version}
 AppVerName={#AppName} {#Version}
@@ -50,7 +50,7 @@ ArchitecturesInstallIn64BitMode={#InnoArch}
 MinVersion=10.0
 LicenseFile=..\..\LICENSE
 OutputDir={#OutputDir}
-OutputBaseFilename=zapfast-v{#Version}-{#Arch}-pc-windows-msvc-setup
+OutputBaseFilename=vespera-v{#Version}-{#Arch}-pc-windows-msvc-setup
 SetupIconFile=vespera.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -70,16 +70,9 @@ Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 Source: "vespera-installer.txt"; DestDir: "{app}"; Flags: ignoreversion
 
-[InstallDelete]
-; AppId keeps upgrades in the existing installation directory. Remove the
-; previous executable and shortcuts so they cannot start the old client.
-Type: files; Name: "{app}\fastsapp.exe"
-Type: files; Name: "{autoprograms}\FastsApp.lnk"
-Type: files; Name: "{autodesktop}\FastsApp.lnk"
-
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "me.paolino.zapfast"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "me.paolino.zapfast"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; AppUserModelID: "io.github.vitorhubdev.Vespera"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; AppUserModelID: "io.github.vitorhubdev.Vespera"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

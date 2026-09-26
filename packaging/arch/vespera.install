@@ -1,12 +1,12 @@
-print_zapfast_post_install() {
+print_vespera_post_install() {
   cat <<'EOF2'
-zapfast setup:
+vespera setup:
 
   Launch it and, on the phone, open WhatsApp > Linked devices > Link a
   device, then point the camera at the code (or link with your phone
   number instead). The chats sync to a local archive on the first link.
 
-  Keep your desktop keyring unlocked so ZapFast can open its encrypted
+  Keep your desktop keyring unlocked so Vespera can open its encrypted
   archive. On Linux this needs a Secret Service provider (GNOME Keyring
   or KeePassXC with Secret Service enabled).
 
@@ -17,9 +17,9 @@ EOF2
 }
 
 post_install() {
-  print_zapfast_post_install
+  print_vespera_post_install
 }
 
 post_upgrade() {
-  print_zapfast_post_install
+  print_vespera_post_install
 }

@@ -80,18 +80,18 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 3
         run: |
-          target/debug/zapext --demo --demo-shot "$RUNNER_TEMP/zapfast-content.png" --demo-shot-delay 8000 &
+          target/debug/vespera --demo --demo-shot "$RUNNER_TEMP/vespera-content.png" --demo-shot-delay 8000 &
           demo_pid=$!
           sleep 6
-          screencapture -x "$RUNNER_TEMP/zapfast-window.png" || true
+          screencapture -x "$RUNNER_TEMP/vespera-window.png" || true
           wait "$demo_pid"
-          test -s "$RUNNER_TEMP/zapfast-content.png"
+          test -s "$RUNNER_TEMP/vespera-content.png"
       - name: macOS preview
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v7
         with:
           name: macos-preview
-          path: ${{ runner.temp }}/zapfast-*.png
+          path: ${{ runner.temp }}/vespera-*.png
 
   windows-arm64:
     name: compile (Windows arm64)

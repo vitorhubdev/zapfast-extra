@@ -42,7 +42,7 @@ instructions: |
   Keep replies short, direct, and free of status chatter, implementation
   plans, headings, and em dashes.
 
-  ZapFast is a native WhatsApp client using whatsapp-rust. A protobuf field
+  Vespera is a native WhatsApp client (a fork of ZapFast) using whatsapp-rust. A protobuf field
   alone does not prove a supported capability. No browser engine, telemetry,
   hosted backend, or second account system. Leave uncertain protocol support
   to the maintainer. Never repeat messages, phone numbers, device keys,

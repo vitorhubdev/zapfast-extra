@@ -33,17 +33,17 @@ def report(staging, output)
   puts "attached images: #{`hdiutil info | grep -c "^image-path"`.strip}"
 end
 
-Dir.mktmpdir("zapfast-dmg-") do |directory|
+Dir.mktmpdir("vespera-dmg-") do |directory|
   staging = File.join(directory, "stage")
   FileUtils.mkdir_p(staging)
   FileUtils.cp_r(File.join(payload, "."), staging, preserve: true)
   File.symlink("/Applications", File.join(staging, "Applications"))
   report(staging, output)
-  raw = File.join(directory, "zapext.dmg")
+  raw = File.join(directory, "vespera.dmg")
   mount = File.join(directory, "mount")
   FileUtils.mkdir_p(mount)
   abort "DMG creation failed" unless run("hdiutil", "create", "-size", "#{image_size(staging)}m",
-    "-fs", "HFS+", "-volname", "ZapExt", raw)
+    "-fs", "HFS+", "-volname", "Vespera", raw)
   abort "DMG mount failed" unless run("hdiutil", "attach", raw, "-nobrowse", "-mountpoint", mount)
   copied = false
   begin

@@ -27,29 +27,29 @@ docker run --rm \
     set -- /packages/*."$FORMAT"
     test "$#" -eq 1
     test -f "$1"
-    mkdir -p /root/.config/zapfast
-    printf "%s\n" "preserve-existing-settings" > /root/.config/zapfast/fixture
+    mkdir -p /root/.config/vespera
+    printf "%s\n" "preserve-existing-settings" > /root/.config/vespera/fixture
     if [ "$FORMAT" = deb ]; then
       apt-get update
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$1"
-      dpkg-query -W zapfast
+      dpkg-query -W vespera
     else
       dnf install -y --setopt=install_weak_deps=False "$1"
-      rpm -q zapfast
+      rpm -q vespera
     fi
-    zapfast --version
+    vespera --version
     /checks/check-runtime-libs
-    test -s /usr/share/applications/zapfast.desktop
-    test -s /usr/share/icons/hicolor/scalable/apps/zapfast.svg
-    grep -qx "Icon=zapfast" /usr/share/applications/zapfast.desktop
-    grep -qx "StartupWMClass=zapfast" /usr/share/applications/zapfast.desktop
-    test -s /usr/share/zapfast/omarchy/zapfast.json.tpl
-    test -x /usr/share/zapfast/omarchy/zapfast-theme
-    if [ "$FORMAT" = deb ]; then apt-get remove -y zapfast; else dnf remove -y zapfast; fi
-    test ! -e /usr/bin/zapfast
-    test ! -e /usr/share/applications/zapfast.desktop
-    test ! -e /usr/share/icons/hicolor/scalable/apps/zapfast.svg
-    test ! -e /usr/share/zapfast/omarchy/zapfast.json.tpl
-    test ! -e /usr/share/zapfast/omarchy/zapfast-theme
-    test "$(cat /root/.config/zapfast/fixture)" = preserve-existing-settings
+    test -s /usr/share/applications/vespera.desktop
+    test -s /usr/share/icons/hicolor/scalable/apps/vespera.svg
+    grep -qx "Icon=vespera" /usr/share/applications/vespera.desktop
+    grep -qx "StartupWMClass=vespera" /usr/share/applications/vespera.desktop
+    test -s /usr/share/vespera/omarchy/vespera.json.tpl
+    test -x /usr/share/vespera/omarchy/vespera-theme
+    if [ "$FORMAT" = deb ]; then apt-get remove -y vespera; else dnf remove -y vespera; fi
+    test ! -e /usr/bin/vespera
+    test ! -e /usr/share/applications/vespera.desktop
+    test ! -e /usr/share/icons/hicolor/scalable/apps/vespera.svg
+    test ! -e /usr/share/vespera/omarchy/vespera.json.tpl
+    test ! -e /usr/share/vespera/omarchy/vespera-theme
+    test "$(cat /root/.config/vespera/fixture)" = preserve-existing-settings
   '

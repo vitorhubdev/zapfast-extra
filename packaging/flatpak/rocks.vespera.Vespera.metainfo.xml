@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>rocks.zapfast.ZapFast</id>
-  <name>ZapExt</name>
-  <summary>A community mod of ZapFast with extra desktop features</summary>
+  <id>rocks.vespera.Vespera</id>
+  <name>Vespera</name>
+  <summary>A community mod of Vespera with extra desktop features</summary>
   <developer id="io.github.vitorhubdev">
     <name>vitorhubdev</name>
   </developer>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <description>
-    <p>ZapExt is a community mod of ZapFast for Linux, macOS and Windows, written in Rust
+    <p>Vespera is a community mod of Vespera for Linux, macOS and Windows, written in Rust
     without a browser engine. Link your phone to read and send messages.</p>
     <p>Browse chats, search your local archive, send attachments and voice messages,
     and use emoji and stickers. Closing the window can keep the connection
-    running in the system tray. ZapExt is an independent project, not affiliated
+    running in the system tray. Vespera is an independent project, not affiliated
     with WhatsApp or Meta.</p>
   </description>
-  <launchable type="desktop-id">rocks.zapfast.ZapFast.desktop</launchable>
+  <launchable type="desktop-id">rocks.vespera.Vespera.desktop</launchable>
   <url type="homepage">https://github.com/vitorhubdev/zapfast-extra</url>
   <url type="bugtracker">https://github.com/vitorhubdev/zapfast-extra/issues</url>
   <url type="help">https://github.com/vitorhubdev/zapfast-extra#readme</url>
@@ -24,7 +24,7 @@
   <screenshots>
     <screenshot type="default">
       <caption>A conversation with pictures, voice messages and replies</caption>
-      <image>https://raw.githubusercontent.com/vitorhubdev/zapfast-extra/main/docs/screenshot.png</image>
+      <image>https://raw.githubusercontent.com/vitorhubdev/vespera-extra/main/docs/screenshot.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"><content_attribute id="social-chat">intense</content_attribute></content_rating>

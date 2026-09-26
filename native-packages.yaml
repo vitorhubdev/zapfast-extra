@@ -10,43 +10,38 @@ libraries:
     deb: libasound2t64
     rpm: alsa-lib
 nfpm:
-  name: zapfast
+  name: vespera
   maintainer: vitorhubdev <108148783+vitorhubdev@users.noreply.github.com>
   homepage: https://github.com/vitorhubdev/zapfast-extra
-  description: ZapExt, a community mod of ZapFast with extra desktop features and fixes
+  description: Vespera, a community fork of ZapFast with extra desktop features and fixes
   license: MIT
-  provides: [fastsapp]
-  conflicts: [fastsapp]
-  replaces: [fastsapp]
   contents:
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/zapfast"
-    dst: "/usr/bin/zapfast"
+  - src: "@PAYLOAD@/vespera-v@VERSION@-@TARGET@/vespera"
+    dst: "/usr/bin/vespera"
     file_info:
       mode: 493
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/LICENSE"
-    dst: "/usr/share/licenses/zapfast/LICENSE"
+  - src: "@PAYLOAD@/vespera-v@VERSION@-@TARGET@/LICENSE"
+    dst: "/usr/share/licenses/vespera/LICENSE"
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/README.md"
-    dst: "/usr/share/doc/zapfast/README.md"
+  - src: "@PAYLOAD@/vespera-v@VERSION@-@TARGET@/README.md"
+    dst: "/usr/share/doc/vespera/README.md"
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/packaging/applications/zapfast.desktop"
-    dst: "/usr/share/applications/zapfast.desktop"
+  - src: "@PAYLOAD@/vespera-v@VERSION@-@TARGET@/packaging/applications/vespera.desktop"
+    dst: "/usr/share/applications/vespera.desktop"
     file_info:
       mode: 420
-  # The desktop entry still resolves Icon=zapfast, so the installed icon keeps
-  # its legacy name until the app id is renamed.
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/packaging/icons/vespera.svg"
-    dst: "/usr/share/icons/hicolor/scalable/apps/zapfast.svg"
+  - src: "@PAYLOAD@/vespera-v@VERSION@-@TARGET@/packaging/icons/vespera.svg"
+    dst: "/usr/share/icons/hicolor/scalable/apps/vespera.svg"
     file_info:
       mode: 420
-  - src: contrib/omarchy/zapfast.json.tpl
-    dst: /usr/share/zapfast/omarchy/zapfast.json.tpl
+  - src: contrib/omarchy/vespera.json.tpl
+    dst: /usr/share/vespera/omarchy/vespera.json.tpl
     file_info:
       mode: 420
-  - src: contrib/omarchy/zapfast-theme
-    dst: /usr/share/zapfast/omarchy/zapfast-theme
+  - src: contrib/omarchy/vespera-theme
+    dst: /usr/share/vespera/omarchy/vespera-theme
     file_info:
       mode: 493
   overrides:
@@ -100,7 +95,7 @@ targets:
       local: dist/macos-input
     native:
       command: [ruby, packaging/macos/dmg.rb, '@PAYLOAD@', '@PACKAGE@']
-      output: 'zapfast-@TAG@-macos-universal.dmg'
+      output: 'vespera-@TAG@-macos-universal.dmg'
   linux-amd64:
     platform: linux
     arch: amd64
@@ -110,8 +105,8 @@ targets:
     - deb
     - rpm
     input:
-      local: dist/zapfast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
-      release_asset: zapfast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+      local: dist/vespera-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+      release_asset: vespera-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
   linux-arm64:
     platform: linux
     arch: arm64
@@ -121,34 +116,34 @@ targets:
     - deb
     - rpm
     input:
-      local: dist/zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
-      release_asset: zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+      local: dist/vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+      release_asset: vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
 release:
-  repository: vitorhubdev/zapfast-extra
+  repository: vitorhubdev/vespera-extra
   checksums: checksums.txt
 assets:
   AMD64:
-    file: zapfast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
-    local: dist/zapfast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    file: vespera-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
+    local: dist/vespera-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
   ARM64:
-    file: zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
-    local: dist/zapfast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+    file: vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
+    local: dist/vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
   MACOS:
-    file: zapfast-v@VERSION@-macos-universal.dmg
-    local: dist/zapfast-v@VERSION@-macos-universal.dmg
+    file: vespera-v@VERSION@-macos-universal.dmg
+    local: dist/vespera-v@VERSION@-macos-universal.dmg
   SOURCE:
-    file: zapfast-@VERSION@.tar.gz
+    file: vespera-@VERSION@.tar.gz
     url: https://github.com/vitorhubdev/zapfast-extra/archive/refs/tags/v@VERSION@.tar.gz
     checksummed: false
-    local: dist/zapfast-@VERSION@.tar.gz
+    local: dist/vespera-@VERSION@.tar.gz
 templates:
-  homebrew/zapfast.rb: packaging/homebrew/zapfast.rb.in
-  arch/zapfast/PKGBUILD: packaging/arch/zapfast/PKGBUILD.in
-  arch/zapfast/zapfast.install: packaging/arch/zapfast.install
-  arch/zapfast-bin/PKGBUILD: packaging/arch/zapfast-bin/PKGBUILD.in
-  arch/zapfast-bin/zapfast-bin.install: packaging/arch/zapfast.install
-  arch/zapfast-git/PKGBUILD: packaging/arch/zapfast-git/PKGBUILD.in
-  arch/zapfast-git/zapfast-git.install: packaging/arch/zapfast.install
+  homebrew/vespera.rb: packaging/homebrew/vespera.rb.in
+  arch/vespera/PKGBUILD: packaging/arch/vespera/PKGBUILD.in
+  arch/vespera/vespera.install: packaging/arch/vespera.install
+  arch/vespera-bin/PKGBUILD: packaging/arch/vespera-bin/PKGBUILD.in
+  arch/vespera-bin/vespera-bin.install: packaging/arch/vespera.install
+  arch/vespera-git/PKGBUILD: packaging/arch/vespera-git/PKGBUILD.in
+  arch/vespera-git/vespera-git.install: packaging/arch/vespera.install
 repositories:
   # Fork note: upstream Homebrew/AUR destinations belong to crmne/zapfast and
   # are not published by this fork. Homebrew points at a fork-owned tap
@@ -160,40 +155,40 @@ repositories:
     branch: main
     package_path: Casks
     files:
-      homebrew/zapfast.rb: Casks/zapfast.rb
-    version_file: Casks/zapfast.rb
+      homebrew/vespera.rb: Casks/vespera.rb
+    version_file: Casks/vespera.rb
     version_pattern: 'version "([^"]+)"'
     publish: push
   aur-source:
     group: aur
-    url: https://aur.archlinux.org/zapfast.git
-    push_url: ssh://aur@aur.archlinux.org/zapfast.git
+    url: https://aur.archlinux.org/vespera.git
+    push_url: ssh://aur@aur.archlinux.org/vespera.git
     branch: master
     package_path: "."
     files:
-      arch/zapfast: "."
+      arch/vespera: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push
   aur-bin:
     group: aur
-    url: https://aur.archlinux.org/zapfast-bin.git
-    push_url: ssh://aur@aur.archlinux.org/zapfast-bin.git
+    url: https://aur.archlinux.org/vespera-bin.git
+    push_url: ssh://aur@aur.archlinux.org/vespera-bin.git
     branch: master
     package_path: "."
     files:
-      arch/zapfast-bin: "."
+      arch/vespera-bin: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push
   aur-git:
     group: aur
-    url: https://aur.archlinux.org/zapfast-git.git
-    push_url: ssh://aur@aur.archlinux.org/zapfast-git.git
+    url: https://aur.archlinux.org/vespera-git.git
+    push_url: ssh://aur@aur.archlinux.org/vespera-git.git
     branch: master
     package_path: "."
     files:
-      arch/zapfast-git: "."
+      arch/vespera-git: "."
     version_file: ".SRCINFO"
     version_pattern: "^\\s*pkgver = (\\S+)"
     publish: push

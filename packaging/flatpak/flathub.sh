@@ -30,17 +30,17 @@ import yaml
 here, out = map(Path, sys.argv[1:3])
 commit = sys.argv[3]
 version = tomllib.loads(Path(sys.argv[4]).read_text())["package"]["version"]
-manifest = yaml.safe_load((here / "rocks.zapfast.ZapFast.yml").read_text())
+manifest = yaml.safe_load((here / "rocks.vespera.Vespera.yml").read_text())
 manifest["modules"][0]["sources"][0] = {
-    "type": "git", "url": "https://github.com/crmne/zapfast.git", "commit": commit
+    "type": "git", "url": "https://github.com/vitorhubdev/zapfast-extra.git", "commit": commit
 }
-(out / "rocks.zapfast.ZapFast.yml").write_text(yaml.safe_dump(manifest, sort_keys=False))
-meta = ET.parse(here / "rocks.zapfast.ZapFast.metainfo.xml")
+(out / "rocks.vespera.Vespera.yml").write_text(yaml.safe_dump(manifest, sort_keys=False))
+meta = ET.parse(here / "rocks.vespera.Vespera.metainfo.xml")
 releases = meta.getroot().find("releases")
 releases.clear()
 date = subprocess.check_output(["git", "-C", str(here), "show", "-s", "--format=%cs", commit], text=True).strip()
 release = ET.SubElement(releases, "release", version=version, date=date)
-ET.SubElement(release, "url").text = f"https://github.com/crmne/zapfast/releases/tag/v{version}"
+ET.SubElement(release, "url").text = f"https://github.com/vitorhubdev/zapfast-extra/releases/tag/v{version}"
 ET.indent(meta, space="  ")
-meta.write(out / "rocks.zapfast.ZapFast.metainfo.xml", encoding="UTF-8", xml_declaration=True)
+meta.write(out / "rocks.vespera.Vespera.metainfo.xml", encoding="UTF-8", xml_declaration=True)
 PY

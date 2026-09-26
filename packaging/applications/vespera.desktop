@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=ZapExt
+Name=Vespera
 GenericName=WhatsApp Client
 Comment=A native WhatsApp client
-Exec=zapext
-Icon=zapfast
+Exec=vespera
+Icon=vespera
 Terminal=false
 Categories=Network;InstantMessaging;Chat;
 Keywords=whatsapp;chat;messaging;
-StartupWMClass=zapfast
+StartupWMClass=vespera

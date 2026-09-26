@@ -26,10 +26,10 @@ jobs:
           python3 -m venv /tmp/flatpak-generator
           /tmp/flatpak-generator/bin/pip install aiohttp tomlkit PyYAML
           PATH="/tmp/flatpak-generator/bin:$PATH" python3 packaging/flatpak/test-packaging.py
-          PATH="/tmp/flatpak-generator/bin:$PATH" packaging/flatpak/flathub.sh HEAD /tmp/zapfast-flathub
-          cp /tmp/zapfast-flathub/cargo-sources.json packaging/flatpak/
+          PATH="/tmp/flatpak-generator/bin:$PATH" packaging/flatpak/flathub.sh HEAD /tmp/vespera-flathub
+          cp /tmp/vespera-flathub/cargo-sources.json packaging/flatpak/
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
-          manifest-path: packaging/flatpak/rocks.zapfast.ZapFast.yml
-          bundle: zapfast-test-x86_64.flatpak
+          manifest-path: packaging/flatpak/rocks.vespera.Vespera.yml
+          bundle: vespera-test-x86_64.flatpak
           cache: false

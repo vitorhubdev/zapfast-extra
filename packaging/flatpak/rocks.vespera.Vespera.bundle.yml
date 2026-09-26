@@ -1,0 +1,36 @@
+# The release workflow's Flatpak: the binary the Linux job built, packaged
+# into the same sandbox as rocks.vespera.Vespera.yml describes. The
+# job unpacks the release tarball into built/ beside this file first.
+id: rocks.vespera.Vespera
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+command: vespera
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --socket=pulseaudio
+  - --share=network
+  # Archive encryption key.
+  - --talk-name=org.freedesktop.secrets
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --persist=.local/state
+modules:
+  - name: vespera
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 vespera /app/bin/vespera
+      - install -Dm644 packaging/applications/*.desktop /app/share/applications/rocks.vespera.Vespera.desktop
+      - sed -i 's/^Icon=.*$/Icon=rocks.vespera.Vespera/;s/^StartupWMClass=vespera$/StartupWMClass=rocks.vespera.Vespera/' /app/share/applications/rocks.vespera.Vespera.desktop
+      - install -Dm644 packaging/icons/*.svg /app/share/icons/hicolor/scalable/apps/rocks.vespera.Vespera.svg
+      - install -Dm644 packaging/flatpak/rocks.vespera.Vespera.metainfo.xml /app/share/metainfo/rocks.vespera.Vespera.metainfo.xml
+      - install -Dm644 LICENSE /app/share/licenses/vespera/LICENSE
+    sources:
+      - type: dir
+        path: built
+      # Metainfo belongs to this packaging checkout, not the portable archive.
+      - type: file
+        path: rocks.vespera.Vespera.metainfo.xml
+        dest: packaging/flatpak

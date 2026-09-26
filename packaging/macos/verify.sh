@@ -25,12 +25,12 @@ if [ "$mode" = notarized ]; then
     xcrun stapler validate "$dmg"
 fi
 hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount" >/dev/null
-app="$mount/ZapExt.app"
+app="$mount/Vespera.app"
 codesign --verify --strict --deep "$app"
 if [ "$mode" = notarized ]; then
     spctl --assess --type execute --verbose=2 "$app"
 fi
-lipo "$app/Contents/MacOS/zapfast" -verify_arch x86_64 arm64
+lipo "$app/Contents/MacOS/vespera" -verify_arch x86_64 arm64
 codesign --display --entitlements - --xml "$app" > "$temporary/entitlements.plist"
 
 python3 - "$app/Contents/Info.plist" "$temporary/entitlements.plist" <<'PY'

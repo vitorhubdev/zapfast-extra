@@ -76,7 +76,7 @@ mod tests {
 
     #[test]
     fn installer_shortcuts_use_the_toast_identity() {
-        let installer = include_str!("../../packaging/windows/zapfast.iss");
+        let installer = include_str!("../../packaging/windows/vespera.iss");
         let shortcuts: Vec<_> = installer
             .lines()
             .filter(|line| {

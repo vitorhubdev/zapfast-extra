@@ -19,7 +19,7 @@ impl Setup {
     pub(super) fn discover() -> Option<Self> {
         let executable = std::env::current_exe().ok()?;
         Some(Self {
-            assets: executable.parent()?.parent()?.join("share/zapfast/omarchy"),
+            assets: executable.parent()?.parent()?.join("share/vespera/omarchy"),
             home: directories::BaseDirs::new()?.home_dir().to_path_buf(),
         })
     }
@@ -52,15 +52,15 @@ impl Setup {
         colors: impl FnOnce(&Path) -> io::Result<String>,
     ) -> io::Result<super::custom::CustomTheme> {
         let current = self.watch_directory().join("theme");
-        let rendered = current.join("zapfast.json");
+        let rendered = current.join("vespera.json");
         let text = if rendered.is_file() {
             read_small(&rendered)?
         } else {
-            let custom = self.home.join(".config/omarchy/themed/zapfast.json.tpl");
+            let custom = self.home.join(".config/omarchy/themed/vespera.json.tpl");
             let template = if custom.is_file() {
                 read_small(&custom)?
             } else {
-                include_str!("../../contrib/omarchy/zapfast.json.tpl").to_owned()
+                include_str!("../../contrib/omarchy/vespera.json.tpl").to_owned()
             };
             render_seed(&template, &colors(&current.join("colors.toml"))?)?
         };
@@ -78,12 +78,12 @@ impl Setup {
         if !self.available() {
             return Ok(());
         }
-        let template = read_small(&self.assets.join("zapfast.json.tpl"))?;
-        let hook = read_small(&self.assets.join("zapfast-theme"))?;
-        let template_path = config.join("themed/zapfast.json.tpl");
+        let template = read_small(&self.assets.join("vespera.json.tpl"))?;
+        let hook = read_small(&self.assets.join("vespera-theme"))?;
+        let template_path = config.join("themed/vespera.json.tpl");
         create_only(&template_path, template.as_bytes(), 0o644)?;
         create_only(
-            &config.join("hooks/theme-set.d/zapfast-theme"),
+            &config.join("hooks/theme-set.d/vespera-theme"),
             hook.as_bytes(),
             0o755,
         )?;
@@ -94,7 +94,7 @@ impl Setup {
         }
         // Seed the current palette without reapplying the desktop theme.
         // Future changes use Omarchy's own template renderer and installed hook.
-        let rendered = current.join("zapfast.json");
+        let rendered = current.join("vespera.json");
         let palette = if rendered.is_file() {
             read_small(&rendered)?
         } else {
@@ -141,7 +141,7 @@ fn create_only(destination: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
         .parent()
         .ok_or_else(|| io::Error::other("missing parent"))?;
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".zapfast-setup-{:016x}", rand::random::<u64>()));
+    let temporary = parent.join(format!(".vespera-setup-{:016x}", rand::random::<u64>()));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -219,15 +219,15 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
-    const TEMPLATE: &str = include_str!("../../contrib/omarchy/zapfast.json.tpl");
-    const HOOK: &str = include_str!("../../contrib/omarchy/zapfast-theme");
+    const TEMPLATE: &str = include_str!("../../contrib/omarchy/vespera.json.tpl");
+    const HOOK: &str = include_str!("../../contrib/omarchy/vespera-theme");
 
     struct Scratch(PathBuf);
 
     impl Scratch {
         fn new() -> Self {
             let path = std::env::temp_dir()
-                .join(format!("zapfast omarchy setup {}", rand::random::<u64>()));
+                .join(format!("vespera omarchy setup {}", rand::random::<u64>()));
             fs::create_dir(&path).unwrap();
             Self(path)
         }
@@ -312,7 +312,7 @@ mod tests {
     fn setup_requires_both_a_package_and_an_omarchy_desktop() {
         let root = Scratch::new();
         let setup = Setup {
-            assets: root.0.join("package/share/zapfast/omarchy"),
+            assets: root.0.join("package/share/vespera/omarchy"),
             home: root.0.join("user"),
         };
         let themes = root.0.join("profile/themes");
@@ -328,7 +328,7 @@ mod tests {
     fn setup_is_per_user_and_preserves_customizations_and_preferences() {
         let root = Scratch::new();
         let setup = Setup {
-            assets: root.0.join("package/share/zapfast/omarchy"),
+            assets: root.0.join("package/share/vespera/omarchy"),
             home: root.0.join("user"),
         };
         let config = setup.home.join(".config/omarchy");
@@ -337,14 +337,14 @@ mod tests {
         for path in [&setup.assets, &config, &current, &themes] {
             fs::create_dir_all(path).unwrap();
         }
-        fs::write(setup.assets.join("zapfast.json.tpl"), TEMPLATE).unwrap();
-        fs::write(setup.assets.join("zapfast-theme"), HOOK).unwrap();
-        fs::write(current.join("zapfast.json"), "{}").unwrap();
+        fs::write(setup.assets.join("vespera.json.tpl"), TEMPLATE).unwrap();
+        fs::write(setup.assets.join("vespera-theme"), HOOK).unwrap();
+        fs::write(current.join("vespera.json"), "{}").unwrap();
         let settings = themes.parent().unwrap().join("settings.json");
         fs::write(&settings, "existing preferences").unwrap();
         setup.install(&themes).unwrap();
-        let template = config.join("themed/zapfast.json.tpl");
-        let hook = config.join("hooks/theme-set.d/zapfast-theme");
+        let template = config.join("themed/vespera.json.tpl");
+        let hook = config.join("hooks/theme-set.d/vespera-theme");
         assert_eq!(fs::read_to_string(&template).unwrap(), TEMPLATE);
         assert_eq!(fs::read_to_string(&hook).unwrap(), HOOK);
         assert_ne!(fs::metadata(&hook).unwrap().permissions().mode() & 0o100, 0);

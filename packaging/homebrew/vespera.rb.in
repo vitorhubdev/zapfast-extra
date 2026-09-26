@@ -1,9 +1,9 @@
-cask "zapfast" do
+cask "vespera" do
   version "@VERSION@"
   sha256 "@MACOS_SHA256@"
 
-  url "https://github.com/crmne/zapfast/releases/download/v#{version}/zapfast-v#{version}-macos-universal.dmg"
-  name "ZapFast"
+  url "https://github.com/vitorhubdev/zapfast-extra/releases/download/v#{version}/vespera-v#{version}-macos-universal.dmg"
+  name "Vespera"
   desc "Native WhatsApp client"
   homepage "https://zapfast.rocks"
 
@@ -12,5 +12,5 @@ cask "zapfast" do
     strategy :github_latest
   end
 
-  app "ZapFast.app"
+  app "Vespera.app"
 end
