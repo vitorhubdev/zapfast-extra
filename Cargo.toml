@@ -1,22 +1,22 @@
 [package]
-name = "zapfast"
-version = "1.0.105"
-authors = ["Vitor (ZapExt fork) <108148783+vitorhubdev@users.noreply.github.com>"]
+name = "vespera"
+version = "1.0.106"
+authors = ["Vitor <108148783+vitorhubdev@users.noreply.github.com>"]
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "ZapExt, a community mod of ZapFast with extra desktop features and fixes"
+description = "Vespera, a community fork of ZapFast with extra desktop features and fixes"
 homepage = "https://github.com/vitorhubdev/zapfast-extra"
 repository = "https://github.com/vitorhubdev/zapfast-extra"
 keywords = ["whatsapp", "chat", "egui", "messaging"]
 categories = ["gui"]
 
 [lib]
-name = "zapfast"
+name = "vespera"
 path = "src/lib.rs"
 
 [[bin]]
-name = "zapext"
+name = "vespera"
 path = "src/main.rs"
 
 [dependencies]

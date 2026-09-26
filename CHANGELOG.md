@@ -1,6 +1,12 @@
 # Changelog
 
-All notable changes to the ZapExt fork are recorded here.
+All notable changes to Vespera are recorded here.
+
+## [1.0.106] - 2026-09-26
+
+### Changed
+
+- The application, command, and packages are named Vespera. A previous install's files and archive key move once on startup. Pair the phone again. The project links stay on github.com/vitorhubdev/zapfast-extra until that repository is renamed.
 
 ## [1.0.105] - 2026-09-26
 

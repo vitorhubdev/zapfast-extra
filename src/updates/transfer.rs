@@ -154,7 +154,7 @@ pub fn download_for(
     );
     let policy = source.clone();
     let http = reqwest::blocking::Client::builder()
-        .user_agent(format!("ZapExt/{}", super::zapext_version()))
+        .user_agent(format!("Vespera/{}", super::vespera_version()))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(15 * 60))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {

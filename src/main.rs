@@ -2,16 +2,16 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use zapfast::{app, backend, paths, settings, single_instance};
+use vespera::{app, backend, paths, settings, single_instance};
 
 use clap::Parser;
 
 const APP_NAME: &str = "Vespera";
-const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;
+const APP_VERSION: &str = vespera::updates::VESPERA_VERSION;
 
 // Referenced so a release binary keeps the commit it was compiled from.
 #[used]
-static COMPILED_COMMIT: &str = match option_env!("ZAPEXT_GIT_SHA") {
+static COMPILED_COMMIT: &str = match option_env!("VESPERA_GIT_SHA") {
     Some(sha) => sha,
     None => "unknown",
 };
@@ -20,7 +20,7 @@ fn app_title(demo: bool) -> String {
     // Trim once so a trailing newline in VERSION never leaks into the window
     // title or `--version` output. Reading the commit keeps it in the binary.
     let _commit = COMPILED_COMMIT;
-    let version = zapfast::updates::zapext_version();
+    let version = vespera::updates::vespera_version();
     if demo {
         format!("{APP_NAME} Demo - {version}")
     } else {
@@ -30,7 +30,7 @@ fn app_title(demo: bool) -> String {
 
 /// A fast, native WhatsApp client.
 #[derive(Debug, Parser)]
-#[command(name = "zapext", version = APP_VERSION, about)]
+#[command(name = "vespera", version = APP_VERSION, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Control>,
@@ -97,7 +97,7 @@ enum Control {
 fn main() -> eframe::Result<()> {
     let arguments: Vec<_> = std::env::args_os().collect();
     if arguments.len() == 3 && arguments[1] == "--apply-update" {
-        return zapfast::updates::install::run_helper(std::path::Path::new(&arguments[2]))
+        return vespera::updates::install::run_helper(std::path::Path::new(&arguments[2]))
             .map_err(|error| eframe::Error::AppCreation(error.into()));
     }
     let cli = Cli::parse();
@@ -124,9 +124,9 @@ fn main() -> eframe::Result<()> {
         }
     };
     let default_filter = if cli.verbose {
-        "info,zapfast=debug,whatsapp_rust=debug,wacore=debug"
+        "info,vespera=debug,whatsapp_rust=debug,wacore=debug"
     } else {
-        "warn,zapfast=info"
+        "warn,vespera=info"
     };
     // A demo must not create empty directories that would block a later
     // real launch from adopting an existing session.
@@ -151,7 +151,7 @@ fn main() -> eframe::Result<()> {
     // process is provably dead go; live owners are never touched. Demo
     // runs keep to their own sandbox and never sweep the real TEMP.
     if !demo {
-        zapfast::audio::sweep_stale_spool();
+        vespera::audio::sweep_stale_spool();
     }
     let mut logger =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(default_filter));
@@ -168,10 +168,10 @@ fn main() -> eframe::Result<()> {
     logger.format(|buffer, record| {
         use std::io::Write;
         let message = record.args().to_string();
-        let message = if zapfast::diagnostics::is_protocol_target(record.target())
-            || zapfast::diagnostics::is_protocol_target(record.module_path().unwrap_or_default())
+        let message = if vespera::diagnostics::is_protocol_target(record.target())
+            || vespera::diagnostics::is_protocol_target(record.module_path().unwrap_or_default())
         {
-            zapfast::diagnostics::protocol_summary(&message)
+            vespera::diagnostics::protocol_summary(&message)
         } else {
             &message
         };
@@ -205,10 +205,10 @@ fn main() -> eframe::Result<()> {
     }
     #[cfg(feature = "demo")]
     if demo {
-        zapfast::demo::populate(&mut app);
-        zapfast::demo::apply_flags(&mut app, cli.demo_page.as_deref());
+        vespera::demo::populate(&mut app);
+        vespera::demo::apply_flags(&mut app, cli.demo_page.as_deref());
         if cli.demo_tour {
-            zapfast::demo::tour::prepare(&mut app);
+            vespera::demo::tour::prepare(&mut app);
         }
     }
     #[cfg(feature = "demo")]
@@ -245,7 +245,7 @@ fn main() -> eframe::Result<()> {
                 app.attach(&cc.egui_ctx);
                 #[cfg(feature = "demo")]
                 if cli.demo_macos {
-                    zapfast::theme::preview_macos(&cc.egui_ctx);
+                    vespera::theme::preview_macos(&cc.egui_ctx);
                 }
                 Ok(Box::new(Shell {
                     app: Some(app),
@@ -255,7 +255,7 @@ fn main() -> eframe::Result<()> {
                     shot: creator_shot,
                     #[cfg(feature = "demo")]
                     tour: cli.demo_tour.then(|| {
-                        zapfast::demo::tour::Tour::new(
+                        vespera::demo::tour::Tour::new(
                             cli.demo_tour_delay.map(std::time::Duration::from_millis),
                             creator_tour_events,
                         )
@@ -265,7 +265,7 @@ fn main() -> eframe::Result<()> {
         )?;
         waker.detach();
         #[cfg(target_os = "macos")]
-        zapfast::macos::detach();
+        vespera::macos::detach();
 
         let hide = {
             let guard = slot.lock().unwrap_or_else(|p| p.into_inner());
@@ -292,7 +292,7 @@ fn main() -> eframe::Result<()> {
                     break;
                 }
             }
-            zapfast::tray::idle(std::time::Duration::from_millis(150));
+            vespera::tray::idle(std::time::Duration::from_millis(150));
         }
         let quit = slot
             .lock()
@@ -400,7 +400,7 @@ struct Shell {
     #[cfg(feature = "demo")]
     shot: Option<Shot>,
     #[cfg(feature = "demo")]
-    tour: Option<zapfast::demo::tour::Tour>,
+    tour: Option<vespera::demo::tour::Tour>,
 }
 
 impl Drop for Shell {
@@ -478,7 +478,7 @@ impl eframe::App for Shell {
             }
             app.background_frame(ctx);
             #[cfg(target_os = "macos")]
-            zapfast::macos::update_window(_frame, ctx, app.is_linked());
+            vespera::macos::update_window(_frame, ctx, app.is_linked());
         }
         #[cfg(feature = "demo")]
         {
@@ -500,7 +500,7 @@ impl eframe::App for Shell {
             app.frame_ui(ui);
             if let Some(receipt) = self.update_receipt.take() {
                 std::thread::spawn(move || {
-                    if let Err(error) = zapfast::updates::install::acknowledge(&receipt) {
+                    if let Err(error) = vespera::updates::install::acknowledge(&receipt) {
                         log::warn!("could not acknowledge the update: {error:#}");
                     }
                 });
@@ -537,7 +537,7 @@ fn app_icon() -> egui::IconData {
     {
         const SIZE: usize = 128;
         egui::IconData {
-            rgba: zapfast::util::app_icon_rgba(SIZE),
+            rgba: vespera::util::app_icon_rgba(SIZE),
             width: SIZE as u32,
             height: SIZE as u32,
         }
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn zapext_title_includes_version() {
-        let version = zapfast::updates::zapext_version();
+        let version = vespera::updates::vespera_version();
         assert!(!version.is_empty());
         assert_eq!(APP_VERSION.trim(), version);
         assert_eq!(app_title(false), format!("Vespera - {version}"));
@@ -561,13 +561,13 @@ mod tests {
 
     #[test]
     fn tour_cli_accepts_manual_and_delayed_starts() {
-        let cli = Cli::try_parse_from(["zapfast", "--demo-tour"]).unwrap();
+        let cli = Cli::try_parse_from(["vespera", "--demo-tour"]).unwrap();
         assert!(cli.demo_tour);
         assert!(cli.demo_tour_delay.is_none());
         let cli =
-            Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-tour-delay", "5000"]).unwrap();
+            Cli::try_parse_from(["vespera", "--demo-tour", "--demo-tour-delay", "5000"]).unwrap();
         assert_eq!(cli.demo_tour_delay, Some(5000));
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour-delay", "5000"]).is_err());
-        assert!(Cli::try_parse_from(["zapfast", "--demo-tour", "--demo-page", "login",]).is_err());
+        assert!(Cli::try_parse_from(["vespera", "--demo-tour-delay", "5000"]).is_err());
+        assert!(Cli::try_parse_from(["vespera", "--demo-tour", "--demo-page", "login",]).is_err());
     }
 }

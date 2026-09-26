@@ -27,22 +27,22 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-pub const ZAPEXT_VERSION: &str = match option_env!("ZAPEXT_RELEASE_VERSION") {
+pub const VESPERA_VERSION: &str = match option_env!("VESPERA_RELEASE_VERSION") {
     Some(version) => version,
     None => include_str!("../VERSION"),
 };
 /// Canonical fork version without surrounding whitespace.
 /// `VERSION` is the single source of truth for a local build. A release tag
-/// sets `ZAPEXT_RELEASE_VERSION` so a candidate reports `X.Y.Z-rc.N`.
-pub fn zapext_version() -> &'static str {
-    ZAPEXT_VERSION.trim()
+/// sets `VESPERA_RELEASE_VERSION` so a candidate reports `X.Y.Z-rc.N`.
+pub fn vespera_version() -> &'static str {
+    VESPERA_VERSION.trim()
 }
 
 /// Commit compiled into a release binary, or `unknown` for a local build.
-/// Release jobs set `ZAPEXT_GIT_SHA`. The string is kept live so the file
+/// Release jobs set `VESPERA_GIT_SHA`. The string is kept live so the file
 /// itself carries the commit it was built from.
-pub fn zapext_commit() -> &'static str {
-    option_env!("ZAPEXT_GIT_SHA").unwrap_or("unknown")
+pub fn vespera_commit() -> &'static str {
+    option_env!("VESPERA_GIT_SHA").unwrap_or("unknown")
 }
 
 /// Version a tag must compile into the binary and the package.
@@ -84,7 +84,7 @@ pub struct Release {
 /// The newest release, when it is newer than this build.
 pub fn newer_release() -> Result<Option<Release>> {
     let endpoints = Source::GitHub.endpoints();
-    match Checker::new().check(&endpoints, Channel::Stable, zapext_version()) {
+    match Checker::new().check(&endpoints, Channel::Stable, vespera_version()) {
         Some(CheckOutcome::Available(release)) => Ok(Some(release)),
         Some(CheckOutcome::UpToDate) => Ok(None),
         Some(CheckOutcome::Unavailable(error)) => Err(anyhow::anyhow!("{error}")),
@@ -424,7 +424,7 @@ impl Checker {
             .agent
             .get(url.as_str())
             .header("Accept", "application/vnd.github+json")
-            .header("User-Agent", format!("ZapExt/{current}"));
+            .header("User-Agent", format!("Vespera/{current}"));
         if let Some(tag) = etag.as_deref() {
             request = request.header("If-None-Match", tag);
         }
@@ -535,9 +535,9 @@ mod tests {
     }
 
     #[test]
-    fn zapext_version_is_clean_and_comparable() {
-        let raw = ZAPEXT_VERSION;
-        let clean = zapext_version();
+    fn vespera_version_is_clean_and_comparable() {
+        let raw = VESPERA_VERSION;
+        let clean = vespera_version();
         assert_eq!(clean, raw.trim(), "VERSION must not carry whitespace");
         assert!(!clean.is_empty(), "VERSION must not be empty");
         assert!(

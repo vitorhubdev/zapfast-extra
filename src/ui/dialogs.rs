@@ -506,7 +506,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
             theme::text(ui, "Vespera", theme::bold(17.0), palette.text);
             theme::text(
                 ui,
-                format!("Version {}", crate::updates::zapext_version()),
+                format!("Version {}", crate::updates::vespera_version()),
                 theme::regular(13.0),
                 palette.secondary,
             );

@@ -211,7 +211,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     widgets::setting_row(
                         ui,
                         &palette,
-                        &format!("Vespera {}", crate::updates::zapext_version()),
+                        &format!("Vespera {}", crate::updates::vespera_version()),
                         "A native WhatsApp client built with Rust, egui, and whatsapp-rust.",
                         |ui| {
                             if theme::soft_button(ui, &palette, Some(Icon::Info), "About", false).clicked() {

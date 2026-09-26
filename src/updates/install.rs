@@ -621,12 +621,12 @@ pub fn acknowledge(job: &Path) -> Result<()> {
         "The receipt belongs to a different installation"
     );
     ensure!(
-        crate::updates::zapext_version() == handoff.prepared.version,
+        crate::updates::vespera_version() == handoff.prepared.version,
         "The updated app reports the wrong version"
     );
     fs::write(
         handoff.prepared.directory.join("started"),
-        crate::updates::zapext_version(),
+        crate::updates::vespera_version(),
     )?;
     Ok(())
 }

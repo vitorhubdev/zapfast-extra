@@ -27,12 +27,12 @@ fn main() {
         let mut resource = winresource::WindowsResource::new();
         resource
             .set_icon("packaging/windows/vespera.ico")
-            .set("ProductName", "ZapExt")
-            .set("FileDescription", "ZapExt")
+            .set("ProductName", "Vespera")
+            .set("FileDescription", "Vespera")
             .set("CompanyName", "vitorhubdev")
             .set(
                 "LegalCopyright",
-                "ZapExt fork by vitorhubdev, based on ZapFast under MIT",
+                "Vespera, maintained by vitorhubdev, based on ZapFast under MIT",
             );
         if !version.is_empty() {
             resource

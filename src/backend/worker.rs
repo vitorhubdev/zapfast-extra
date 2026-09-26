@@ -268,7 +268,7 @@ fn retriable_download(error: &str) -> bool {
 /// New pairings show Vespera. An existing link keeps its old device name
 /// until the phone is paired again.
 fn app_version() -> wa::device_props::AppVersion {
-    let mut parts = crate::updates::zapext_version()
+    let mut parts = crate::updates::vespera_version()
         .split('.')
         .map(|part| part.parse::<u32>().ok());
     wa::device_props::AppVersion {
@@ -1848,7 +1848,7 @@ impl Worker {
                         .set_ephemeral(&chat, *expiration, timestamp)
                         .unwrap_or(false);
                     log::debug!(
-                        target: "zapfast::disappearing",
+                        target: "vespera::disappearing",
                         "group timer update: duration={expiration}s timestamp={timestamp} accepted={accepted}"
                     );
                     if accepted {
@@ -2504,7 +2504,7 @@ impl Worker {
                         .set_ephemeral(&chat, expiration, timestamp)
                         .unwrap_or(false);
                     log::debug!(
-                        target: "zapfast::disappearing",
+                        target: "vespera::disappearing",
                         "protocol timer update: duration={expiration}s timestamp={timestamp} fallback_timestamp={used_fallback} accepted={accepted}"
                     );
                     if accepted {
@@ -2512,7 +2512,7 @@ impl Worker {
                     }
                 } else {
                     log::debug!(
-                        target: "zapfast::disappearing",
+                        target: "vespera::disappearing",
                         "protocol timer update missing expiration"
                     );
                 }
@@ -3677,7 +3677,7 @@ impl Worker {
                 let waker = self.waker.clone();
                 tokio::task::spawn_blocking(move || {
                     let endpoints = crate::updates::Source::GitHub.endpoints();
-                    match checker.check(&endpoints, channel, crate::updates::zapext_version()) {
+                    match checker.check(&endpoints, channel, crate::updates::vespera_version()) {
                         Some(crate::updates::CheckOutcome::Available(release)) => {
                             let _ = events.send(Event::UpdateAvailable {
                                 version: release.version,
@@ -3697,7 +3697,7 @@ impl Worker {
                 tokio::task::spawn_blocking(move || {
                     let endpoints = crate::updates::Source::GitHub.endpoints();
                     let outcome = checker
-                        .check(&endpoints, channel, crate::updates::zapext_version())
+                        .check(&endpoints, channel, crate::updates::vespera_version())
                         .unwrap_or(crate::updates::CheckOutcome::Unavailable(
                             crate::updates::FetchError::Unexpected(
                                 "An update check is already running".into(),
