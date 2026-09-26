@@ -58,7 +58,7 @@ package() {
   install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 "packaging/applications/zapfast.desktop" \
     "${pkgdir}/usr/share/applications/zapfast.desktop"
-  install -Dm644 "packaging/icons/zapfast.svg" \
+  install -Dm644 "packaging/icons/vespera.svg" \
     "${pkgdir}/usr/share/icons/hicolor/scalable/apps/zapfast.svg"
   # Releases predating theme integration remain valid packaging inputs.
   if [[ -f "contrib/omarchy/zapfast.json.tpl" ]]; then

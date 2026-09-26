@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/zapext.png" width="220" alt="ZapExt logo">
+  <img src="assets/vespera.png" width="220" alt="Vespera logo">
 </p>
 
 # ZapExt
@@ -347,8 +347,8 @@ zapfast
 The desktop file and icon are in `packaging/`. The window, tray, executable,
 bundle, and desktop icons are generated from the master logo artwork with
 `python scripts/make-icons.py --source logo.png` (needs Pillow, NumPy, and
-SciPy); the script writes `assets/zapext.png`, `packaging/icons/zapfast.svg`,
-`packaging/macos/icon-1024.png`, and `packaging/windows/zapfast.ico` so every
+SciPy); the script writes `assets/vespera.png`, `packaging/icons/vespera.svg`,
+`packaging/macos/icon-1024.png`, and `packaging/windows/vespera.ico` so every
 surface shows the same mark.
 
 `whatsapp-rust` is pinned to a Git commit because version 0.7.0 on crates.io

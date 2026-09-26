@@ -35,7 +35,9 @@ nfpm:
     dst: "/usr/share/applications/zapfast.desktop"
     file_info:
       mode: 420
-  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/packaging/icons/zapfast.svg"
+  # The desktop entry still resolves Icon=zapfast, so the installed icon keeps
+  # its legacy name until the app id is renamed.
+  - src: "@PAYLOAD@/zapfast-v@VERSION@-@TARGET@/packaging/icons/vespera.svg"
     dst: "/usr/share/icons/hicolor/scalable/apps/zapfast.svg"
     file_info:
       mode: 420

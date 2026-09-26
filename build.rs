@@ -18,7 +18,7 @@ fn packed_version(version: &str) -> Option<u64> {
 fn main() {
     #[cfg(windows)]
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
-        println!("cargo:rerun-if-changed=packaging/windows/zapfast.ico");
+        println!("cargo:rerun-if-changed=packaging/windows/vespera.ico");
         println!("cargo:rerun-if-changed=VERSION");
         // The fork's VERSION is what users see in the file properties; the
         // crate keeps the upstream package version for compatibility.
@@ -26,7 +26,7 @@ fn main() {
         let version = version.trim();
         let mut resource = winresource::WindowsResource::new();
         resource
-            .set_icon("packaging/windows/zapfast.ico")
+            .set_icon("packaging/windows/vespera.ico")
             .set("ProductName", "ZapExt")
             .set("FileDescription", "ZapExt")
             .set("CompanyName", "vitorhubdev")

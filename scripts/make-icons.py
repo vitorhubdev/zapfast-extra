@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
-"""Builds the ZapExt icon assets from the master logo artwork.
+"""Builds the Vespera icon assets from the master logo artwork.
 
 Usage:
     python scripts/make-icons.py --source path/to/logo.png
 
 Outputs:
-    assets/zapext.png             1024x1024 RGBA (window, tray, README)
-    packaging/macos/icon-1024.png same artwork for the macOS bundle
-    packaging/windows/zapfast.ico 16/24/32/48/64/128/256 frames for the executable
-    packaging/icons/zapfast.svg   vector trace for Linux and Flatpak desktop icons
+    assets/vespera.png             1024x1024 RGBA (window, tray, README)
+    packaging/macos/icon-1024.png  same artwork for the macOS bundle
+    packaging/windows/vespera.ico  16/24/32/48/64/128/256 frames for the executable
+    packaging/icons/vespera.svg    vector trace for Linux and Flatpak desktop icons
 
-The master artwork is a rounded green square with a ribbon Z, speed lines and a
-double plus. The script masks the corners, resamples to the icon sizes above,
-and traces the artwork into SVG paths so every surface shows the same logo:
-the background becomes a measured linear gradient, the shaded faces are
-painted flat, and the white and mint faces carry their own gradients.
+The master artwork is a rounded green square carrying the glass V mark. The
+script masks the corners, resamples to the icon sizes above, and traces the
+artwork into SVG paths so every surface shows the same logo: the background
+becomes a measured linear gradient, the shaded faces are painted flat, and the
+white and mint faces carry their own gradients.
+
+The source may sit on a black matte or on transparency. Fully transparent
+pixels carry no artwork colour, so load_source zeroes them before the bounds
+are measured; otherwise the transparent margin is mistaken for artwork.
 """
 
 import argparse
@@ -36,7 +40,15 @@ MIN_BAND_PIXELS = 150
 
 def load_source(path):
     image = Image.open(path).convert("RGBA")
-    return np.asarray(image)[:, :, :3].astype(np.float32)
+    data = np.asarray(image).astype(np.float32)
+    alpha = data[:, :, 3]
+    rgb = data[:, :, :3].copy()
+    # A transparent margin carries no artwork colour, so it means the same
+    # thing a black matte does: background. Zero it before the bounds and the
+    # corner radius are measured, or the margin is traced as part of the logo.
+    if float((alpha < 128).mean()) > 0.0:
+        rgb[alpha < 128] = 0.0
+    return rgb
 
 
 def find_bounds(rgb):
@@ -193,12 +205,40 @@ def artwork_layers(rgb, core, predicted):
     return white, mint, shadow
 
 
-def face_gradient(values):
-    """Light and shaded ends of a face, for its own gradient."""
-    return (
-        np.percentile(values, 92, axis=0),
-        np.percentile(values, 8, axis=0),
+def face_gradient(mask, values):
+    """Light and shaded ends of a face, plus the gradient direction.
+
+    Each face is fitted as a plane over its own bounding box by least
+    squares, and a single shared direction is used for all three channels.
+    The channels of this artwork run very nearly parallel, so one SVG
+    linearGradient carries the whole fit; measured against the artwork it
+    lands within 0.2 of a per-channel planar fit, while percentile ends
+    were far worse on the shaded face, which covers half the icon.
+    """
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return None
+    u = (xs - xs.min()) / max(float(xs.max() - xs.min()), 1.0)
+    v = (ys - ys.min()) / max(float(ys.max() - ys.min()), 1.0)
+    design = np.stack([np.ones_like(u, dtype=np.float64), u, v], axis=1)
+    coefficients = []
+    for channel in range(3):
+        fit, *_ = np.linalg.lstsq(design, values[:, channel].astype(np.float64), rcond=None)
+        coefficients.append(fit)
+    gradient = np.array(
+        [float(np.mean([c[1] for c in coefficients])), float(np.mean([c[2] for c in coefficients]))]
     )
+    length = float(np.hypot(*gradient))
+    if length < 1e-9:
+        gradient, length = np.array([0.0, 1.0]), 1.0
+    direction = gradient / length
+    corners = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+    projection = corners @ direction
+    start = direction * float(projection.min())
+    end = direction * float(projection.max())
+    light = np.array([c[0] + c[1] * start[0] + c[2] * start[1] for c in coefficients])
+    dark = np.array([c[0] + c[1] * end[0] + c[2] * end[1] for c in coefficients])
+    return light, dark, (start, end)
 
 
 def vignette_opacity(rgb, samples, coverage, artwork, u):
@@ -338,9 +378,10 @@ def write_svg(path, radius, side, samples, vignette, layers, faces):
         for position, color in samples
     )
     defs = ""
-    for name, light, dark in faces:
+    for name, light, dark, start, end in faces:
         defs += (
-            f'    <linearGradient id="{name}" x1="0" y1="0" x2="0.65" y2="1">\n'
+            f'    <linearGradient id="{name}" x1="{start[0]:.4f}" y1="{start[1]:.4f}"'
+            f' x2="{end[0]:.4f}" y2="{end[1]:.4f}">\n'
             f'      <stop offset="0" stop-color="{hexcolor(light)}"/>\n'
             f'      <stop offset="1" stop-color="{hexcolor(dark)}"/>\n'
             "    </linearGradient>\n"
@@ -356,7 +397,7 @@ def write_svg(path, radius, side, samples, vignette, layers, faces):
     body = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{side}" height="{side}"'
         f' viewBox="0 0 {side} {side}">\n'
-        "  <!-- Generated by scripts/make-icons.py from the master ZapExt logo. -->\n"
+        "  <!-- Generated by scripts/make-icons.py from the master Vespera logo. -->\n"
         f'  <defs>\n    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">\n{stops}    </linearGradient>\n{defs}{overlay}  </defs>\n'
         f'  <rect width="{side}" height="{side}" rx="{radius:.1f}" fill="url(#bg)"/>\n'
     )
@@ -373,7 +414,7 @@ def write_svg(path, radius, side, samples, vignette, layers, faces):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", default=str(ROOT / "assets" / "zapext.png"))
+    parser.add_argument("--source", default=str(ROOT / "assets" / "vespera.png"))
     parser.add_argument("--vector-side", type=int, default=VECTOR_SIDE)
     args = parser.parse_args()
 
@@ -408,16 +449,14 @@ def main():
     print("background stops:", " ".join(hexcolor(color) for _, color in samples))
     print(f"artwork pixels: {int(artwork.sum())}")
 
-    def layer_color(mask):
-        if not mask.any():
-            return np.array([0.0, 0.0, 0.0])
-        return np.median(small_rgb[mask], axis=0)
-
     white, mint, shadow = artwork_layers(small_rgb, artwork, predicted)
     layers = []
     faces = []
+    # Every face carries its own gradient. The shaded face of the glass V
+    # spans half the icon and is not a flat colour, so painting it with one
+    # fill was the single largest source of error in the trace.
     for name, mask, paint in (
-        ("shadow", shadow, None),
+        ("shadow", shadow, "url(#shadow-face)"),
         ("mint", mint, "url(#mint-face)"),
         ("white", white, "url(#white-face)"),
     ):
@@ -428,27 +467,28 @@ def main():
         if not data:
             print(f"  {name}: no path")
             continue
-        if paint is None:
-            layers.append((hexcolor(layer_color(mask)), data))
-            print(f"  {name}: {int(mask.sum())} px, {len(data)} path chars, {hexcolor(layer_color(mask))}")
-        else:
-            light, dark = face_gradient(small_rgb[mask])
-            faces.append((paint[len("url(#") : -1], light, dark))
-            layers.append((paint, data))
-            print(
-                f"  {name}: {int(mask.sum())} px, {len(data)} path chars,"
-                f" gradient {hexcolor(light)} to {hexcolor(dark)}"
-            )
+        gradient = face_gradient(mask, small_rgb[mask])
+        if gradient is None:
+            print(f"  {name}: no gradient")
+            continue
+        light, dark, (start, end) = gradient
+        faces.append((paint[len("url(#") : -1], light, dark, start, end))
+        layers.append((paint, data))
+        print(
+            f"  {name}: {int(mask.sum())} px, {len(data)} path chars,"
+            f" gradient {hexcolor(light)} to {hexcolor(dark)}"
+            f" from ({start[0]:.3f},{start[1]:.3f}) to ({end[0]:.3f},{end[1]:.3f})"
+        )
 
     vignette = vignette_opacity(small_rgb, samples, coverage, artwork, u)
     print(f"edge darkening overlay: {vignette:.3f}")
 
-    svg_path = ROOT / "packaging" / "icons" / "zapfast.svg"
+    svg_path = ROOT / "packaging" / "icons" / "vespera.svg"
     write_svg(svg_path, radius_vector, args.vector_side, samples, vignette, layers, faces)
     print("wrote", svg_path.relative_to(ROOT), f"({svg_path.stat().st_size} bytes)")
 
     for target in (
-        ROOT / "assets" / "zapext.png",
+        ROOT / "assets" / "vespera.png",
         ROOT / "packaging" / "macos" / "icon-1024.png",
     ):
         icon_rgba(rgb, x0, y0, x1, y1, radius, 1024, soften=True).save(
@@ -457,7 +497,7 @@ def main():
         print("wrote", target.relative_to(ROOT))
 
     frames = [icon_rgba(rgb, x0, y0, x1, y1, radius, size) for size in ICON_SIZES]
-    ico = ROOT / "packaging" / "windows" / "zapfast.ico"
+    ico = ROOT / "packaging" / "windows" / "vespera.ico"
     frames[-1].save(ico, sizes=[(size, size) for size in ICON_SIZES])
     print("wrote", ico.relative_to(ROOT))
     return 0

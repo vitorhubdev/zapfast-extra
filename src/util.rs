@@ -304,10 +304,10 @@ pub fn hue(seed: &str) -> f32 {
     (hash % 360) as f32
 }
 
-/// Raster ZapExt artwork: the window, tray, and in-app logo.
-pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/zapext.png");
+/// Raster Vespera artwork: the window, tray, and in-app logo.
+pub const APP_ICON_PNG: &[u8] = include_bytes!("../assets/vespera.png");
 /// Vector logo traced from the artwork, used when the raster cannot decode.
-const MARK: &[u8] = include_bytes!("../packaging/icons/zapfast.svg");
+const MARK: &[u8] = include_bytes!("../packaging/icons/vespera.svg");
 
 fn render_svg_mark(side: u32) -> Option<Vec<u8>> {
     let tree = resvg::usvg::Tree::from_data(MARK, &resvg::usvg::Options::default()).ok()?;
@@ -668,12 +668,12 @@ mod tests {
             assert_eq!(icon.len(), size * size * 4, "size {size}");
         }
         // The artwork decodes and is what every icon surface starts from.
-        let png = render_png_mark(APP_ICON_PNG, 32).expect("zapext.png must decode");
+        let png = render_png_mark(APP_ICON_PNG, 32).expect("vespera.png must decode");
         assert_eq!(png.len(), 32 * 32 * 4);
         assert!(has_visible_interior(&png, 32));
         assert_eq!(app_icon_rgba(32), png);
         // The traced vector is still a usable fallback.
-        let vector = render_svg_mark(32).expect("zapfast.svg must render");
+        let vector = render_svg_mark(32).expect("vespera.svg must render");
         assert!(has_visible_interior(&vector, 32));
         // Degenerate and empty buffers are never considered visible.
         assert!(!has_visible_interior(&[], 32));

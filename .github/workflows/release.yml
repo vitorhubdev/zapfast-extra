@@ -112,7 +112,11 @@ jobs:
           cp README.md LICENSE packaging/zapfast-portable.txt "dist/$name/"
           if [ "${{ runner.os }}" = "Linux" ]; then
             # Desktop integration for package builds and hand-installs.
-            cp --parents packaging/applications/zapfast.desktop packaging/icons/zapfast.svg contrib/omarchy/zapfast.json.tpl contrib/omarchy/zapfast-theme "dist/$name/"
+            cp --parents packaging/applications/zapfast.desktop contrib/omarchy/zapfast.json.tpl contrib/omarchy/zapfast-theme "dist/$name/"
+            # The desktop entry still resolves Icon=zapfast, so the vector mark
+            # keeps its legacy filename inside the payload.
+            mkdir -p "dist/$name/packaging/icons"
+            cp packaging/icons/vespera.svg "dist/$name/packaging/icons/zapfast.svg"
           fi
           cd dist
           if [ "${{ runner.os }}" = "Windows" ]; then

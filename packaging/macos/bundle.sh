@@ -22,7 +22,7 @@ cp "$binary" "$app/Contents/MacOS/zapext"
 chmod 755 "$app/Contents/MacOS/zapext"
 sed "s/__VERSION__/$version/g" "$here/Info.plist" > "$app/Contents/Info.plist"
 
-iconset="$(mktemp -d)/zapfast.iconset"
+iconset="$(mktemp -d)/vespera.iconset"
 mkdir -p "$iconset"
 # iconutil reads these base sizes and optional @2x versions. It ignores 64x64.
 for size in 16 32 128 256 512; do
