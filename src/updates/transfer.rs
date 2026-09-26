@@ -31,7 +31,7 @@ impl Source {
         match self {
             Self::GitHub => {
                 format!(
-                    "https://api.github.com/repos/vitorhubdev/vespera-extra/releases/tags/v{version}"
+                    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/tags/v{version}"
                 )
             }
             #[cfg(feature = "demo")]
@@ -206,7 +206,7 @@ pub fn download_for(
                 url.host_str() == Some("github.com")
                     && url.path()
                         == format!(
-                            "/vitorhubdev/vespera-extra/releases/download/v{}/{}",
+                            "/vitorhubdev/zapfast-extra/releases/download/v{}/{}",
                             release.version, candidate.name
                         ),
                 "Update asset does not belong to this release"

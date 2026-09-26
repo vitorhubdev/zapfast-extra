@@ -119,7 +119,7 @@ targets:
       local: dist/vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
       release_asset: vespera-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
 release:
-  repository: vitorhubdev/vespera-extra
+  repository: vitorhubdev/zapfast-extra
   checksums: checksums.txt
 assets:
   AMD64:
