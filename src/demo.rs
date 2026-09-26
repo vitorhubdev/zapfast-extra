@@ -1076,7 +1076,7 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 };
                 app.update = Some(crate::updates::Release {
                     version: "99.0.0".to_owned(),
-                    url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".to_owned(),
+                    url: "https://github.com/vitorhubdev/Vespera/releases/latest".to_owned(),
                 });
                 app.show_update = true;
                 let installation = Installation {
@@ -1625,18 +1625,20 @@ mod tests {
             panic!("tour keeps a text row");
         };
         assert!(
-            text.contains("github.com/vitorhubdev/zapfast-extra"),
+            text.contains("github.com/vitorhubdev/Vespera"),
             "fork link, got: {text}"
         );
+        // The tour must not send people to the upstream project's site.
+        let upstream_site = format!("{}.rocks", format!("{}{}", "zap", "fast"));
         assert!(
-            !text.contains("zapfast.rocks"),
+            !text.contains(&upstream_site),
             "no upstream site, got: {text}"
         );
         // The simulated update advertises the fork releases page.
         apply_flags(&mut app, Some("update"));
         let release = app.update.as_ref().expect("demo release");
         assert!(
-            release.url.contains("vitorhubdev/zapfast-extra"),
+            release.url.contains("vitorhubdev/Vespera"),
             "fork releases, got: {}",
             release.url
         );

@@ -6,7 +6,7 @@ All notable changes to Vespera are recorded here.
 
 ### Changed
 
-- The application, command, and packages are named Vespera. A previous install's files and archive key move once on startup. Pair the phone again. The project links stay on github.com/vitorhubdev/zapfast-extra until that repository is renamed.
+- The application, command, and packages are named Vespera. A previous install's files and archive key move once on startup. Pair the phone again. Project links use github.com/vitorhubdev/Vespera.
 
 ## [1.0.105] - 2026-09-26
 

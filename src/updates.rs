@@ -64,8 +64,7 @@ pub fn version_for_tag(tag: &str, file_version: &str) -> Option<String> {
         None
     }
 }
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/vitorhubdev/Vespera/releases/latest";
 
 /// Update-check interval.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -323,8 +322,7 @@ pub struct Endpoints {
     pub releases: String,
 }
 //
-const RELEASES_URL: &str =
-    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases?per_page=10";
+const RELEASES_URL: &str = "https://api.github.com/repos/vitorhubdev/Vespera/releases?per_page=10";
 //
 /// Largest listing body accepted; release pages are small JSON documents.
 const LISTING_LIMIT: usize = 1024 * 1024;

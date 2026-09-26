@@ -206,7 +206,9 @@ fn action(id: &str, hidden: bool) -> Option<Action> {
         "zoom-out" => Action::ZoomBy(-0.1),
         "zoom-reset" => Action::ResetZoom,
         "shortcuts" => Action::ShowDialog(Dialog::Shortcuts),
-        "help" => Action::OpenUrl("https://zapfast.rocks/using-vespera/".into()),
+        "help" => Action::OpenUrl(
+            "https://github.com/vitorhubdev/Vespera/blob/main/docs/_guide/using-vespera.md".into(),
+        ),
         "show-window" => Action::ShowWindow,
         // These two ids are shared with the native tray menu.
         "show" => {

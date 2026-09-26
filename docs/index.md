@@ -16,7 +16,7 @@ hero:
       link: /what-is-vespera/
     - theme: alt
       text: GitHub
-      link: https://github.com/vitorhubdev/zapfast-extra
+      link: https://github.com/vitorhubdev/Vespera
   image:
     src: /screenshot.png
     alt: "Vespera showing a chat with a photo, a document, a voice message, a quoted reply, and a link preview"
@@ -42,7 +42,7 @@ features:
   - icon: 🔓
     title: Open source
     details: MIT-licensed Rust built with egui and whatsapp-rust. The linking process is documented.
-    link: https://github.com/vitorhubdev/zapfast-extra
+    link: https://github.com/vitorhubdev/Vespera
     link_text: Read the source
 ---
 

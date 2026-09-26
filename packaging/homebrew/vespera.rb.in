@@ -2,10 +2,10 @@ cask "vespera" do
   version "@VERSION@"
   sha256 "@MACOS_SHA256@"
 
-  url "https://github.com/vitorhubdev/zapfast-extra/releases/download/v#{version}/vespera-v#{version}-macos-universal.dmg"
+  url "https://github.com/vitorhubdev/Vespera/releases/download/v#{version}/vespera-v#{version}-macos-universal.dmg"
   name "Vespera"
   desc "Native WhatsApp client"
-  homepage "https://zapfast.rocks"
+  homepage "https://github.com/vitorhubdev/Vespera"
 
   livecheck do
     url :url

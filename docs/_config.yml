@@ -5,7 +5,7 @@ release_app_name: Vespera
 description: Vespera, a community fork of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
 lang: en-US
 timezone: Europe/Berlin
-url: https://vitorhubdev.github.io/zapfast-extra
+url: https://github.com/vitorhubdev/Vespera
 baseurl: ""
 logo: /assets/images/logo.svg
 image: /screenshot.png
@@ -55,9 +55,9 @@ jekyll_vitepress:
     publisher:
       type: Person
       name: vitorhubdev
-      url: https://github.com/vitorhubdev/zapfast-extra
+      url: https://github.com/vitorhubdev/Vespera
       same_as:
-        - https://github.com/vitorhubdev/zapfast-extra
+        - https://github.com/vitorhubdev/Vespera
         - https://github.com/crmne/zapfast
   llms:
     title: Vespera
@@ -69,7 +69,7 @@ jekyll_vitepress:
     details: >-
       Covers installation, phone linking, everyday use, settings, and the
       WhatsApp connection. Source is on
-      [GitHub](https://github.com/vitorhubdev/zapfast-extra).
+      [GitHub](https://github.com/vitorhubdev/Vespera).
   branding:
     site_title: Vespera
     logo:
@@ -95,11 +95,11 @@ jekyll_vitepress:
     format: "%Y-%m-%d %H:%M"
   edit_link:
     enabled: true
-    pattern: "https://github.com/vitorhubdev/zapfast-extra/edit/main/docs/:path"
+    pattern: "https://github.com/vitorhubdev/Vespera/edit/main/docs/:path"
     text: Edit this page on GitHub
   github_star:
     enabled: true
-    repository: vitorhubdev/zapfast-extra
+    repository: vitorhubdev/Vespera
     text: Star
     show_count: true
   github_sponsor:

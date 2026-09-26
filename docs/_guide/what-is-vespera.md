@@ -49,7 +49,7 @@ Vespera does not currently support:
 - Colour emoji on Windows: Segoe UI Emoji is not a bitmap font, so emoji
   stay monochrome there for now.
 
-When reporting [an issue](https://github.com/vitorhubdev/zapfast-extra/issues), include
+When reporting [an issue](https://github.com/vitorhubdev/Vespera/issues), include
 what happened, what you expected, and when it happened. This helps match the
 problem to the log in the state directory.
 

@@ -4,7 +4,7 @@ pkgver=@VERSION@
 pkgrel=@PKGREL@
 pkgdesc="Fast native WhatsApp client built with Rust and egui"
 arch=('x86_64' 'aarch64')
-url="https://zapfast.rocks"
+url="https://github.com/vitorhubdev/Vespera"
 license=('MIT')
 install="${pkgname}.install"
 depends=('alsa-lib' 'alsa-plugins' 'libglvnd' 'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'libx11' 'libxcb' 'libxcursor' 'libxi' 'libxrandr')
@@ -18,11 +18,11 @@ conflicts=('vespera-bin' 'vespera-git')
 # undefined ring_core_* symbols. The stable package is prebuilt and never
 # meets this.
 options=('!debug' '!lto')
-source=("zapfast-extra-${pkgver}.tar.gz::https://github.com/vitorhubdev/zapfast-extra/archive/refs/tags/v${pkgver}.tar.gz")
+source=("Vespera-${pkgver}.tar.gz::https://github.com/vitorhubdev/Vespera/archive/refs/tags/v${pkgver}.tar.gz")
 sha256sums=('@SOURCE_SHA256@')
 
 prepare() {
-  cd "${srcdir}/zapfast-extra-${pkgver}"
+  cd "${srcdir}/Vespera-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   # whatsapp-rust is a git dependency pinned to a commit; the lockfile
   # names it, so this fetches it along with everything else.
@@ -30,7 +30,7 @@ prepare() {
 }
 
 build() {
-  cd "${srcdir}/zapfast-extra-${pkgver}"
+  cd "${srcdir}/Vespera-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   # Generated bindings inside glutin carry the path they were built at, which
@@ -41,7 +41,7 @@ build() {
 }
 
 check() {
-  cd "${srcdir}/zapfast-extra-${pkgver}"
+  cd "${srcdir}/Vespera-${pkgver}"
   export RUSTUP_TOOLCHAIN=stable
   # The demo feature carries the headless layout test of every screen,
   # which needs no display and talks to nothing.
@@ -49,7 +49,7 @@ check() {
 }
 
 package() {
-  cd "${srcdir}/zapfast-extra-${pkgver}"
+  cd "${srcdir}/Vespera-${pkgver}"
 
   install -Dm755 "target/release/vespera" "${pkgdir}/usr/bin/vespera"
   install -Dm644 "LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

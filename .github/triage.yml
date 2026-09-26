@@ -16,8 +16,8 @@ sources:
 - src/*.rs
 - src/backend/*.rs
 documentation:
-  docs/_guide/*.md: https://zapfast.rocks/%{name}/
-  docs/_reference/*.md: https://zapfast.rocks/%{name}/
+  docs/_guide/*.md: https://github.com/vitorhubdev/Vespera/blob/main/docs/_guide/%{name}.md
+  docs/_reference/*.md: https://github.com/vitorhubdev/Vespera/blob/main/docs/_reference/%{name}.md
 replies:
   version: Which version are you using?
   reproduction: What are the shortest steps that reproduce this?

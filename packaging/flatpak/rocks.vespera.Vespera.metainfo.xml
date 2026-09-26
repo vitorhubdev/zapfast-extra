@@ -17,14 +17,14 @@
     with WhatsApp or Meta.</p>
   </description>
   <launchable type="desktop-id">rocks.vespera.Vespera.desktop</launchable>
-  <url type="homepage">https://github.com/vitorhubdev/zapfast-extra</url>
-  <url type="bugtracker">https://github.com/vitorhubdev/zapfast-extra/issues</url>
-  <url type="help">https://github.com/vitorhubdev/zapfast-extra#readme</url>
-  <url type="vcs-browser">https://github.com/vitorhubdev/zapfast-extra</url>
+  <url type="homepage">https://github.com/vitorhubdev/Vespera</url>
+  <url type="bugtracker">https://github.com/vitorhubdev/Vespera/issues</url>
+  <url type="help">https://github.com/vitorhubdev/Vespera#readme</url>
+  <url type="vcs-browser">https://github.com/vitorhubdev/Vespera</url>
   <screenshots>
     <screenshot type="default">
       <caption>A conversation with pictures, voice messages and replies</caption>
-      <image>https://raw.githubusercontent.com/vitorhubdev/zapfast-extra/main/docs/screenshot.png</image>
+      <image>https://raw.githubusercontent.com/vitorhubdev/Vespera/main/docs/screenshot.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"><content_attribute id="social-chat">intense</content_attribute></content_rating>
@@ -38,10 +38,10 @@
   </supports>
   <releases>
     <release version="1.0.5" date="2026-09-17">
-      <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.5</url>
+      <url>https://github.com/vitorhubdev/Vespera/releases/tag/v1.0.5</url>
     </release>
     <release version="1.0.4" date="2026-09-16">
-      <url>https://github.com/vitorhubdev/zapfast-extra/releases/tag/v1.0.4</url>
+      <url>https://github.com/vitorhubdev/Vespera/releases/tag/v1.0.4</url>
     </release>
   </releases>
 </component>

@@ -7,8 +7,8 @@ Application assets and native recipes stay in `packaging/`.
 
 Vespera is a fork of ZapFast. The fork product version lives in `VERSION`
 (`1.0.x`) and GitHub tags are `v1.0.x` in
-`vitorhubdev/zapfast-extra`; source archives extract into
-`zapfast-extra-VERSION`. The Cargo package name is `vespera` and matches
+`vitorhubdev/Vespera`; source archives extract into
+`Vespera-VERSION`. The Cargo package name is `vespera` and matches
 `VERSION`. The executable, storage directory, and bundle id are `vespera`.
 A tag push builds a draft release and does not publish it. Use the
 configuration from the matching tag to rebuild a release. Release archives

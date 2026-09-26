@@ -22,22 +22,24 @@ const ALLOWED_FILES: &[(&str, &str)] = &[
     ),
     ("CHANGELOG.md", "older entries stay as published"),
     ("LICENSE", "copyright notices"),
+    (
+        "scripts/plot-benchmarks.py",
+        "chart labels copied from the 2026-09-15 measurements; that site belongs to the upstream project",
+    ),
 ];
 
-/// A directory of recorded pages may keep a previous name.
+/// Recorded measurement files may keep the upstream site label.
 const ALLOWED_PREFIXES: &[(&str, &str)] = &[(
     "docs/assets/benchmarks/",
-    "measurements recorded on 2026-09-15 and the existing site label",
+    "measurements recorded on 2026-09-15; the site label belongs to the upstream project",
 )];
 
 fn exception(line: &str) -> bool {
     let lower = line.to_lowercase();
     let product = format!("{}{}", "zap", "fast");
     let needles = [
-        format!("{product}-extra"),
         format!("github.com/crmne/{product}"),
         format!("crmne/{product}"),
-        format!("{product}.rocks"),
         format!("fork of {product}"),
         format!("upstream {product}"),
         format!("based on {product}"),

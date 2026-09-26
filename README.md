@@ -31,7 +31,7 @@ Vespera is written in Rust with [egui](https://github.com/emilk/egui) and uses
 protocol. It runs on Linux, macOS, and Windows and links as a companion device
 without embedding a browser engine.
 
-**Downloads:** [latest Vespera release](https://github.com/vitorhubdev/zapfast-extra/releases/latest)
+**Downloads:** [latest Vespera release](https://github.com/vitorhubdev/Vespera/releases/latest)
 
 > Vespera is not the upstream ZapFast project and is not affiliated with
 > WhatsApp or Meta.
@@ -275,7 +275,7 @@ yay -S vespera-git      # built from the latest commit
 ```
 
 Builds for every release are on the
-[Vespera releases page](https://github.com/vitorhubdev/zapfast-extra/releases):
+[Vespera releases page](https://github.com/vitorhubdev/Vespera/releases):
 
 | Platform | File |
 | --- | --- |
@@ -430,7 +430,7 @@ light/dark preference and does not read host theme files or install desktop hook
 ### Updating Vespera
 
 Vespera uses the fork's GitHub Releases API at
-`https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest`.
+`https://api.github.com/repos/vitorhubdev/Vespera/releases/latest`.
 It checks once a day when **Check for updates** is enabled. **Update channel** selects Stable (finished releases, the default) or Testing (also release candidates, never older builds). The current fork
 version has one canonical source in the repository root: [`VERSION`](VERSION).
 Release tags are validated against that file before binaries are built.

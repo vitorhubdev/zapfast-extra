@@ -832,7 +832,7 @@ mod tests {
     fn release() -> Release {
         Release {
             version: "99.0.0".into(),
-            url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".into(),
+            url: "https://github.com/vitorhubdev/Vespera/releases/latest".into(),
         }
     }
 

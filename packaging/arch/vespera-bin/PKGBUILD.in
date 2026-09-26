@@ -4,7 +4,7 @@ pkgver=@VERSION@
 pkgrel=@PKGREL@
 pkgdesc="Fast native WhatsApp client built with Rust and egui"
 arch=('x86_64' 'aarch64')
-url="https://zapfast.rocks"
+url="https://github.com/vitorhubdev/Vespera"
 license=('MIT')
 install="${pkgname}.install"
 # Nothing beyond libc is linked directly; winit and glutin dlopen these at
@@ -17,7 +17,7 @@ optdepends=('org.freedesktop.secrets: archive encryption key storage'
 provides=('vespera')
 conflicts=('vespera' 'vespera-git')
 options=('!debug' '!strip')
-_repo="https://github.com/vitorhubdev/zapfast-extra"
+_repo="https://github.com/vitorhubdev/Vespera"
 source_x86_64=("${_repo}/releases/download/v${pkgver}/vespera-v${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("${_repo}/releases/download/v${pkgver}/vespera-v${pkgver}-aarch64-unknown-linux-gnu.tar.gz")
 sha256sums_x86_64=('@AMD64_SHA256@')

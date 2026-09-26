@@ -7,7 +7,7 @@ nav_order: 1
 {% assign v = site.vespera_version %}
 {% assign name = site.release_asset_prefix %}
 {% assign app = site.release_app_name %}
-{% assign base = "https://github.com/vitorhubdev/zapfast-extra/releases/download/v" | append: v %}
+{% assign base = "https://github.com/vitorhubdev/Vespera/releases/download/v" | append: v %}
 
 Vespera was previously called Vespera. Version 0.13.0 introduces the new
 package and executable names. Your existing session and local data move
@@ -15,7 +15,7 @@ automatically when you first start Vespera; quit Vespera before upgrading.
 
 The current version is **v{{ v }}**. SHA-256 checksums are in
 [checksums.txt]({{ base }}/checksums.txt). Older versions are on the
-[releases page](https://github.com/vitorhubdev/zapfast-extra/releases).
+[releases page](https://github.com/vitorhubdev/Vespera/releases).
 
 ## Linux
 
@@ -45,7 +45,7 @@ Debian). The file picker uses `xdg-desktop-portal`.
 There is no disk image in this release. The build runner could not create it,
 so the macOS job is off until that is sorted out, and no file is offered here
 that does not exist. Images from earlier releases are on the
-[releases page](https://github.com/vitorhubdev/zapfast-extra/releases).
+[releases page](https://github.com/vitorhubdev/Vespera/releases).
 
 ## Windows
 

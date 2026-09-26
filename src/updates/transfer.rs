@@ -9,6 +9,31 @@ use sha2::{Digest, Sha256};
 use super::{Release, install};
 
 const DOWNLOAD_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+const REPOSITORY: &str = "vitorhubdev/Vespera";
+
+fn release_api(version: &str) -> String {
+    format!("https://api.github.com/repos/{REPOSITORY}/releases/tags/v{version}")
+}
+
+fn download_path(version: &str, name: &str) -> String {
+    format!("/{REPOSITORY}/releases/download/v{version}/{name}")
+}
+
+/// A GitHub release listing or asset for this repository, and no other.
+fn belongs_to_repository(url: &reqwest::Url, version: &str, name: Option<&str>) -> bool {
+    if !Source::GitHub.allowed(url) {
+        return false;
+    }
+    match (url.host_str(), name) {
+        (Some("api.github.com"), None) => {
+            url.path() == format!("/repos/{REPOSITORY}/releases/tags/v{version}")
+                || url.path() == format!("/repos/{REPOSITORY}/releases/latest")
+                || url.path() == format!("/repos/{REPOSITORY}/releases")
+        }
+        (Some("github.com"), Some(name)) => url.path() == download_path(version, name),
+        _ => false,
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub enum Source {
@@ -29,11 +54,7 @@ impl Source {
 
     fn release(&self, version: &str) -> String {
         match self {
-            Self::GitHub => {
-                format!(
-                    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/tags/v{version}"
-                )
-            }
+            Self::GitHub => release_api(version),
             #[cfg(feature = "demo")]
             Self::Local(base) => format!("{base}/latest.json"),
         }
@@ -203,12 +224,7 @@ pub fn download_for(
         );
         if matches!(source, Source::GitHub) {
             ensure!(
-                url.host_str() == Some("github.com")
-                    && url.path()
-                        == format!(
-                            "/vitorhubdev/zapfast-extra/releases/download/v{}/{}",
-                            release.version, candidate.name
-                        ),
+                belongs_to_repository(&url, &release.version, Some(&candidate.name)),
                 "Update asset does not belong to this release"
             );
         }
@@ -529,6 +545,42 @@ mod tests {
         assert!(checksum("invalid app.zip", "app.zip").is_err());
         let marked = format!("# commit abcdef\n{digest} *app.zip\n");
         assert_eq!(checksum(&marked, "app.zip").unwrap(), digest);
+    }
+
+    #[test]
+    fn release_and_download_urls_belong_only_to_this_repository() {
+        let version = "1.0.106";
+        let name = "vespera-v1.0.106-x86_64-pc-windows-msvc.zip";
+        let release = reqwest::Url::parse(&Source::GitHub.release(version)).unwrap();
+        let latest = reqwest::Url::parse(&Source::GitHub.latest()).unwrap();
+        let download = reqwest::Url::parse(&format!(
+            "https://github.com/{REPOSITORY}/releases/download/v{version}/{name}"
+        ))
+        .unwrap();
+        assert!(belongs_to_repository(&release, version, None));
+        assert!(belongs_to_repository(&latest, version, None));
+        assert!(belongs_to_repository(&download, version, Some(name)));
+        let previous = format!("{}-extra", format!("{}{}", "zap", "fast"));
+        let previous_download = reqwest::Url::parse(&format!(
+            "https://github.com/vitorhubdev/{previous}/releases/download/v{version}/{name}"
+        ))
+        .unwrap();
+        let previous_release = reqwest::Url::parse(&format!(
+            "https://api.github.com/repos/vitorhubdev/{previous}/releases/tags/v{version}"
+        ))
+        .unwrap();
+        let other = reqwest::Url::parse(&format!(
+            "https://github.com/other/Vespera/releases/download/v{version}/{name}"
+        ))
+        .unwrap();
+        assert!(!belongs_to_repository(
+            &previous_download,
+            version,
+            Some(name)
+        ));
+        assert!(!belongs_to_repository(&previous_release, version, None));
+        assert!(!belongs_to_repository(&other, version, Some(name)));
+        assert!(!Source::GitHub.allowed(&reqwest::Url::parse("https://example.com/file").unwrap()));
     }
 
     #[test]

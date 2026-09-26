@@ -6,8 +6,8 @@ edition = "2024"
 rust-version = "1.98"
 license = "MIT"
 description = "Vespera, a community fork of ZapFast with extra desktop features and fixes"
-homepage = "https://github.com/vitorhubdev/zapfast-extra"
-repository = "https://github.com/vitorhubdev/zapfast-extra"
+homepage = "https://github.com/vitorhubdev/Vespera"
+repository = "https://github.com/vitorhubdev/Vespera"
 keywords = ["whatsapp", "chat", "egui", "messaging"]
 categories = ["gui"]
 

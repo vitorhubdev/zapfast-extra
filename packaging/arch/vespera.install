@@ -12,7 +12,7 @@ vespera setup:
 
   Colour emoji have a bundled fallback; GIFs play in the app.
 
-Docs: https://zapfast.rocks
+Docs: https://github.com/vitorhubdev/Vespera
 EOF2
 }
 

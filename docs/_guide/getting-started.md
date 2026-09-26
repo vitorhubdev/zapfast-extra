@@ -12,7 +12,7 @@ macOS, and Windows.
 Or build from source with a recent stable [Rust](https://rustup.rs):
 
 ```sh
-git clone https://github.com/vitorhubdev/zapfast-extra vespera
+git clone https://github.com/vitorhubdev/Vespera vespera
 cd vespera
 cargo install --path .
 vespera
