@@ -376,7 +376,7 @@ fn demo_pdf(app: &App) -> std::path::PathBuf {
     }
     let page = |number: u32| {
         format!(
-            "BT /F1 28 Tf 40 500 Td (ZapExt demo) Tj ET\n\
+            "BT /F1 28 Tf 40 500 Td (Vespera demo) Tj ET\n\
 BT /F1 16 Tf 40 460 Td (Page {number} of 3) Tj ET\n\
 BT /F1 12 Tf 40 420 Td (Rendered here, on this device.) Tj ET\n"
         )
@@ -655,7 +655,7 @@ pub fn populate(app: &mut App) {
                     preview: Some(LinkPreview {
                         url: "https://www.example.com/".into(),
                         title: Some("Example Domain".into()),
-                        description: Some("A neutral synthetic preview for the ZapExt demo. No external fetch.".into()),
+                        description: Some("A neutral synthetic preview for the Vespera demo. No external fetch.".into()),
                     }),
                 },
             );

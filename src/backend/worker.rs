@@ -1797,7 +1797,7 @@ impl Worker {
             }
             E::ClientOutdated(_) => {
                 self.set_status(LinkStatus::Failed(
-                    "WhatsApp rejected this version of ZapExt. Update the app".to_owned(),
+                    "WhatsApp rejected this version of Vespera. Update the app".to_owned(),
                 ));
             }
             E::Messages(batch) => {

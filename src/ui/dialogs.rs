@@ -503,7 +503,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
         let (logo, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), egui::Sense::hover());
         theme::logo(ui, logo.center(), 44.0);
         ui.vertical(|ui| {
-            theme::text(ui, "ZapExt", theme::bold(17.0), palette.text);
+            theme::text(ui, "Vespera", theme::bold(17.0), palette.text);
             theme::text(
                 ui,
                 format!("Version {}", crate::updates::zapext_version()),
@@ -515,7 +515,7 @@ fn about(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(6.0);
     theme::paragraph(
         ui,
-        "ZapExt is a community fork of ZapFast, a native WhatsApp client written in Rust with egui. It connects through whatsapp-rust, and messages are end-to-end encrypted on this device.",
+        "Vespera is a community fork of ZapFast, a native WhatsApp client written in Rust with egui. It connects through whatsapp-rust, and messages are end-to-end encrypted on this device.",
         theme::regular(13.0),
         palette.text,
     );

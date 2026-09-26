@@ -6,7 +6,7 @@ use zapfast::{app, backend, paths, settings, single_instance};
 
 use clap::Parser;
 
-const APP_NAME: &str = "ZapExt";
+const APP_NAME: &str = "Vespera";
 const APP_VERSION: &str = zapfast::updates::ZAPEXT_VERSION;
 
 // Referenced so a release binary keeps the commit it was compiled from.
@@ -118,7 +118,7 @@ fn main() -> eframe::Result<()> {
         match single_instance::acquire(&waker) {
             single_instance::Outcome::Only(guard) => Some(guard),
             single_instance::Outcome::Surfaced => {
-                eprintln!("ZapExt or FastsApp is already running; asked it to show its window");
+                eprintln!("Vespera or FastsApp is already running; asked it to show its window");
                 return Ok(());
             }
         }
@@ -553,8 +553,8 @@ mod tests {
         let version = zapfast::updates::zapext_version();
         assert!(!version.is_empty());
         assert_eq!(APP_VERSION.trim(), version);
-        assert_eq!(app_title(false), format!("ZapExt - {version}"));
-        assert_eq!(app_title(true), format!("ZapExt Demo - {version}"));
+        assert_eq!(app_title(false), format!("Vespera - {version}"));
+        assert_eq!(app_title(true), format!("Vespera Demo - {version}"));
         // VERSION file is the single source of truth.
         assert_eq!(version, include_str!("../VERSION").trim());
     }

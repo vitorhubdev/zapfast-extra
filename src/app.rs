@@ -2020,7 +2020,7 @@ impl App {
                 Event::UpdateAvailable { version, url } => {
                     let notice = crate::updates::Release { version, url };
                     if self.update.as_ref() != Some(&notice) {
-                        self.toast(format!("ZapExt {} is available", notice.version));
+                        self.toast(format!("Vespera {} is available", notice.version));
                     }
                     self.update = Some(notice);
                     self.update_checking = false;

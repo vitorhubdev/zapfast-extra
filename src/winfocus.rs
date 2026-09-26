@@ -47,7 +47,7 @@ fn app_window() -> Option<Hwnd> {
             return 1;
         }
         let title = String::from_utf16_lossy(&title[..length as usize]);
-        if !title.starts_with("ZapExt") {
+        if !title.starts_with("Vespera") {
             return 1;
         }
         *slot = hwnd;

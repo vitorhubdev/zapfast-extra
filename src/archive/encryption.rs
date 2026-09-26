@@ -42,7 +42,7 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     #[cfg(test)]
     let entry = test_store()?
         .build("rocks.zapfast.ZapFast", &identity, None)
-        .context("The OS keyring could not open ZapExt's archive key")?;
+        .context("The OS keyring could not open Vespera's archive key")?;
     #[cfg(not(test))]
     let entry = {
         #[cfg(target_os = "linux")]
@@ -51,10 +51,10 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
         let store = apple_native_keyring_store::keychain::Store::new();
         #[cfg(windows)]
         let store = windows_native_keyring_store::Store::new();
-        let store = store.context("Unlock your OS keyring and restart ZapExt")?;
+        let store = store.context("Unlock your OS keyring and restart Vespera")?;
         store
             .build("rocks.zapfast.ZapFast", &identity, None)
-            .context("The OS keyring could not open ZapExt's archive key")?
+            .context("The OS keyring could not open Vespera's archive key")?
     };
     key_from_entry(path, &entry)
 }
@@ -102,7 +102,7 @@ fn key_from_entry(path: &Path, entry: &keyring_core::Entry) -> Result<Zeroizing<
             );
             Ok(key)
         }
-        Err(error) => Err(error).context("Unlock your OS keyring and restart ZapExt"),
+        Err(error) => Err(error).context("Unlock your OS keyring and restart Vespera"),
     }
 }
 

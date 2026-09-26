@@ -147,7 +147,7 @@ fn deliver(
     }
     let mut notification = notify_rust::Notification::new();
     notification
-        .appname("ZapExt")
+        .appname("Vespera")
         .summary(title)
         .body(body)
         .icon("zapfast")
@@ -241,7 +241,7 @@ fn deliver(
         return;
     }
     let mut notification = notify_rust::Notification::new();
-    notification.appname("ZapExt").summary(title).body(body);
+    notification.appname("Vespera").summary(title).body(body);
     // Windows uses the image; macOS always uses the app icon.
     if let Some(picture) = picture {
         notification.image_path(&picture.to_string_lossy());
@@ -326,7 +326,7 @@ mod tests {
         let mut notifications = Notifications::default();
         notifications.show(
             "Ada Lovelace".into(),
-            "A test from ZapExt, with a picture".into(),
+            "A test from Vespera, with a picture".into(),
             picture,
             NotificationTarget::new("test".into(), "test-message".into(), Default::default()),
             || {},

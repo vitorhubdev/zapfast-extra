@@ -50,13 +50,13 @@ fn build(sender: Sender<TrayCommand>, wake: Wake) -> Result<Item, Box<dyn std::e
     let icon = Icon::from_rgba(crate::util::tray_template_rgba(size as usize), size, size)?;
     let menu = Menu::new();
     menu.append_items(&[
-        &MenuItem::with_id(SHOW, "Show or hide ZapExt", true, None),
+        &MenuItem::with_id(SHOW, "Show or hide Vespera", true, None),
         &PredefinedMenuItem::separator(),
         &MenuItem::with_id(QUIT, "Quit", true, None),
     ])?;
     let builder = TrayIconBuilder::new()
         .with_icon(icon)
-        .with_tooltip("ZapExt")
+        .with_tooltip("Vespera")
         .with_menu(Box::new(menu));
     // Left-click toggles the window; right-click opens the menu.
     #[cfg(target_os = "macos")]

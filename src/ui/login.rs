@@ -49,7 +49,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let (logo, _) = ui.allocate_exact_size(Vec2::splat(64.0), egui::Sense::hover());
                     theme::logo(ui, logo.center(), 64.0);
                     ui.add_space(4.0);
-                    theme::text(ui, "ZapExt", theme::bold(28.0), palette.text);
+                    theme::text(ui, "Vespera", theme::bold(28.0), palette.text);
                     theme::text(
                         ui,
                         "A native WhatsApp client.",
