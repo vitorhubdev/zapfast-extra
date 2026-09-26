@@ -1,4 +1,4 @@
-//! Image-cache budget ported from upstream ZapFast (crmne/zapfast, MIT) for the ZapExt fork.
+//! Image-cache budget ported from upstream ZapFast (crmne/zapfast, MIT) for the Vespera fork.
 //!
 //! Releases egui's per-URI image caches for images that leave the screen.
 //!

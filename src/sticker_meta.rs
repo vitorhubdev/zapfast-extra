@@ -1,6 +1,6 @@
 //! Sticker file metadata: pack and emoji tags inside WebP files.
 //!
-//! Adapted from upstream ZapFast (crmne/zapfast, MIT) for the ZapExt fork:
+//! Adapted from upstream ZapFast (crmne/zapfast, MIT) for the Vespera fork:
 //! reads and writes the EXIF sticker chunk WhatsApp uses, so received stickers
 //! keep their pack and emoji associations and search keeps working.
 

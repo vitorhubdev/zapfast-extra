@@ -1,6 +1,6 @@
 //! Sticker search by emoji, emoji name, and pack name.
 //!
-//! Adapted from upstream ZapFast (crmne/zapfast, MIT) for the ZapExt fork.
+//! Adapted from upstream ZapFast (crmne/zapfast, MIT) for the Vespera fork.
 
 //! Sticker search: by emoji, by words that name an emoji, and by pack name.
 //!

@@ -31,9 +31,9 @@ Vespera is written in Rust with [egui](https://github.com/emilk/egui) and uses
 protocol. It runs on Linux, macOS, and Windows and links as a companion device
 without embedding a browser engine.
 
-**Downloads:** [latest ZapExt release](https://github.com/vitorhubdev/zapfast-extra/releases/latest)
+**Downloads:** [latest Vespera release](https://github.com/vitorhubdev/zapfast-extra/releases/latest)
 
-> ZapExt is not the upstream ZapFast project and is not affiliated with
+> Vespera is not the upstream ZapFast project and is not affiliated with
 > WhatsApp or Meta.
 
 ## What it does
@@ -275,7 +275,7 @@ yay -S vespera-git      # built from the latest commit
 ```
 
 Builds for every release are on the
-[ZapExt releases page](https://github.com/vitorhubdev/zapfast-extra/releases):
+[Vespera releases page](https://github.com/vitorhubdev/zapfast-extra/releases):
 
 | Platform | File |
 | --- | --- |

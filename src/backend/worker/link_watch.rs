@@ -1,4 +1,4 @@
-//! Link watchdog ported from upstream ZapFast (crmne/zapfast, MIT) for the ZapExt fork.
+//! Link watchdog ported from upstream ZapFast (crmne/zapfast, MIT) for the Vespera fork.
 //!
 //! Notice a link that is still open but no longer carries anything.
 //!

@@ -1,4 +1,4 @@
-//! Image-cache budget ported from upstream ZapFast (crmne/zapfast, MIT) for the ZapExt fork.
+//! Image-cache budget ported from upstream ZapFast (crmne/zapfast, MIT) for the Vespera fork.
 //!
 //! Keep protocol diagnostics useful without persisting untrusted payloads.
 
