@@ -1,4 +1,4 @@
-# ZapExt compared with ZapFast 0.16.2
+# Vespera compared with ZapFast 0.16.2
 
 Compared with the ZapFast tag `v0.16.2`, reviewed on 2026-09-24.
 This page lists only differences checked in this tree or in that review.
@@ -9,7 +9,7 @@ It is not a full changelog. Credits and the MIT license stay in the
 
 ## Validated in this tree
 
-- The window title and `--version` report `ZapExt` and the fork version from
+- The window title and `--version` report `Vespera` and the fork version from
   `VERSION`, not the upstream ZapFast version.
 - Settings has an update channel: Stable, or Testing which can also install
   release candidates. Draft GitHub releases are never offered.
@@ -17,7 +17,7 @@ It is not a full changelog. Credits and the MIT license stay in the
   Selection here is text, including a drag that continues outside the message
   list. ZapFast 0.16.2 added message multi-select; that commit does not apply
   to this selection.
-- Chat labels, channels, and the archive leave-column from that ZapFast
+- Chat labels, channels, and the archive leave-column from that Vespera
   release are not in this tree.
 - Reordering of numbers inside right-to-left lines from that release is not
   in this tree. Paragraphs in Hebrew and Arabic are reordered by font runs
@@ -54,7 +54,7 @@ It is not a full changelog. Credits and the MIT license stay in the
    folder, check that the copy still opens. The app removes idle export files
    older than a day.
 6. Drag a document whose name already exists in the hold folder, and a file
-   on a volume that cannot be hard-linked. ZapExt should explain the failure
+   on a volume that cannot be hard-linked. Vespera should explain the failure
    and leave Save a copy in the menu.
 7. While dragging, the message must not open, text selection in the message
    body must still work, and the video progress bar must still seek.

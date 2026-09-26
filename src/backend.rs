@@ -718,13 +718,13 @@ impl Backend {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
-            .thread_name("zapfast-runtime")
+            .thread_name("vespera-runtime")
             .enable_all()
             .build()
             .expect("unable to start the async runtime");
         let worker_commands = command_tx.clone();
         let thread = std::thread::Builder::new()
-            .name("zapfast-backend".to_string())
+            .name("vespera-backend".to_string())
             .spawn(move || {
                 runtime.block_on(async move {
                     worker::run(dirs, event_tx, worker_commands, command_rx, waker).await;
@@ -832,14 +832,14 @@ mod tests {
     fn release() -> Release {
         Release {
             version: "99.0.0".into(),
-            url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".into(),
+            url: "https://github.com/vitorhubdev/vespera-extra/releases/latest".into(),
         }
     }
 
     fn prepared() -> Box<Prepared> {
         Box::new(Prepared {
             installation: Installation {
-                executable: std::path::PathBuf::from("/demo/zapfast"),
+                executable: std::path::PathBuf::from("/demo/vespera"),
                 kind: Kind::Portable,
             },
             directory: "/demo/staging".into(),

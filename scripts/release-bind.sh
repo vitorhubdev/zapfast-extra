@@ -25,16 +25,16 @@ done
 find . -name 'release-commit-*.txt' -delete
 
 required=(
-  "zapfast-${tag}-x86_64-unknown-linux-gnu.tar.gz"
-  "zapfast-${tag}-aarch64-unknown-linux-gnu.tar.gz"
-  "zapfast-${tag}-x86_64-pc-windows-msvc.zip"
-  "zapfast-${tag}-aarch64-pc-windows-msvc.zip"
-  "zapfast-${tag}-x86_64-pc-windows-msvc-setup.exe"
-  "zapfast-${tag}-aarch64-pc-windows-msvc-setup.exe"
-  "ZapExt-${tag}-windows-x64-portable.exe"
-  "ZapExt-${tag}-windows-arm64-portable.exe"
-  "zapfast-${tag}-macos-universal.dmg"
-  "zapfast-${tag}-x86_64.flatpak"
+  "vespera-${tag}-x86_64-unknown-linux-gnu.tar.gz"
+  "vespera-${tag}-aarch64-unknown-linux-gnu.tar.gz"
+  "vespera-${tag}-x86_64-pc-windows-msvc.zip"
+  "vespera-${tag}-aarch64-pc-windows-msvc.zip"
+  "vespera-${tag}-x86_64-pc-windows-msvc-setup.exe"
+  "vespera-${tag}-aarch64-pc-windows-msvc-setup.exe"
+  "Vespera-${tag}-windows-x64-portable.exe"
+  "Vespera-${tag}-windows-arm64-portable.exe"
+  "vespera-${tag}-macos-universal.dmg"
+  "vespera-${tag}-x86_64.flatpak"
 )
 for name in "${required[@]}"; do
   if [[ ! -f "$name" ]]; then

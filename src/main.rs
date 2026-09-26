@@ -90,7 +90,7 @@ struct Cli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Control {
-    /// Reload palettes in an already-running ZapExt without showing its window.
+    /// Reload palettes in an already-running Vespera without showing its window.
     ReloadThemes,
 }
 
@@ -549,7 +549,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zapext_title_includes_version() {
+    fn vespera_title_includes_version() {
         let version = vespera::updates::vespera_version();
         assert!(!version.is_empty());
         assert_eq!(APP_VERSION.trim(), version);

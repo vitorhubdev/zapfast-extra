@@ -130,7 +130,7 @@ mod tests {
     use std::time::SystemTime;
 
     fn folder(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zapfast-cache-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         dir

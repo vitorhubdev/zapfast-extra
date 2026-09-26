@@ -1,8 +1,8 @@
 ---
-title: Using ZapFast
+title: Using Vespera
 description: Send messages and use attachments, voice messages, and keyboard shortcuts.
 redirect_from:
-  - /using-fastsapp/
+  - /using-vespera/
 nav_order: 3
 ---
 
@@ -13,7 +13,7 @@ Enter sends and Shift+Enter adds a line. You can swap them in Settings.
 like WhatsApp, and a message of nothing but emoji shows large.
 Mentions in a group are written with `@`; the smiley opens emoji
 and stickers: saved stickers, imported packs, and the
-stickers used on the phone or sent from ZapExt. A sticker that only passed
+stickers used on the phone or sent from Vespera. A sticker that only passed
 through a chat is not offered.
 
 Right-click a message to reply, react, edit, forward, delete, or check when it
@@ -39,7 +39,7 @@ Paste a picture, drop files on the window, or select them with the paperclip.
 They stay above the composer until you send them, with the typed text as a
 caption. Press Escape or click a file's close button to remove it. Incoming
 attachments up to 64 MB download when they enter view, or on click if automatic
-downloads are off. If an attachment has expired, ZapFast asks your phone to
+downloads are off. If an attachment has expired, Vespera asks your phone to
 upload it again.
 
 ## Voice messages
@@ -47,7 +47,7 @@ upload it again.
 Voice messages play in the chat with a seekable waveform. The first play sends
 a played receipt. When the composer is empty, the send button becomes a
 microphone. Press Enter or the send button to send the recording, or Escape or
-the delete button to discard it. ZapFast raises the volume of quiet recordings.
+the delete button to discard it. Vespera raises the volume of quiet recordings.
 Starting a reply before recording includes the quoted message.
 
 ## Copying
@@ -73,7 +73,7 @@ see its picture, number, and group members.
 
 ## Notifications and the tray
 
-Closing the window keeps ZapFast linked in the tray. Click the tray icon or
+Closing the window keeps Vespera linked in the tray. Click the tray icon or
 launch the app again to reopen it. Notifications show the chat picture and open
 the chat when clicked. Muted chats do not send notifications. You can change
 both settings.

@@ -1,8 +1,8 @@
-title: ZapExt
-zapfast_version: "1.0.36"
-release_asset_prefix: zapfast
-release_app_name: ZapExt
-description: ZapExt, a community mod of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
+title: Vespera
+vespera_version: "1.0.36"
+release_asset_prefix: vespera
+release_app_name: Vespera
+description: Vespera, a community fork of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
 lang: en-US
 timezone: Europe/Berlin
 url: https://vitorhubdev.github.io/zapfast-extra
@@ -51,7 +51,7 @@ jekyll_vitepress:
     page_type: TechArticle
     image:
       path: /screenshot.png
-      alt: ZapExt showing a chat with a photo, a voice message, a quoted reply, and a link preview
+      alt: Vespera showing a chat with a photo, a voice message, a quoted reply, and a link preview
     publisher:
       type: Person
       name: vitorhubdev
@@ -60,9 +60,9 @@ jekyll_vitepress:
         - https://github.com/vitorhubdev/zapfast-extra
         - https://github.com/crmne/zapfast
   llms:
-    title: ZapExt
+    title: Vespera
     description: >-
-      Documentation for ZapExt, a community mod of ZapFast: a native WhatsApp
+      Documentation for Vespera, a community fork of ZapFast: a native WhatsApp
       client for chats, voice messages, attachments, and notifications on
       Linux, macOS, and Windows.
     full: true
@@ -71,10 +71,10 @@ jekyll_vitepress:
       WhatsApp connection. Source is on
       [GitHub](https://github.com/vitorhubdev/zapfast-extra).
   branding:
-    site_title: ZapExt
+    site_title: Vespera
     logo:
       default: /assets/images/logo.svg
-      alt: ZapExt
+      alt: Vespera
   syntax:
     light_theme: github
     dark_theme: github.dark
@@ -84,7 +84,7 @@ jekyll_vitepress:
     message: >-
       Maintained by <a href="https://github.com/vitorhubdev" target="_blank" rel="noreferrer">vitorhubdev</a> as a community mod of <a href="https://github.com/crmne/zapfast" target="_blank" rel="noreferrer">ZapFast</a> by Carmine Paolino. Upstream features by
     copyright: >-
-      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a><a href="https://paolino.me/projects" target="_blank" rel="noreferrer" aria-label="More projects by Carmine Paolino">and more</a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. ZapExt is a community mod of ZapFast, MIT-licensed. Not affiliated with or endorsed by WhatsApp LLC or Meta. WhatsApp is a trademark of WhatsApp LLC.</span>
+      <span class="footer-brand-links"><a href="https://chatwithwork.com" class="footer-chatwithwork-link" target="_blank" rel="noreferrer"><img class="footer-chatwithwork-logo theme-image light" src="https://chatwithwork.com/logotype.svg" alt="Chat with Work"><img class="footer-chatwithwork-logo theme-image dark" src="https://chatwithwork.com/logotype-dark.svg" alt="Chat with Work"></a><a href="https://rubyllm.com" class="footer-rubyllm-link" target="_blank" rel="noreferrer"><img class="footer-rubyllm-logo theme-image light" src="https://rubyllm.com/assets/images/logotype.svg" alt="RubyLLM"><img class="footer-rubyllm-logo theme-image dark" src="https://rubyllm.com/assets/images/logotype_dark.svg" alt="RubyLLM"></a><a href="https://paolino.me/projects" target="_blank" rel="noreferrer" aria-label="More projects by Carmine Paolino">and more</a></span><br><span class="footer-built-with">Docs built with <a href="https://jekyll-vitepress.dev" target="_blank" rel="noreferrer">Jekyll VitePress</a>. Vespera is a community fork of ZapFast, MIT-licensed. Not affiliated with or endorsed by WhatsApp LLC or Meta. WhatsApp is a trademark of WhatsApp LLC.</span>
   doc_footer:
     enabled: true
     previous_label: Previous page

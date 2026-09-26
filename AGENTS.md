@@ -1,35 +1,35 @@
-# ZapFast agent guide
+# Vespera agent guide
 
-ZapFast is a small native WhatsApp client: Rust, egui, and the
+Vespera is a small native WhatsApp client: Rust, egui, and the
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) library for the
 protocol. These notes are for coding agents and new contributors.
 
-## ZapExt fork rules
+## Vespera fork rules
 
 These rules are mandatory for work in this fork and take precedence over
 upstream workflow conventions when they conflict.
 
 - Work directly on `main`. Do not create branches or pull requests for fork work.
-- The visible fork name is `ZapExt`. Keep the upstream/internal `zapfast` crate,
+- The visible fork name is `Vespera`. Keep the upstream/internal `vespera` crate,
   storage paths, app ids, protocol identities, and compatibility names unchanged
   unless a task explicitly migrates them safely.
 - The fork version starts at `1.0.1`. `VERSION` in the repository root is the
-  single source of truth for the ZapExt product version; `src/updates.rs`
-  exposes it as `ZAPEXT_VERSION`/`zapext_version()` and `src/main.rs` must use
+  single source of truth for the Vespera product version; `src/updates.rs`
+  exposes it as `VESPERA_VERSION`/`vespera_version()` and `src/main.rs` must use
   that value (trimmed, never hardcoded).
-- Every completed modification batch must receive a new ZapExt version before the
+- Every completed modification batch must receive a new Vespera version before the
   work is considered done. By default increment the patch number by one
   (`1.0.1` -> `1.0.2` -> `1.0.3`). Use a minor or major bump only when the scope
   clearly warrants it or the repository owner explicitly requests it.
-- The normal application title must always be `ZapExt - X.Y.Z`, using the current
-  `APP_VERSION`. The CLI version must report the same ZapExt version.
-- Update `CHANGELOG.md` in the same modification batch. Every ZapExt version gets
+- The normal application title must always be `Vespera - X.Y.Z`, using the current
+  `APP_VERSION`. The CLI version must report the same Vespera version.
+- Update `CHANGELOG.md` in the same modification batch. Every Vespera version gets
   its own dated heading and a concise list of user-visible changes, fixes, and
   relevant internal changes. Never reuse a version for a later code change.
 - A version bump does not require creating a GitHub Release or tag. Releases may
   still batch multiple versions when appropriate.
 - Before finishing, verify that the application title, CLI version, tests that
-  assert the title/version, and `CHANGELOG.md` agree. Report the resulting ZapExt
+  assert the title/version, and `CHANGELOG.md` agree. Report the resulting Vespera
   version in the final summary.
 
 ## Product boundaries
@@ -93,7 +93,7 @@ upstream workflow conventions when they conflict.
 - `src/updates/` downloads verified GitHub releases and hands installation to a
   helper after an explicit restart action. Keep package-manager detection, asset
   checksums, startup acknowledgement and rollback intact. Portable releases carry
-  `packaging/zapfast-portable.txt`; the Windows installer has its own marker.
+  `packaging/vespera-portable.txt`; the Windows installer has its own marker.
 - `src/theme/custom.rs` scans local JSON palettes off the UI thread, caching the
   last usable choice in settings, with shared Spotifast palettes embedded as
   defaults. On Linux filesystem notifications reload the catalog and the active
@@ -183,16 +183,16 @@ upstream workflow conventions when they conflict.
   player must use an explicit `Layout::left_to_right` at their own width.
   `src/ui/picker.rs` is the emoji/GIF/sticker panel. GIF search uses the
   key from Settings, else one baked in at build time from
-  `ZAPFAST_GIPHY_KEY` (`option_env!`); the repository carries none. The
+  `VESPERA_GIPHY_KEY` (`option_env!`); the repository carries none. The
   phone's recently used stickers arrive in `HistorySync.recent_stickers`
   when the device links and live in the archive's `stickers` table as raw
   `StickerMetadata`, fetched when the picker opens; favourite stickers sync
   through app state (`FavoriteSticker`), which whatsapp-rust does not
   surface, so they are not shown.
 - `src/paths.rs` moves a setup left by the app's earlier name
-  (`fastsapp`, then `fastwhatsapp`) over once, so the linked device survives
+  (`vespera`, then `vespera`) over once, so the linked device survives
   the rename. Migration runs after the single-instance guard and outside demos;
-  keep the guard's `fastsapp:` wire identity compatible with running old copies.
+  keep the guard's `vespera:` wire identity compatible with running old copies.
 - The app outlives the window, as in Spotifast: `main` runs
   `eframe::run_native` in a loop; closing the window with "keep running"
   on sets `hide_intent`, the window is destroyed, and a headless loop keeps
@@ -277,18 +277,18 @@ A release is not finished when the tag is pushed. Do these in order:
    and `Fixed`, credit contributors and reporters where it helps, and end
    with a full-changelog link comparing the previous tag. Write about what
    changed for the user, not the commit history.
-4. After the release files exist, update both `zapfast_version` in
+4. After the release files exist, update both `vespera_version` in
    `docs/_config.yml` and the version menu in `docs/_data/versions.yml`.
    The menu lists only the current version, which points to `/download/`,
    and the Changelog link; do not add older versions to it. Never point the
    download page at files that do not exist yet. Set `release_asset_prefix` to
-   `zapfast` and `release_app_name` to `ZapFast` only once those assets exist.
+   `vespera` and `release_app_name` to `Vespera` only once those assets exist.
 5. Update the AUR packages from the templates in `packaging/arch/`. The shared
    packaging workflow generates versions, hashes and `.SRCINFO` after the
    release exists, and publishes when `PUBLISH_AUR` and the required secrets
    are configured. Otherwise use `native-packages` to build, stage,
    review and publish the generated recipes; see `PACKAGING.md`. Validate
-   native builds with `makepkg -f`. A recipe-only `zapfast-git` change does
+   native builds with `makepkg -f`. A recipe-only `vespera-git` change does
    not require an application release.
 
 ## Definition of done

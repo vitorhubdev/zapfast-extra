@@ -31,7 +31,7 @@ impl Source {
         match self {
             Self::GitHub => {
                 format!(
-                    "https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/tags/v{version}"
+                    "https://api.github.com/repos/vitorhubdev/vespera-extra/releases/tags/v{version}"
                 )
             }
             #[cfg(feature = "demo")]
@@ -185,7 +185,7 @@ pub fn download_for(
         ("macos", "aarch64" | "x86_64") => "macos-universal",
         _ => bail!("Use the download page for this operating system or architecture"),
     };
-    let stem = format!("zapfast-v{}-{target}", release.version);
+    let stem = format!("vespera-v{}-{target}", release.version);
     let name = match installation.kind {
         #[cfg(target_os = "macos")]
         install::Kind::MacBundle => format!("{stem}.dmg"),
@@ -206,7 +206,7 @@ pub fn download_for(
                 url.host_str() == Some("github.com")
                     && url.path()
                         == format!(
-                            "/vitorhubdev/zapfast-extra/releases/download/v{}/{}",
+                            "/vitorhubdev/vespera-extra/releases/download/v{}/{}",
                             release.version, candidate.name
                         ),
                 "Update asset does not belong to this release"
@@ -272,9 +272,9 @@ pub fn download_for(
             archive.clone()
         } else {
             let executable = if cfg!(windows) {
-                "zapfast.exe"
+                "vespera.exe"
             } else {
-                "zapfast"
+                "vespera"
             };
             let payload = directory.join(executable);
             install::extract(&archive, &format!("{stem}/{executable}"), &payload)?;
@@ -312,7 +312,7 @@ mod tests {
             } else {
                 "unknown-linux-gnu.tar.gz"
             };
-            let name = format!("zapfast-v0.8.0-{}-{platform}", std::env::consts::ARCH);
+            let name = format!("vespera-v0.8.0-{}-{platform}", std::env::consts::ARCH);
             let payload = b"damaged download";
             let hash = if interrupted {
                 crate::updates::hex(&Sha256::digest(payload))
@@ -372,9 +372,9 @@ mod tests {
                 }
             });
             let directory = std::env::temp_dir()
-                .join(format!("zapfast-download-test-{}", rand::random::<u64>()));
+                .join(format!("vespera-download-test-{}", rand::random::<u64>()));
             fs::create_dir(&directory).unwrap();
-            let target = directory.join("zapfast");
+            let target = directory.join("vespera");
             fs::write(&target, b"original").unwrap();
             let installation = install::Installation {
                 executable: target.clone(),
@@ -422,7 +422,7 @@ mod tests {
         } else {
             "unknown-linux-gnu.tar.gz"
         };
-        let name = format!("zapfast-v{version}-{}-{platform}", std::env::consts::ARCH);
+        let name = format!("vespera-v{version}-{}-{platform}", std::env::consts::ARCH);
         let payload = b"damaged download";
         let checksums = format!("{}  {name}\n", "0".repeat(64));
         let metadata = serde_json::json!({"tag_name":format!("v{version}"),"prerelease":true,"assets":[
@@ -474,9 +474,9 @@ mod tests {
             }
         });
         let directory =
-            std::env::temp_dir().join(format!("zapfast-rc-test-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-rc-test-{}", rand::random::<u64>()));
         fs::create_dir(&directory).unwrap();
-        let target = directory.join("zapfast");
+        let target = directory.join("vespera");
         fs::write(&target, b"original").unwrap();
         let installation = install::Installation {
             executable: target.clone(),

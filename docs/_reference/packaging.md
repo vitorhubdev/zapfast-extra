@@ -4,7 +4,7 @@ description: Shared packaging automation and application-specific release defini
 nav_order: 20
 ---
 
-ZapFast keeps release asset definitions, nFPM configuration and native AUR
+Vespera keeps release asset definitions, nFPM configuration and native AUR
 templates in `native-packages.yaml` and `packaging/`. Common automation comes from the pinned
 [native-packages](https://github.com/crmne/native-packages) gem, installed with `gem install native-packages --version 0.5.1`.
 

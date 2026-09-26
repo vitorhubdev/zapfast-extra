@@ -31,7 +31,7 @@ impl FastTray {
 
 impl ksni::Tray for FastTray {
     fn id(&self) -> String {
-        "zapfast".into()
+        "vespera".into()
     }
 
     fn title(&self) -> String {

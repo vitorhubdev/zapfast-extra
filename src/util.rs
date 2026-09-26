@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn image_loader_reads_native_paths() {
         use egui::load::BytesPoll;
-        let dir = std::env::temp_dir().join(format!("zapfast-image-paths-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-image-paths-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("猫 photo 100% #1.png");
         std::fs::write(&path, b"image bytes").unwrap();
@@ -711,7 +711,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod zapext_phone_search_tests {
+mod vespera_phone_search_tests {
     use super::*;
 
     #[test]

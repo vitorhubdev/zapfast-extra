@@ -1068,7 +1068,7 @@ impl Player {
             // arrive, and a second failure refuses instead of looping.
             if !active.clip.ffmpeg && !active.fallback_used && ffmpeg_present() {
                 log::warn!(
-                    target: "zapext::video",
+                    target: "vespera::video",
                     "decode fell back to ffmpeg: engine={} reason={} produced={} samples={}",
                     error.engine, error.reason, error.produced, error.samples,
                 );
@@ -1175,7 +1175,7 @@ impl Player {
                                     .unwrap_or_else(|| "-".to_owned())
                             };
                             log::debug!(
-                                target: "zapext::video",
+                                target: "vespera::video",
                                 "seek resumed: target={}ms resumed={}ms first_frame={}ms audio_ready={}ms",
                                 diag.target.as_millis(),
                                 diag.requested.elapsed().as_millis(),
@@ -3271,7 +3271,7 @@ mod tests {
 
     #[test]
     fn replaying_a_finished_video_starts_playing() {
-        let dir = std::env::temp_dir().join(format!("zapfast-replay-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-replay-{}", std::process::id()));
         let Some(path) = sample_clip(&dir) else {
             return;
         };
@@ -3350,7 +3350,7 @@ mod tests {
     fn a_seek_lands_on_a_real_key_frame() {
         // The decoder can only enter on a key frame, so a jump has to answer
         // one no matter where the target falls.
-        let dir = std::env::temp_dir().join(format!("zapfast-seek-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-seek-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 6) else {
             return;
         };
@@ -3392,7 +3392,7 @@ mod tests {
     fn a_long_gap_opens_behind_the_target() {
         // Key frames six seconds apart: jumps to 7, 13, 15 and 19 seconds
         // must all start behind their target, never on the key frame ahead.
-        let dir = std::env::temp_dir().join(format!("zapfast-longgap-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-longgap-{}", std::process::id()));
         let Some(path) = sample_clip_gop(&dir, 20, 60) else {
             return;
         };
@@ -3459,7 +3459,7 @@ mod tests {
         // A twenty-second clip with a tone, played for real: jump to
         // fifteen seconds while playing, then to five while paused. The
         // picture must arrive at the target and stay with the sound.
-        let dir = std::env::temp_dir().join(format!("zapfast-jump-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-jump-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 20) else {
             return;
         };
@@ -3503,7 +3503,7 @@ mod tests {
     fn rapid_jumps_keep_only_the_newest_target() {
         // Three jumps with no paint between them: the retired decodes and
         // extractions die, and playback settles at the last target.
-        let dir = std::env::temp_dir().join(format!("zapfast-rapid-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-rapid-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 20) else {
             return;
         };
@@ -3532,7 +3532,7 @@ mod tests {
     fn analyze_reports_length_and_a_real_poster() {
         // A two-second clip: the analysis answers about two seconds and a
         // JPEG poster, both decoded from the file itself.
-        let dir = std::env::temp_dir().join(format!("zapfast-analyze-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-analyze-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 2) else {
             return;
         };
@@ -3586,7 +3586,7 @@ mod tests {
         // skips packets of every track but the selected one (upstream
         // RustAudio/rodio#833).
         use rodio::Source;
-        let dir = std::env::temp_dir().join(format!("zapfast-video-sound-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-video-sound-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "sound.mp4", "64x64", 3, "baseline", "0", "10", true)
         else {
@@ -3608,7 +3608,7 @@ mod tests {
 
     #[test]
     fn soundtrack_decodes_in_process_without_ffmpeg() {
-        let dir = std::env::temp_dir().join(format!("zapfast-symphonia-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-symphonia-{}", std::process::id()));
         let Some(path) = sample_clip(&dir) else {
             return;
         };
@@ -3793,7 +3793,7 @@ mod tests {
         // Main profile with B-frames: composition offsets prove the
         // reorder, so the probe must route to ffmpeg instead of stamping
         // decode-order pictures with presentation times.
-        let dir = std::env::temp_dir().join(format!("zapfast-reorder-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-reorder-{}", std::process::id()));
         let Some(path) = sample_clip_profile(&dir, "main-bf3.mp4", 4, "main", "3") else {
             return;
         };
@@ -3950,7 +3950,7 @@ mod tests {
 
     #[test]
     fn vfr_clip_plays_and_seeks() {
-        let dir = std::env::temp_dir().join(format!("zapfast-vfr-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-vfr-{}", std::process::id()));
         let Some(path) = sample_clip_vfr(&dir, "vfr.mp4") else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4031,7 +4031,7 @@ mod tests {
         // Fallback-after-failure on the real player path: the re-encoded
         // VFR join decodes to zero pictures in process, so one controlled
         // engine change must present it instead of refusing.
-        let dir = std::env::temp_dir().join(format!("zapfast-vfrfb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-vfrfb-{}", std::process::id()));
         let Some(path) = sample_clip_vfr_reencode(&dir, "vfr-fb.mp4") else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4088,7 +4088,7 @@ mod tests {
         // Switch and close during a fallback: the old engine retires by
         // generation, the new file plays, and stop leaves no active clip.
         // State-level proof; OS thread exit races past channel close.
-        let dir = std::env::temp_dir().join(format!("zapfast-vfrswitch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-vfrswitch-{}", std::process::id()));
         let Some(first) = sample_clip_vfr_reencode(&dir, "first.mp4") else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4170,7 +4170,7 @@ mod tests {
         // so p50/p95 recompute by hand. Frame time here proves picture
         // readiness only, never synced sound or on-screen fluidity.
         // Debug runs 4 samples for speed; release runs 22 for p50/p95.
-        let dir = std::env::temp_dir().join(format!("zapfast-seekbench-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-seekbench-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 20) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4284,7 +4284,7 @@ mod tests {
     fn high_profile_without_offsets_stays_in_process() {
         // High profile alone proves nothing: no composition offsets means
         // no reorder, so the fast path stays instead of demanding ffmpeg.
-        let dir = std::env::temp_dir().join(format!("zapfast-highprof-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-highprof-{}", std::process::id()));
         let Some(path) = sample_clip_profile(&dir, "high-bf0.mp4", 2, "high", "0") else {
             return;
         };
@@ -4297,7 +4297,7 @@ mod tests {
     fn distant_keyframes_still_land() {
         // Twenty seconds with a key frame every fifteen: the widening
         // windows must still find the one behind the target.
-        let dir = std::env::temp_dir().join(format!("zapfast-fargop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-fargop-{}", std::process::id()));
         let Some(path) = sample_clip_gop(&dir, 20, 150) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4347,7 +4347,7 @@ mod tests {
     fn short_soundtrack_finishes_with_the_picture() {
         // The tone ends at two seconds, the picture at ten: reaching past
         // the soundtrack must finish on the last picture, never freeze.
-        let dir = std::env::temp_dir().join(format!("zapfast-shortaac-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-shortaac-{}", std::process::id()));
         let Some(path) = sample_short_audio(&dir) else {
             return;
         };
@@ -4374,7 +4374,7 @@ mod tests {
     fn hevc_falls_back_with_ffmpeg() {
         // iPhone-style codec: no parameter sets for openh264, so the
         // header refuses and ffmpeg gets its chance.
-        let dir = std::env::temp_dir().join(format!("zapfast-hevc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-hevc-{}", std::process::id()));
         if std::fs::create_dir_all(&dir).is_err() {
             eprintln!("skipped: cannot stage an HEVC fixture");
             return;
@@ -4419,7 +4419,7 @@ mod tests {
     fn corrupt_samples_fail_loud_then_fall_back() {
         // A valid baseline clip with a zeroed stretch of picture data:
         // faststart keeps metadata first, so the middle is sample bytes.
-        let dir = std::env::temp_dir().join(format!("zapfast-corrupt-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-corrupt-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 6) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4497,7 +4497,7 @@ mod tests {
         // The joint transition, with or without an audio device: while
         // seeking, the clock holds the target instead of running ahead;
         // only the landing frame releases picture and sound together.
-        let dir = std::env::temp_dir().join(format!("zapfast-freeze-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-freeze-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 20) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4539,7 +4539,7 @@ mod tests {
     fn stopping_really_stops_playback() {
         // Cessation, not just hiding: after stop no decoder, task or sink
         // may answer with a picture anymore.
-        let dir = std::env::temp_dir().join(format!("zapfast-stop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-stop-{}", std::process::id()));
         let Some(path) = sample_clip_seconds(&dir, 4) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4567,7 +4567,7 @@ mod tests {
     #[test]
     fn a_chat_video_probes_and_decodes_frames_in_order() {
         // Its own folder: the audio test uses a similar name in this process.
-        let dir = std::env::temp_dir().join(format!("zapfast-playback-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-playback-{}", std::process::id()));
         let Some(path) = sample_clip(&dir) else {
             return;
         };
@@ -4613,7 +4613,7 @@ mod tests {
     fn every_layout_probes_and_sounds() {
         // Metadata first, metadata last, and fragments: the soundtrack must
         // decode on all of them, or the player goes quiet without saying why.
-        let dir = std::env::temp_dir().join(format!("zapfast-layouts-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-layouts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let mut made = 0;
         for (name, flags) in [
@@ -4669,7 +4669,7 @@ mod tests {
 
     #[test]
     fn pause_freezes_and_resume_continues() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pause-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pause-{}", std::process::id()));
         let Some(path) = sample_silent(&dir) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4707,8 +4707,8 @@ mod tests {
     #[test]
     fn replay_from_end_restarts_playing() {
         // Its own folder: replaying_a_finished_video_starts_playing owns
-        // zapfast-replay in this process and both remove their folder.
-        let dir = std::env::temp_dir().join(format!("zapfast-replay-end-{}", std::process::id()));
+        // vespera-replay in this process and both remove their folder.
+        let dir = std::env::temp_dir().join(format!("vespera-replay-end-{}", std::process::id()));
         let Some(path) = sample_silent(&dir) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4740,7 +4740,7 @@ mod tests {
 
     #[test]
     fn seek_drops_the_old_soundtrack_without_doubling() {
-        let dir = std::env::temp_dir().join(format!("zapfast-seeksound-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-seeksound-{}", std::process::id()));
         let Some(path) = sample_clip(&dir) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4773,7 +4773,7 @@ mod tests {
 
     #[test]
     fn silent_clip_plays_without_soundtrack() {
-        let dir = std::env::temp_dir().join(format!("zapfast-silent-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-silent-{}", std::process::id()));
         let Some(path) = sample_silent(&dir) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -4811,7 +4811,7 @@ mod tests {
 
     #[test]
     fn invalid_file_refuses_once() {
-        let dir = std::env::temp_dir().join(format!("zapfast-badclip-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-badclip-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("bad.mp4");
         std::fs::write(&path, b"not a video").expect("writes");
@@ -4826,7 +4826,7 @@ mod tests {
 
     #[test]
     fn switching_files_never_shows_the_old_clip() {
-        let dir = std::env::temp_dir().join(format!("zapfast-switch-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-switch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let first = dir.join("first.mp4");
         let second = dir.join("second.mp4");
@@ -4865,7 +4865,7 @@ mod tests {
 
     #[test]
     fn preview_returns_nearby_frame() {
-        let dir = std::env::temp_dir().join(format!("zapfast-preview-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-preview-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "base.mp4", "640x360", 6, "baseline", "0", "10", true)
         else {
@@ -4892,7 +4892,7 @@ mod tests {
 
     #[test]
     fn preview_covers_bframes_vfr_gaps_silence_and_refusals() {
-        let dir = std::env::temp_dir().join(format!("zapfast-preview-mix-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-preview-mix-{}", std::process::id()));
         let mut previewer = Previewer::default();
         // B-frames: the fast path answers an approximate neighbor.
         if let Some(path) = sample_clip_sized(&dir, "bf.mp4", "640x360", 4, "main", "3", "10", true)
@@ -4942,7 +4942,7 @@ mod tests {
         // path must hand an early keyframe approximate before the exact near
         // the target, with timings proving the approximate led the exact.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-approx-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-approx-{}", std::process::id()));
         let Some(path) = sample_clip_sized(
             &dir,
             "approx.mp4",
@@ -5001,7 +5001,7 @@ mod tests {
         // instead of vanishing with the stale exact. Fails on the old skip
         // path, which discarded the whole staged result.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-supersede-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-supersede-{}", std::process::id()));
         let Some(path) = sample_clip_sized(
             &dir,
             "supersede.mp4",
@@ -5062,7 +5062,7 @@ mod tests {
         // behind it: an abort flag that is already set fails fast with
         // an explicit marker the worker treats as silent, never as a picture.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-abort-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-abort-{}", std::process::id()));
         let Some(path) =
             // Distant keyframes force dozens of samples before the target, so the
             // abort below fires mid-decode with the approximate already in hand.
@@ -5091,7 +5091,7 @@ mod tests {
             values[((values.len() as f64 * q).floor() as usize).min(values.len() - 1)]
         }
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-ladder-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-ladder-{}", std::process::id()));
         let ladder: Vec<(&str, &str, u32, &str, &str, &str, bool)> = if cfg!(debug_assertions) {
             vec![("base-480p.mp4", "854x480", 8, "baseline", "0", "30", true)]
         } else {
@@ -5222,7 +5222,7 @@ mod tests {
     #[test]
     fn preview_stale_generations_never_apply() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-stale-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-stale-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "stale.mp4", "640x360", 4, "baseline", "0", "10", true)
         else {
@@ -5246,7 +5246,7 @@ mod tests {
     #[test]
     fn preview_latest_request_wins() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-latest-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-latest-{}", std::process::id()));
         let Some(path) = sample_clip_sized(
             &dir,
             "latest.mp4",
@@ -5293,7 +5293,7 @@ mod tests {
     #[test]
     fn preview_cache_stays_budgeted() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-cache-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-cache-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "cache.mp4", "640x360", 4, "baseline", "0", "10", true)
         else {
@@ -5323,7 +5323,7 @@ mod tests {
         // frames like a real chat video. Twenty sequential round trips
         // with generous deadlines; timing is reported, never asserted,
         // except that every answer lands near its target.
-        let dir = std::env::temp_dir().join(format!("zapfast-preview-lat-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-preview-lat-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "lat.mp4", "854x480", 8, "baseline", "0", "10", true)
         else {
@@ -5373,7 +5373,7 @@ mod tests {
     }
     #[test]
     fn preview_hot_repeat_hits_cache_and_warm_new_misses() {
-        let dir = std::env::temp_dir().join(format!("zapfast-preview-hit-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-preview-hit-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "hit.mp4", "320x240", 4, "baseline", "0", "10", true)
         else {
@@ -5426,7 +5426,7 @@ mod tests {
     }
     #[test]
     fn preview_continuous_drag_answers_mid_motion() {
-        let dir = std::env::temp_dir().join(format!("zapfast-preview-drag-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-preview-drag-{}", std::process::id()));
         let Some(path) =
             sample_clip_sized(&dir, "drag.mp4", "320x240", 4, "baseline", "0", "10", false)
         else {
@@ -5483,7 +5483,7 @@ mod tests {
     #[test]
     fn preview_cancel_storm_retires_without_stranding() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-storm-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-storm-{}", std::process::id()));
         let Some(path) = sample_clip_sized(
             &dir,
             "storm.mp4",
@@ -5527,7 +5527,7 @@ mod tests {
         // Visual proof with synthetic content: one strip with the
         // decoded picture at four drag positions.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-preview-sheet-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-preview-sheet-{}", std::process::id()));
         let path = dir.join("sheet.mp4");
         std::fs::create_dir_all(&dir).ok();
         let made = std::process::Command::new("ffmpeg")
@@ -5593,7 +5593,7 @@ mod tests {
         // State-level routing only: levels apply without reopening and
         // reach the sink on attach. Audible output still needs a live
         // listening check and is not claimed here.
-        let dir = std::env::temp_dir().join(format!("zapfast-volume-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-volume-{}", std::process::id()));
         let Some(path) = sample_silent(&dir) else {
             eprintln!("skipped: ffmpeg unavailable for fixtures");
             return;
@@ -5612,7 +5612,7 @@ mod tests {
         if !ffmpeg_present() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("zapfast-fraglen-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-fraglen-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let Some(path) = sample_variant(&dir, "frag.mp4", &["+frag_keyframe", "+empty_moov"])
         else {

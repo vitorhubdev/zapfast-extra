@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Checks that a ZapExt tag, VERSION, and the crate metadata are one version.
+# Checks that a Vespera tag, VERSION, and the crate metadata are one version.
 # Refuses a tag that already points at another commit. Does not create tags
 # or publish anything.
 set -euo pipefail
@@ -20,11 +20,11 @@ if [[ "$crate" != "$version" ]]; then
 fi
 
 lock=$(awk '
-  $0 == "name = \"zapfast\"" { found = 1; next }
+  $0 == "name = \"vespera\"" { found = 1; next }
   found && $1 == "version" { gsub(/"/, "", $3); print $3; exit }
 ' Cargo.lock)
 if [[ "$lock" != "$version" ]]; then
-  echo "Cargo.lock zapfast version ($lock) does not match VERSION ($version)" >&2
+  echo "Cargo.lock vespera version ($lock) does not match VERSION ($version)" >&2
   exit 1
 fi
 

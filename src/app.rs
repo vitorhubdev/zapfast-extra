@@ -349,7 +349,7 @@ mod window_size_tests {
     fn window_app(settings: Settings) -> App {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("zapfast-window-{}-{n}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-window-{}-{n}", std::process::id()));
         App::headless(AppDirs::under(&root), settings).0
     }
 
@@ -4745,13 +4745,13 @@ mod tests {
     use crate::model::Content;
 
     fn app() -> App {
-        let root = std::env::temp_dir().join(format!("zapfast-app-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-app-{}", std::process::id()));
         App::headless(AppDirs::under(&root), Settings::default()).0
     }
 
     #[test]
     fn the_viewer_walks_the_pictures_that_are_on_disk() {
-        let dir = std::env::temp_dir().join(format!("zapfast-viewer-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-viewer-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let chat = "1@s.whatsapp.net";
         let mut app = app();
@@ -5171,7 +5171,7 @@ mod tests {
         app.maybe_download_update();
         assert!(matches!(app.update_download, DownloadState::Idle));
         let installation = Installation {
-            executable: PathBuf::from("/fixture/zapfast"),
+            executable: PathBuf::from("/fixture/vespera"),
             kind: Kind::Portable,
         };
         app.update_support = Some(Ok(installation.clone()));
@@ -5221,7 +5221,7 @@ mod tests {
 
     #[test]
     fn losing_focus_takes_effect_before_processing_an_incoming_chat_update() {
-        let root = std::env::temp_dir().join("zapfast-focus-test");
+        let root = std::env::temp_dir().join("vespera-focus-test");
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         let mut chat = Chat::new("peer@s.whatsapp.net".into(), "Peer".into());
         chat.unread = 1;
@@ -5350,7 +5350,7 @@ mod tests {
 
     #[test]
     fn a_rendered_pdf_page_reaches_the_viewer_and_stale_ones_are_dropped() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-view-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-view-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("notes.pdf");
         std::fs::write(&file, b"%PDF-1.4").expect("writes");
@@ -5531,7 +5531,7 @@ mod tests {
 
     #[test]
     fn autoplay_takes_the_next_audio_that_has_a_file() {
-        let dir = std::env::temp_dir().join(format!("zapfast-autoplay-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-autoplay-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let voice = dir.join("voice.ogg");
         std::fs::write(&voice, b"OggS").expect("writes");
@@ -6111,7 +6111,7 @@ mod tests {
     #[test]
     fn removed_chat_closes_open_state() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-removed-chat-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-removed-chat-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.chats
             .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
@@ -6145,7 +6145,7 @@ mod tests {
     #[test]
     fn cleared_chat_filters_range_and_keeps_newer() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-cleared-chat-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-cleared-chat-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.chats
             .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
@@ -6191,7 +6191,7 @@ mod tests {
     #[test]
     fn deleted_message_leaves_every_projection() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-deleted-everywhere-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-deleted-everywhere-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.chats
             .push(Chat::new("1@s.whatsapp.net".into(), "Ada".into()));
@@ -6275,7 +6275,7 @@ mod tests {
     #[test]
     fn deleted_message_in_other_chat_keeps_open_state() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-deleted-elsewhere-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-deleted-elsewhere-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
         app.reply_to = Some("m9".into());
@@ -6311,7 +6311,7 @@ mod tests {
     #[test]
     fn deleted_missing_row_still_clears_stale_screen() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-deleted-stale-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-deleted-stale-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
         app.conversations
@@ -6346,7 +6346,7 @@ mod tests {
         // inside the cleared range: membership by set keeps the clear
         // linear instead of quadratic.
         let root =
-            std::env::temp_dir().join(format!("zapfast-cleared-many-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-cleared-many-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
         let rows: Vec<Message> = (1..=5000)
@@ -6392,7 +6392,7 @@ mod tests {
     #[test]
     fn deleted_video_message_stops_media_but_keeps_unrelated_voice() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-deleted-media-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-deleted-media-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
         // Viewer open on the video message; a voice note plays for
@@ -6438,7 +6438,7 @@ mod tests {
     }
     #[test]
     fn viewer_keeps_the_open_item_by_identity() {
-        let root = std::env::temp_dir().join(format!("zapfast-viewer-id-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-viewer-id-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
@@ -6510,7 +6510,7 @@ mod tests {
     }
     #[test]
     fn scrub_cancel_step_and_close_retire_without_a_jump() {
-        let root = std::env::temp_dir().join(format!("zapfast-scrub-app-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-scrub-app-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
@@ -6584,7 +6584,7 @@ mod tests {
     }
     #[test]
     fn scrub_commit_with_real_decoder_holds_then_lands() {
-        let root = std::env::temp_dir().join(format!("zapfast-scrubflow-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-scrubflow-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
@@ -6721,7 +6721,7 @@ mod tests {
     }
     #[test]
     fn scrub_lifecycle_with_real_decoder_stops_cleanly() {
-        let root = std::env::temp_dir().join(format!("zapfast-scrublife-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-scrublife-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
@@ -6855,7 +6855,7 @@ mod tests {
     #[test]
     fn cleared_range_repoints_the_open_item_by_identity() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-viewer-clear-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-viewer-clear-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         app.open_chat = Some("1@s.whatsapp.net".into());
@@ -6914,7 +6914,7 @@ mod tests {
 
     #[test]
     fn resident_history_stays_bounded_across_many_chats() {
-        let root = std::env::temp_dir().join(format!("zapfast-bounded-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-bounded-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         // Thirty chats with two hundred messages each, opened in turn.
         for n in 0..30 {
@@ -7040,7 +7040,7 @@ mod tests {
 
     #[test]
     fn delete_local_drops_the_resident_id() {
-        let root = std::env::temp_dir().join(format!("zapfast-delete-id-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-delete-id-{}", std::process::id()));
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         let chat = String::from("c@s.whatsapp.net");
         app.conversations.entry(chat.clone()).or_default().merge(
@@ -7057,7 +7057,7 @@ mod tests {
     #[test]
     fn deleted_event_clears_open_closed_and_archived_views() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-deleted-views-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-deleted-views-{}", std::process::id()));
         let (mut app, events) = App::headless(AppDirs::under(&root), Settings::default());
         for chat in ["a@s.whatsapp.net", "c@s.whatsapp.net"] {
             let mut known = Chat::new(chat.into(), "Peer".into());
@@ -7546,7 +7546,7 @@ mod name_tests {
     use crate::model::{Contact, Content, Delivery, MentionRef};
 
     fn app() -> App {
-        let root = std::env::temp_dir().join(format!("zapfast-names-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-names-{}", std::process::id()));
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         app.me = Some("15550001111@s.whatsapp.net".into());
         app.me_name = Some("Carmine".into());

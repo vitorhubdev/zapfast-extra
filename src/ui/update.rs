@@ -27,7 +27,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             color: palette.shadow,
         });
     egui::Window::new("Update Vespera")
-        .id(egui::Id::new("zapfast-update"))
+        .id(egui::Id::new("vespera-update"))
         .title_bar(false)
         .resizable(false)
         .auto_sized()

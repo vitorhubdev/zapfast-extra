@@ -329,7 +329,7 @@ macro_rules! icons {
     ($($variant:ident => $file:literal),* $(,)?) => {
         &[$((
             Icon::$variant,
-            concat!("bytes://zapfast-icon-", $file, ".svg"),
+            concat!("bytes://vespera-icon-", $file, ".svg"),
             include_bytes!(concat!("../assets/icons/", $file, ".svg")).as_slice(),
         )),*]
     };
@@ -597,7 +597,7 @@ pub fn logo_texture(ui: &egui::Ui) -> Option<egui::TextureHandle> {
     /// Logo texture side: enough detail for the largest in-app use.
     const SIDE: u32 = 320;
     static LOGO: OnceLock<Option<Arc<egui::ColorImage>>> = OnceLock::new();
-    let id = egui::Id::new("zapext-logo");
+    let id = egui::Id::new("vespera-logo");
     if let Some(known) = ui
         .ctx()
         .data_mut(|data| data.get_temp::<egui::TextureHandle>(id))
@@ -619,7 +619,7 @@ pub fn logo_texture(ui: &egui::Ui) -> Option<egui::TextureHandle> {
         return None;
     };
     let texture = ui.ctx().load_texture(
-        "zapext-logo",
+        "vespera-logo",
         egui::ImageData::Color(Arc::clone(image)),
         egui::TextureOptions::LINEAR,
     );

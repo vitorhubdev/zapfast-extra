@@ -2,7 +2,7 @@
 """Add the tour's pointer, click rings, and shortcut captions to a silent MP4.
 
 The app emits only input timing and coordinates. All visual annotations are
-composited here, outside ZapFast. Requires ffmpeg with libass, and ffprobe.
+composited here, outside Vespera. Requires ffmpeg with libass, and ffprobe.
 """
 import argparse
 import json
@@ -92,7 +92,7 @@ def main():
     if args.output.exists():
         parser.error('Output already exists; choose a new filename.')
     width, height = round(trace['width']), round(trace['height'])
-    with tempfile.TemporaryDirectory(prefix='zapfast-tour-') as tmp:
+    with tempfile.TemporaryDirectory(prefix='vespera-tour-') as tmp:
         ass = Path(tmp) / 'captions.ass'
         ass.write_text(captions(trace))
         subprocess.run([

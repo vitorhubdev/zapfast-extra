@@ -2448,7 +2448,7 @@ pub(crate) mod tests {
 
     #[test]
     fn removal_collects_media_and_survives_reopen() {
-        let dir = std::env::temp_dir().join(format!("zapfast-removal-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-removal-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("archive.db");
         let chat = "1@s.whatsapp.net";
@@ -3183,7 +3183,7 @@ pub(crate) mod tests {
 
     #[test]
     fn sync_order_survives_a_restart() {
-        let dir = std::env::temp_dir().join(format!("zapfast-sync-restart-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-sync-restart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("archive.db");
@@ -3210,7 +3210,7 @@ pub(crate) mod tests {
     }
     #[test]
     fn a_favorite_intent_survives_a_restart_unpushed() {
-        let dir = std::env::temp_dir().join(format!("zapfast-fav-restart-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-fav-restart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("archive.db");
@@ -3239,7 +3239,7 @@ pub(crate) mod tests {
         // Mutation applied before the mapping was known: tombstone under
         // one id, row under the other. Learning the mapping must condemn
         // the row, and a restart must keep it dead.
-        let dir = std::env::temp_dir().join(format!("zapfast-rekey-tomb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-rekey-tomb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("archive.db");
@@ -3752,7 +3752,7 @@ pub(crate) mod tests {
 
     #[test]
     fn read_positions_and_pending_sync_survive_reopening_the_archive() {
-        let dir = std::env::temp_dir().join(format!("zapfast-read-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-read-test-{}", std::process::id()));
         let path = dir.join("archive.db");
         let _ = std::fs::remove_dir_all(&dir);
         let chat = "1@s.whatsapp.net";
@@ -3989,7 +3989,7 @@ mod sticker_tests {
 
         // Files on disk decide what the picker can show; a received sticker
         // never enters it, and a missing file keeps a sent one out too.
-        let dir = std::env::temp_dir().join(format!("zapfast-stickers-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-stickers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let sent = dir.join("sent.webp");
         let received = dir.join("received.webp");
@@ -4085,7 +4085,7 @@ mod media_path_tests {
 }
 
 #[cfg(test)]
-mod zapext_community_tests {
+mod vespera_community_tests {
     use super::*;
 
     #[test]

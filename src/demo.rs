@@ -1076,11 +1076,11 @@ pub fn apply_flags(app: &mut App, page: Option<&str>) {
                 };
                 app.update = Some(crate::updates::Release {
                     version: "99.0.0".to_owned(),
-                    url: "https://github.com/vitorhubdev/zapfast-extra/releases/latest".to_owned(),
+                    url: "https://github.com/vitorhubdev/vespera-extra/releases/latest".to_owned(),
                 });
                 app.show_update = true;
                 let installation = Installation {
-                    executable: "/demo/zapfast".into(),
+                    executable: "/demo/vespera".into(),
                     kind: Kind::Portable,
                 };
                 app.update_support = Some(Ok(installation.clone()));
@@ -1382,7 +1382,7 @@ mod tests {
 
     pub(super) fn app() -> App {
         let root = std::env::temp_dir().join(format!(
-            "zapfast-demo-{}-{:?}",
+            "vespera-demo-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -1625,18 +1625,18 @@ mod tests {
             panic!("tour keeps a text row");
         };
         assert!(
-            text.contains("github.com/vitorhubdev/zapfast-extra"),
+            text.contains("github.com/vitorhubdev/vespera-extra"),
             "fork link, got: {text}"
         );
         assert!(
-            !text.contains("zapfast.rocks"),
+            !text.contains("vespera.rocks"),
             "no upstream site, got: {text}"
         );
         // The simulated update advertises the fork releases page.
         apply_flags(&mut app, Some("update"));
         let release = app.update.as_ref().expect("demo release");
         assert!(
-            release.url.contains("vitorhubdev/zapfast-extra"),
+            release.url.contains("vitorhubdev/vespera-extra"),
             "fork releases, got: {}",
             release.url
         );

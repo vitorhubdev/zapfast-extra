@@ -6,35 +6,35 @@ nav_order: 0
 
 ## File locations
 
-ZapFast follows each platform's conventions. On Linux:
+Vespera follows each platform's conventions. On Linux:
 
 | What | Where | Safe to delete? |
 | --- | --- | --- |
-| Settings | `~/.config/zapfast/settings.json` | Yes, you lose preferences |
-| Message archive | `~/.local/state/zapfast/archive.db` | Yes; only history available from WhatsApp can be restored |
-| Session keys | `~/.local/state/zapfast/session.db` | Yes; you must link again |
-| Attachments | `~/.cache/zapfast/media/` | Yes; available files download again when viewed |
-| Profile pictures | `~/.cache/zapfast/avatars/` | Always |
-| Stickers | `~/.cache/zapfast/stickers/` | Always |
-| Last run's log | `~/.local/state/zapfast/zapfast.log` | Always |
-| Crash log | `~/.local/state/zapfast/panic.log` | Always |
+| Settings | `~/.config/vespera/settings.json` | Yes, you lose preferences |
+| Message archive | `~/.local/state/vespera/archive.db` | Yes; only history available from WhatsApp can be restored |
+| Session keys | `~/.local/state/vespera/session.db` | Yes; you must link again |
+| Attachments | `~/.cache/vespera/media/` | Yes; available files download again when viewed |
+| Profile pictures | `~/.cache/vespera/avatars/` | Always |
+| Stickers | `~/.cache/vespera/stickers/` | Always |
+| Last run's log | `~/.local/state/vespera/vespera.log` | Always |
+| Crash log | `~/.local/state/vespera/panic.log` | Always |
 
 Back up the archive if you need its history. WhatsApp sends only recent
-history to a new device, although ZapFast can request some older messages from
-the phone. Clearing the media cache makes ZapFast download attachments again.
+history to a new device, although Vespera can request some older messages from
+the phone. Clearing the media cache makes Vespera download attachments again.
 Expired attachments may still be available through the phone.
 
 On macOS, settings, state, and the logs are in
-`~/Library/Application Support/me.paolino.zapfast` and the caches in
-`~/Library/Caches/me.paolino.zapfast`. On Windows, settings are in
-`%APPDATA%\paolino\zapfast\config`, state and the logs in
-`%LOCALAPPDATA%\paolino\zapfast\data`, and the caches in
-`%LOCALAPPDATA%\paolino\zapfast\cache`.
+`~/Library/Application Support/me.paolino.vespera` and the caches in
+`~/Library/Caches/me.paolino.vespera`. On Windows, settings are in
+`%APPDATA%\paolino\vespera\config`, state and the logs in
+`%LOCALAPPDATA%\paolino\vespera\data`, and the caches in
+`%LOCALAPPDATA%\paolino\vespera\cache`.
 
-On first start, ZapFast moves the corresponding `fastsapp` directories (or
-`fastwhatsapp` from earlier versions), including the session, archive, saved
-stickers, and window state. Existing ZapFast directories are never overwritten.
-Quit FastsApp first; launching ZapFast while it is running brings the existing
+On first start, Vespera moves the corresponding `vespera` directories (or
+`vespera` from earlier versions), including the session, archive, saved
+stickers, and window state. Existing Vespera directories are never overwritten.
+Quit Vespera first; launching Vespera while it is running brings the existing
 window forward.
 
 ## Settings
@@ -49,12 +49,12 @@ Changes on the Settings page are saved to `settings.json` immediately:
 - **Names from your address book**: use contact names everywhere. When off,
   prefer public profile names.
 - **Send read receipts**: the blue ticks others see.
-- **Keep running in the background**: keep ZapFast in the tray when the
+- **Keep running in the background**: keep Vespera in the tray when the
   window closes.
 - **Notifications**: use desktop notifications with the chat picture.
 - **Check for updates**: ask GitHub once a day whether a newer release exists.
 
 ## The log
 
-Each run replaces `zapfast.log` and records warnings and errors. Include the
+Each run replaces `vespera.log` and records warnings and errors. Include the
 end of this file when reporting an issue.

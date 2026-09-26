@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn round_trips_through_disk() {
-        let dir = std::env::temp_dir().join(format!("zapfast-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
         let settings = Settings {
             zoom: 1.25,

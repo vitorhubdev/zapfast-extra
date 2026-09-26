@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn a_wastickers_archive_becomes_a_named_pack() {
-        let root = std::env::temp_dir().join(format!("zapfast-packs-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-packs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let archive_path = root.join("in").join("Frogs.wastickers");
         std::fs::create_dir_all(archive_path.parent().expect("dir")).expect("dirs");
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn a_whatsapp_pack_unpacks_in_order_with_its_emojis() {
-        let root = std::env::temp_dir().join(format!("zapfast-shared-pack-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-shared-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("creates");
         let webp = webp_bytes(tiny_png()).expect("encodes");

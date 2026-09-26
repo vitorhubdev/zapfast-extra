@@ -426,7 +426,7 @@ mod emoji_tests {
 
     #[test]
     fn a_favourite_shows_every_source_and_drops_a_missing_copy() {
-        let dir = std::env::temp_dir().join(format!("zapfast-favourites-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-favourites-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let saved_dir = dir.join("state").join("stickers");
         let pack_dir = saved_dir.join("packs").join("frogs");

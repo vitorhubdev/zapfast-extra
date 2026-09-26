@@ -313,7 +313,7 @@ trailer<</Root 1 0 R>>\n\
 
     #[test]
     fn an_open_document_serves_its_pages_again() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-reader-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-reader-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("tiny.pdf");
@@ -344,7 +344,7 @@ trailer<</Root 1 0 R>>\n\
 
     #[test]
     fn a_page_taller_than_the_budget_is_scaled_back() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-tall-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-tall-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("tall.pdf");
@@ -360,7 +360,7 @@ trailer<</Root 1 0 R>>\n\
     }
     #[test]
     fn a_page_renders_to_pixels_and_a_missing_one_reports() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("tiny.pdf");
         std::fs::write(&path, TINY).expect("writes");
@@ -384,7 +384,7 @@ trailer<</Root 1 0 R>>\n\
     }
     #[test]
     fn a_page_turns_without_rerendering_and_names_its_previews() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-turn-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-turn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("tall portrait.pdf");
         std::fs::write(&path, TINY).expect("writes");

@@ -1524,7 +1524,7 @@ mod tests {
         use crate::paths::AppDirs;
         use crate::settings::Settings;
 
-        let root = std::env::temp_dir().join(format!("zapfast-scrub-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-scrub-{}", std::process::id()));
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         let ctx = egui::Context::default();
         theme::install(&ctx);
@@ -1623,7 +1623,7 @@ mod tests {
         use crate::paths::AppDirs;
         use crate::settings::Settings;
 
-        let root = std::env::temp_dir().join(format!("zapfast-click-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("vespera-click-{}", std::process::id()));
         let (mut app, _events) = App::headless(AppDirs::under(&root), Settings::default());
         let ctx = egui::Context::default();
         theme::install(&ctx);
@@ -1703,7 +1703,7 @@ mod tests {
         use crate::paths::AppDirs;
         use crate::settings::Settings;
         let root =
-            std::env::temp_dir().join(format!("zapfast-previewshown-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-previewshown-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("creates");
         let path = root.join("shown.mp4");
         let made = std::process::Command::new("ffmpeg")

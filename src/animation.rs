@@ -259,7 +259,7 @@ static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 
 fn spool_file_name() -> PathBuf {
     let id = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = std::ffi::OsString::from("zapfast-anim-");
+    let mut name = std::ffi::OsString::from("vespera-anim-");
     name.push(std::process::id().to_string());
     name.push("-");
     name.push(id.to_string());
@@ -269,7 +269,7 @@ fn spool_file_name() -> PathBuf {
 
 fn spool_path() -> PathBuf {
     let id = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("zapfast-anim-{}-{id}.bin", std::process::id()))
+    std::env::temp_dir().join(format!("vespera-anim-{}-{id}.bin", std::process::id()))
 }
 
 struct SpillWriter {
@@ -1631,7 +1631,7 @@ mod tests {
             .add_frame(&square(40, 40, [0, 255, 0, 255]), 100)
             .expect("frame");
         let webp = encoder.finalize(200).expect("finalizes");
-        let dir = std::env::temp_dir().join(format!("zapfast-ghost-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-ghost-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("moving.webp");
         std::fs::write(&path, &webp).expect("writes");
@@ -1648,7 +1648,7 @@ mod tests {
     #[test]
     fn animated_webp_decodes_into_frames() {
         // Two frames 100 ms apart.
-        let dir = std::env::temp_dir().join(format!("zapfast-anim-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-anim-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("two.gif");
         {
@@ -1678,7 +1678,7 @@ mod tests {
         // Two hundred tiny frames: the old frame-count cap would have cut
         // the tail off and looped a truncated head; the byte budget keeps
         // the whole animation.
-        let dir = std::env::temp_dir().join(format!("zapfast-long-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-long-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("long.gif");
         {
@@ -1715,7 +1715,7 @@ mod tests {
             encoder.add_frame(&frame, index * 50).expect("frame");
         }
         let webp = encoder.finalize(160 * 50).expect("finalizes");
-        let dir = std::env::temp_dir().join(format!("zapfast-long-webp-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-long-webp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("long.webp");
         std::fs::write(&path, &webp).expect("writes");
@@ -1743,7 +1743,7 @@ mod tests {
             encoder.add_frame(&frame, index * 50).expect("frame");
         }
         let webp = encoder.finalize(200 * 50).expect("finalizes");
-        let dir = std::env::temp_dir().join(format!("zapfast-512-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-512-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("long.webp");
         std::fs::write(&path, &webp).expect("writes");
@@ -1771,7 +1771,7 @@ mod tests {
     fn a_tall_animation_pages_its_tail_from_disk() {
         // Verticals grow past 320 tall (only the width is capped): 200
         // frames at 160 by 400 exceed RAM and must page from the spool.
-        let dir = std::env::temp_dir().join(format!("zapfast-tall-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-tall-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("tall.gif");
         {
@@ -2648,7 +2648,7 @@ mod tests {
         if !can_play_video() {
             return;
         }
-        let dir = std::env::temp_dir().join(format!("zapfast-mp4-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-mp4-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("clip.mp4");
         let made = Command::new("ffmpeg")
@@ -2679,7 +2679,7 @@ mod tests {
 
     #[test]
     fn a_still_webp_is_not_an_animation() {
-        let dir = std::env::temp_dir().join(format!("zapfast-still-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-still-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("still.webp");
         image::RgbaImage::from_pixel(4, 4, image::Rgba([1, 2, 3, 255]))
@@ -2694,12 +2694,12 @@ mod tests {
 mod probe {
     use super::*;
 
-    /// Decodes the file in `ZAPFAST_MP4_PROBE`:
-    /// `ZAPFAST_MP4_PROBE=some.mp4 cargo test --all-features probe -- --ignored --nocapture`.
+    /// Decodes the file in `VESPERA_MP4_PROBE`:
+    /// `VESPERA_MP4_PROBE=some.mp4 cargo test --all-features probe -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs a file to look at"]
     fn decodes_the_file_named_by_the_environment() {
-        let Some(path) = std::env::var_os("ZAPFAST_MP4_PROBE") else {
+        let Some(path) = std::env::var_os("VESPERA_MP4_PROBE") else {
             return;
         };
         let started = Instant::now();

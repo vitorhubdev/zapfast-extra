@@ -1,17 +1,17 @@
 ---
 title: Download
-description: Get ZapFast for Linux, macOS, or Windows, with install instructions for each.
+description: Get Vespera for Linux, macOS, or Windows, with install instructions for each.
 nav_order: 1
 ---
 
-{% assign v = site.zapfast_version %}
+{% assign v = site.vespera_version %}
 {% assign name = site.release_asset_prefix %}
 {% assign app = site.release_app_name %}
 {% assign base = "https://github.com/vitorhubdev/zapfast-extra/releases/download/v" | append: v %}
 
-ZapFast was previously called FastsApp. Version 0.13.0 introduces the new
+Vespera was previously called Vespera. Version 0.13.0 introduces the new
 package and executable names. Your existing session and local data move
-automatically when you first start ZapFast; quit FastsApp before upgrading.
+automatically when you first start Vespera; quit Vespera before upgrading.
 
 The current version is **v{{ v }}**. SHA-256 checksums are in
 [checksums.txt]({{ base }}/checksums.txt). Older versions are on the

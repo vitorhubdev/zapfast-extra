@@ -1976,7 +1976,7 @@ impl SelectionLeash {
 
 impl egui::plugin::Plugin for SelectionLeash {
     fn debug_name(&self) -> &'static str {
-        "zapfast-selection-leash"
+        "vespera-selection-leash"
     }
 
     fn input_hook(&mut self, _ctx: &egui::Context, input: &mut egui::RawInput) {

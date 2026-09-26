@@ -1,4 +1,4 @@
-# ZapExt comparado con ZapFast 0.16.2
+# Vespera comparado con ZapFast 0.16.2
 
 Comparado con la etiqueta `v0.16.2` de ZapFast, revisada el 2026-09-24.
 Esta página lista solo diferencias comprobadas en este árbol o en esa
@@ -9,8 +9,8 @@ en el [README](../README.md).
 
 ## Validado en este árbol
 
-- El título de la ventana y `--version` muestran `ZapExt` y la versión del
-  fork leída de `VERSION`, no la versión de ZapFast.
+- El título de la ventana y `--version` muestran `Vespera` y la versión del
+  fork leída de `VERSION`, no la versión de Vespera.
 - Los ajustes tienen un canal de actualización: Estable, o Pruebas, que
   también puede instalar candidatas. Los borradores de GitHub nunca se
   ofrecen.
@@ -19,7 +19,7 @@ en el [README](../README.md).
   lista. ZapFast 0.16.2 añadió la selección múltiple de mensajes; ese cambio
   no se aplica a esta selección.
 - Las etiquetas de chat, los canales y la columna de salida del archivo de
-  esa versión de ZapFast no están en este árbol.
+  esa versión de Vespera no están en este árbol.
 - El reordenamiento de números dentro de líneas de derecha a izquierda de
   esa versión no está en este árbol. Los párrafos en hebreo y árabe solo
   reordenan los tramos de la fuente.
@@ -35,7 +35,7 @@ en el [README](../README.md).
   una limpieza posterior. Esa limpieza solo quita archivos ociosos de más de
   un día, y nunca uno que esté abierto. Quien espera más de un día para
   abrirlo, y no lo tiene abierto, ya no encuentra el nombre. Si el enlace
-  falla, ZapExt lo explica
+  falla, Vespera lo explica
   y señala Guardar una copia. En esta máquina, preparar un archivo de 8 MB
   (la carpeta de exportación y el hard link, sin leer los bytes) tardó 1 ms.
   Es solo el tiempo de preparación. No muestra si el arrastre se siente
@@ -56,7 +56,7 @@ en el [README](../README.md).
    comprueba que se abre. La aplicación quita exportaciones ociosas de más
    de un día.
 6. Arrastra un documento cuyo nombre ya existe en la carpeta de espera, y un
-   archivo en un volumen que no acepte un hard link. ZapExt debe explicar el
+   archivo en un volumen que no acepte un hard link. Vespera debe explicar el
    fallo y dejar Guardar una copia en el menú.
 7. Durante el arrastre, el mensaje no se abre, la selección de texto del
    cuerpo sigue, y la barra del vídeo sigue buscando.

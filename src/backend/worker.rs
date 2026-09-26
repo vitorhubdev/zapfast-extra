@@ -3412,7 +3412,7 @@ impl Worker {
                 let name = from
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "zapext-file".to_owned());
+                    .unwrap_or_else(|| "vespera-file".to_owned());
                 let commands = self.commands.clone();
                 tokio::task::spawn_blocking(move || {
                     // A cancelled dialog reports nothing.
@@ -8882,7 +8882,7 @@ mod tests {
         let (mut worker, events, mut inbox, _wa) = worker();
         let bytes = png_thumb_bytes();
         let hash = crate::stickers::hash_of(&bytes);
-        let dir = std::env::temp_dir().join(format!("zapfast-thumbheal-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-thumbheal-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join(format!("{hash}.webp"));
@@ -8934,7 +8934,7 @@ mod tests {
             .expect("encodes");
         let hash = crate::stickers::hash_of(&bytes);
         let dir =
-            std::env::temp_dir().join(format!("zapfast-thumbheal-busy-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-thumbheal-busy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join(format!("{hash}.webp"));
@@ -9078,7 +9078,7 @@ mod tests {
         let (mut worker, events, mut inbox, _wa) = worker();
         // Hash-named but missing: every rebuild fails on the read.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-thumbheal-miss-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-thumbheal-miss-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join(format!("{}.webp", "a".repeat(64)));
@@ -9235,7 +9235,7 @@ mod tests {
 
     #[tokio::test]
     async fn avatar_download_stores_valid_images_atomically() {
-        let dir = std::env::temp_dir().join(format!("zapfast-avatar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-avatar-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let bytes = png_fixture();
@@ -9260,7 +9260,7 @@ mod tests {
 
     #[tokio::test]
     async fn avatar_download_refuses_relative_paths_without_network() {
-        let dir = std::env::temp_dir().join(format!("zapfast-avatar-rel-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-avatar-rel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("a.jpg");
@@ -9285,7 +9285,7 @@ mod tests {
 
     #[tokio::test]
     async fn avatar_download_failures_keep_the_last_good_photo() {
-        let dir = std::env::temp_dir().join(format!("zapfast-avatar-keep-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-avatar-keep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("a.jpg");
@@ -9635,7 +9635,7 @@ mod tests {
 
     #[test]
     fn a_cached_sticker_that_is_gone_is_fetched_again_and_stuck_ones_wait() {
-        let dir = std::env::temp_dir().join(format!("zapfast-stickers-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-stickers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let kept = dir.join("kept.webp");
         std::fs::write(&kept, b"webp").expect("writes");
@@ -9735,7 +9735,7 @@ mod tests {
             .archive
             .ensure_chat("a@s.whatsapp.net", "A")
             .expect("chat");
-        let dir = std::env::temp_dir().join(format!("zapfast-heal-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-heal-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let broken = dir.join("broken.webp");
         std::fs::write(&broken, b"not a picture").expect("writes");
@@ -9795,7 +9795,7 @@ mod tests {
         let cache = worker.dirs.sticker_cache_dir();
         std::fs::create_dir_all(&cache).expect("cache");
         let saved_dir =
-            std::env::temp_dir().join(format!("zapfast-saved-sticker-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-saved-sticker-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&saved_dir);
         std::fs::create_dir_all(&saved_dir).expect("saved");
         let saved = saved_dir.join("kept.webp");
@@ -10396,7 +10396,7 @@ mod receipt_tests {
         // A shared process directory lets parallel avatar/cache tests see
         // each other's files. Keep a unique synthetic root for each worker.
         let root = tempfile::Builder::new()
-            .prefix("zapfast-worker-test-")
+            .prefix("vespera-worker-test-")
             .tempdir()
             .expect("isolated worker directory")
             .keep();
@@ -11742,7 +11742,7 @@ mod receipt_tests {
     #[tokio::test]
     async fn delete_for_me_keeps_files_a_survivor_still_references() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-delete-media-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-delete-media-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&root);
         let shared = root.join("shared.mp4");
         let lone = root.join("lone.mp4");
@@ -13484,7 +13484,7 @@ mod receipt_tests {
     #[test]
     fn removed_files_survive_failed_reference_lookups() {
         let (mut worker, _events, _inbox, _wa) = worker();
-        let dir = std::env::temp_dir().join(format!("zapfast-refcheck-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-refcheck-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("kept.jpg");
         std::fs::write(&file, b"kept").expect("writes");
@@ -13504,7 +13504,7 @@ mod receipt_tests {
     #[test]
     fn removed_files_cover_favorites_and_catalog() {
         let (mut worker, _events, _inbox, _wa) = worker();
-        let dir = std::env::temp_dir().join(format!("zapfast-refcover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-refcover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let favorite = dir.join("favorite.webp");
         let cataloged = dir.join("cataloged.webp");
@@ -13566,10 +13566,10 @@ mod receipt_tests {
     #[test]
     fn removed_media_files_drop_only_when_unreferenced() {
         let (mut worker, _events, _inbox, _wa) = worker();
-        // Its own folder: the archive removal test owns zapfast-removal in
+        // Its own folder: the archive removal test owns vespera-removal in
         // this process and both remove their folder.
         let dir =
-            std::env::temp_dir().join(format!("zapfast-removal-media-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-removal-media-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let shared = dir.join("shared.jpg");
         let orphan = dir.join("orphan.jpg");
@@ -13701,7 +13701,7 @@ mod receipt_tests {
     async fn forget_pdf_stale_clear_keeps_the_new_document() {
         use std::time::{Duration, Instant};
         let (mut worker, _events, _inbox, _wa) = worker();
-        let dir = std::env::temp_dir().join(format!("zapfast-pdf-guard-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pdf-guard-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let tiny = b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>endobj\n4 0 obj<</Length 36>>stream\nBT /F1 24 Tf 20 40 Td (Hi) Tj ET\nendstream\nendobj\n5 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n";
@@ -14020,7 +14020,7 @@ mod receipt_tests {
     #[test]
     fn limited_file_enforces_cap_and_resets_on_truncate() {
         use whatsapp_rust::download::DownloadWriter;
-        let dir = std::env::temp_dir().join(format!("zapfast-limited-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-limited-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("sink.bin");
         let mut sink = LimitedFile::create(&path, 16).expect("creates");
@@ -14048,7 +14048,7 @@ mod receipt_tests {
     fn chunked_streaming_never_holds_the_whole_file() {
         // 32 MiB through 8 KiB writes: the file is exact while no single
         // allocation ever holds more than one chunk on our side.
-        let dir = std::env::temp_dir().join(format!("zapfast-stream-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-stream-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("big.bin");
         let mut sink = LimitedFile::create(&path, 40 * 1024 * 1024).expect("creates");
@@ -14066,7 +14066,7 @@ mod receipt_tests {
 
     #[test]
     fn temp_guard_cleans_up() {
-        let dir = std::env::temp_dir().join(format!("zapfast-guard-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-guard-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("partial.part");
         std::fs::write(&path, b"partial").expect("writes");
@@ -14077,7 +14077,7 @@ mod receipt_tests {
 
     #[tokio::test]
     async fn publish_moves_aside_and_restores() {
-        let dir = std::env::temp_dir().join(format!("zapfast-publish-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-publish-{}", std::process::id()));
         tokio::fs::create_dir_all(&dir).await.expect("creates");
         let dest = dir.join("photo.jpg");
         let temp = dir.join("photo.jpg.part");
@@ -14133,7 +14133,7 @@ mod receipt_tests {
 
     #[test]
     fn image_validation_decodes_small_and_sniffs_large() {
-        let dir = std::env::temp_dir().join(format!("zapfast-imgval-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-imgval-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         // Small and valid: headers plus a full decode.
         let small = dir.join("small.png");
@@ -14166,7 +14166,7 @@ mod receipt_tests {
 
     #[test]
     fn image_validation_rejects_excessive_dimensions() {
-        let dir = std::env::temp_dir().join(format!("zapfast-imgdim-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-imgdim-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let wide = dir.join("wide.png");
         std::fs::write(&wide, png_bytes(66000, 8)).expect("writes");
@@ -14257,7 +14257,7 @@ mod receipt_tests {
     fn image_validations_run_concurrently() {
         // Eight parallel validations of the same small file: no shared
         // state, every one answers.
-        let dir = std::env::temp_dir().join(format!("zapfast-imgpar-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-imgpar-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("small.png");
         std::fs::write(&file, png_bytes(8, 8)).expect("writes");
@@ -14279,7 +14279,7 @@ mod receipt_tests {
 
     #[test]
     fn interrupted_publishes_restore_or_clean_up() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pubrecover-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pubrecover-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         // Backup without destination: the publish died mid-step and the
@@ -14303,7 +14303,7 @@ mod receipt_tests {
 
     #[test]
     fn failed_restore_keeps_everything() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pubfail-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pubfail-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         // The destination slot is occupied by a directory, so the backup
@@ -14334,7 +14334,7 @@ mod receipt_tests {
         // keep set. A favorite-only file, a cataloged file, and a backup
         // that cannot move back all survive; a true orphan does not.
         let (worker, _events, _inbox, _wa) = worker();
-        let dir = std::env::temp_dir().join(format!("zapfast-startup-flow-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-startup-flow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let favorite = dir.join("favorite.webp");
@@ -14403,7 +14403,7 @@ mod receipt_tests {
             worker.archive.protected_files().is_none(),
             "no proof, no cleanup anywhere"
         );
-        let dir = std::env::temp_dir().join(format!("zapfast-damaged-fav-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-damaged-fav-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let file = dir.join("candidate.jpg");
         std::fs::write(&file, b"candidate").expect("writes");

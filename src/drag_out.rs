@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn missing_and_empty_files_do_not_stage() {
-        let dir = std::env::temp_dir().join(format!("zapext-drag-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-drag-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("gone.bin");
@@ -1075,7 +1075,7 @@ mod tests {
 
     #[test]
     fn a_large_file_is_linked_without_changing_the_original() {
-        let dir = std::env::temp_dir().join(format!("zapext-drag-big-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-drag-big-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let source = dir.join("vídeo grande.bin");
@@ -1114,7 +1114,7 @@ mod tests {
     }
 
     fn isolated(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("zapext-drag-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-drag-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

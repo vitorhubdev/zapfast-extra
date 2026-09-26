@@ -104,7 +104,7 @@ mod host {
     pub fn start(sender: Sender<TrayCommand>, wake: Wake) -> Result<u32, String> {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
-            .name("zapfast-tray".to_owned())
+            .name("vespera-tray".to_owned())
             .spawn(move || {
                 let _item = match build(sender, wake) {
                     Ok(item) => item,

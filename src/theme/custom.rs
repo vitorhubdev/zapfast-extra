@@ -108,7 +108,7 @@ pub(super) fn parse_palette(text: &str) -> Result<Palette, String> {
         }
     }
     // Spotifast palettes share the sixteen interface colours. Derive chat-only
-    // colours when importing one, while keeping explicit ZapFast overrides.
+    // colours when importing one, while keeping explicit Vespera overrides.
     if file.colors.contains_key("window") && !file.colors.contains_key("chat") {
         palette.chat = palette.window;
     }
@@ -399,7 +399,7 @@ impl Catalog {
         let (sender, receiver) = mpsc::channel();
         let wake = waker.clone();
         match std::thread::Builder::new()
-            .name("zapfast-themes".into())
+            .name("vespera-themes".into())
             .spawn(move || {
                 let result = load();
                 if sender.send(result).is_ok() {
@@ -410,7 +410,7 @@ impl Catalog {
             Err(error) => {
                 log::warn!("unable to start the theme loader: {error}");
                 self.problem = Some(
-                    "Custom themes could not be loaded. Run zapfast reload-themes to try again."
+                    "Custom themes could not be loaded. Run vespera reload-themes to try again."
                         .into(),
                 );
             }
@@ -489,7 +489,7 @@ impl Catalog {
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.problem = Some(
-                    "Custom themes could not be loaded. Run zapfast reload-themes to try again."
+                    "Custom themes could not be loaded. Run vespera reload-themes to try again."
                         .into(),
                 );
             }
@@ -619,7 +619,7 @@ mod custom_theme_tests {
     #[test]
     fn reloads_coalesce_and_never_publish_a_superseded_palette() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-theme-reload-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-theme-reload-{}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         std::fs::write(dir.join("latest.json"), br#"{"base":"light"}"#).unwrap();
         let accepted = CustomTheme {
@@ -687,7 +687,7 @@ mod custom_theme_tests {
 
     #[test]
     fn discovery_sorts_valid_files_and_skips_invalid_files() {
-        let dir = std::env::temp_dir().join(format!("zapfast-themes-{}", rand::random::<u64>()));
+        let dir = std::env::temp_dir().join(format!("vespera-themes-{}", rand::random::<u64>()));
         assert!(discover(&dir, None).themes.is_empty());
         std::fs::create_dir_all(&dir).unwrap();
         for (name, text) in [
@@ -712,7 +712,7 @@ mod custom_theme_tests {
     #[test]
     fn reads_are_bounded_and_cannot_escape_to_other_files() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-theme-bounds-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-theme-bounds-{}", rand::random::<u64>()));
         let dir = root.join("themes");
         std::fs::create_dir_all(&dir).unwrap();
         let mut boundary = vec![b' '; MAX_FILE_BYTES as usize];
@@ -754,7 +754,7 @@ mod custom_theme_tests {
     #[test]
     fn catalog_limits_keep_the_saved_selection_without_an_arbitrary_partial_listing() {
         let dir =
-            std::env::temp_dir().join(format!("zapfast-theme-catalog-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-theme-catalog-{}", rand::random::<u64>()));
         std::fs::create_dir(&dir).unwrap();
         for index in 0..MAX_THEMES + 1 {
             std::fs::write(dir.join(format!("{index:03}.json")), b"{}").unwrap();

@@ -5,19 +5,17 @@ it pins the shared CLI and nFPM versions and declares Linux amd64/arm64 inputs,
 DEB/RPM contents, dependencies, recipe templates and downstream repositories.
 Application assets and native recipes stay in `packaging/`.
 
-ZapExt is a fork of ZapFast. The fork product version lives in `VERSION`
+Vespera is a fork of ZapFast. The fork product version lives in `VERSION`
 (`1.0.x`) and GitHub tags are `v1.0.x` in
 `vitorhubdev/zapfast-extra`; source archives extract into
-`zapfast-extra-VERSION`. The Cargo package name stays `zapfast`; its version
-matches `VERSION`. Executable, storage, AppUserModelID, and bundle ID stay
-`zapfast` for compatibility. A tag push builds a draft release and does not
-publish it. Use the
-configuration from the matching tag to rebuild a release. Existing release
-files keep their original `zapfast-v*` names; the Windows direct portable
-`ZapExt-v*-windows-*-portable.exe` is additive.
+`zapfast-extra-VERSION`. The Cargo package name is `vespera` and matches
+`VERSION`. The executable, storage directory, and bundle id are `vespera`.
+A tag push builds a draft release and does not publish it. Use the
+configuration from the matching tag to rebuild a release. Release archives
+use the `vespera-v*` names.
 
-Version 0.13.0 introduces the ZapFast name and `zapfast` binary. Its AUR recipes
-provide and replace the corresponding FastsApp packages. Those upstream
+Version 0.13.0 introduces the Vespera name and `vespera` binary. Its AUR recipes
+provide and replace the corresponding Vespera packages. Those upstream
 Homebrew/AUR destinations belong to `crmne/zapfast` and are not published by
 this fork; `native-packages.yaml` still declares their templates for
 reference, but fork releases do not push to them without fork-owned
@@ -30,7 +28,7 @@ native-packages doctor --target linux-amd64 --target linux-arm64
 native-packages build --release v1.0.5 --target linux-amd64 --target linux-arm64
 ```
 
-Replace `v1.0.5` with an existing ZapExt tag (`VERSION` without leading spaces). Local use also
+Replace `v1.0.5` with an existing Vespera tag (`VERSION` without leading spaces). Local use also
 requires nFPM 2.47.0, `bsdtar` and `readelf`; AUR generation needs `makepkg`
 or Docker. CI installs its tooling. To package local release archives, put
 every configured input and recipe asset under `dist/`, then run
@@ -118,7 +116,7 @@ recipe generation to the Linux packaging job after release assets exist.
 
 ## Flatpak
 
-`packaging/flatpak/rocks.zapfast.ZapFast.yml` builds from source, with offline Cargo
+`packaging/flatpak/rocks.vespera.Vespera.yml` builds from source, with offline Cargo
 sources generated from the selected revision's lockfile. The adjacent bundle
 manifest reuses the Linux release binary, as in Spotifast. Both grant Wayland/X11,
 GPU, audio, network, keyring and tray access; attachments chosen by the user use
@@ -129,11 +127,11 @@ Generate a pinned Flathub checkout (Python needs `aiohttp`, `tomlkit` and `PyYAM
 
 ```sh
 packaging/flatpak/flathub.sh vX.Y.Z /path/to/flathub-checkout
-flatpak-builder --user --install --force-clean build-dir /path/to/flathub-checkout/rocks.zapfast.ZapFast.yml
+flatpak-builder --user --install --force-clean build-dir /path/to/flathub-checkout/rocks.vespera.Vespera.yml
 ```
 
 Flathub submission/review is a separate publication step; the manifest alone does
-not make ZapExt available in Flathub. A maintainer must submit it manually:
+not make Vespera available in Flathub. A maintainer must submit it manually:
 [Flathub's requirements](https://docs.flathub.org/docs/for-app-authors/requirements#generative-ai-policy)
 prohibit AI agents from submitting or writing submission interactions and require
 disclosure of generated material. Review the manifests and these changes before

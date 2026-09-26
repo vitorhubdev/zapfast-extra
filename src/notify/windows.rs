@@ -6,7 +6,7 @@ use windows_sys::Win32::System::Registry::{
 };
 use winrt_notification::{IconCrop, Toast};
 
-const APPLICATION_ID: &str = "me.paolino.zapfast";
+const APPLICATION_ID: &str = "io.github.vitorhubdev.Vespera";
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()

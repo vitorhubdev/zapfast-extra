@@ -163,7 +163,7 @@ fn opus_head(pre_skip: u16) -> Vec<u8> {
 }
 
 fn opus_tags() -> Vec<u8> {
-    let vendor = b"ZapFast";
+    let vendor = b"Vespera";
     let mut tags = Vec::with_capacity(20 + vendor.len());
     tags.extend_from_slice(b"OpusTags");
     tags.extend_from_slice(&(vendor.len() as u32).to_le_bytes());
@@ -317,12 +317,12 @@ mod tests {
         assert!(decode(&[]).is_err());
     }
 
-    /// Decodes the file in `ZAPFAST_OGG_PROBE`:
-    /// `ZAPFAST_OGG_PROBE=note.ogg cargo test voice::tests::probe -- --ignored --nocapture`.
+    /// Decodes the file in `VESPERA_OGG_PROBE`:
+    /// `VESPERA_OGG_PROBE=note.ogg cargo test voice::tests::probe -- --ignored --nocapture`.
     #[test]
     #[ignore = "needs a file to look at"]
     fn probe() {
-        let Some(path) = std::env::var_os("ZAPFAST_OGG_PROBE") else {
+        let Some(path) = std::env::var_os("VESPERA_OGG_PROBE") else {
             return;
         };
         let bytes = std::fs::read(path).expect("readable");

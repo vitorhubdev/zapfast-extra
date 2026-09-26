@@ -1,25 +1,25 @@
 ---
 layout: home
-title: ZapExt
-description: ZapExt, a community mod of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
+title: Vespera
+description: Vespera, a community fork of ZapFast. A fast, native WhatsApp client for Linux, macOS, and Windows.
 permalink: /
 hero:
-  name: ZapExt
+  name: Vespera
   text: WhatsApp, native and fast
-  tagline: A community mod of ZapFast for Linux, macOS, and Windows. Chat, send voice messages, and share files.
+  tagline: A community fork of ZapFast for Linux, macOS, and Windows. Chat, send voice messages, and share files.
   actions:
     - theme: brand
       text: Download
       link: /download/
     - theme: alt
-      text: What is ZapFast?
-      link: /what-is-zapfast/
+      text: What is Vespera?
+      link: /what-is-vespera/
     - theme: alt
       text: GitHub
       link: https://github.com/vitorhubdev/zapfast-extra
   image:
     src: /screenshot.png
-    alt: "ZapExt showing a chat with a photo, a document, a voice message, a quoted reply, and a link preview"
+    alt: "Vespera showing a chat with a photo, a document, a voice message, a quoted reply, and a link preview"
     width: 1387
     height: 1040
 
@@ -35,7 +35,7 @@ features:
     details: Photos, GIFs, stickers, documents, polls, locations, and link previews appear in the chat. Add captions before sending files.
   - icon: 🔔
     title: Background mode
-    details: Closing the window keeps ZapExt linked in the tray. Notifications show the chat picture, and muted chats stay quiet.
+    details: Closing the window keeps Vespera linked in the tray. Notifications show the chat picture, and muted chats stay quiet.
   - icon: ⌨️
     title: Keyboard shortcuts
     details: Search, switch chats, reply, and record with shortcuts. Select and copy text, including across messages.

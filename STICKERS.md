@@ -1,6 +1,6 @@
 # Stickers, media, and documents: what we looked at
 
-ZapExt is a small native client with no browser engine, so the sticker
+Vespera is a small native client with no browser engine, so the sticker
 picker, the attachment cache, and the document viewer were built against the
 experiments of clients that came before. This file records those references,
 what was taken from each, and which decisions are local to this fork, so a
@@ -37,7 +37,7 @@ The official clients are the only source for what the server expects.
 
 - A sticker travels as a `StickerMessage` with `url`, `directPath`,
   `mediaKey`, `fileSha256`, `fileEncSha256`, `fileLength`, `mimetype`,
-  `width`, `height`, and `isAnimated`. ZapExt builds exactly that body in
+  `width`, `height`, and `isAnimated`. Vespera builds exactly that body in
   `prepare_sticker` (`src/backend/worker.rs`), through whatsapp-rust, and
   sends it with the reply's context when a reply was open.
 - The picker is a row of pack entries with the recents and the starred
@@ -74,7 +74,7 @@ Go, and the reference for a minimal correct send.
   instead of a sticker.
 
 Taken: the confirmation that the dimensions belong in the message, and that
-an animated sticker must say so. ZapExt reads both from the WebP header
+an animated sticker must say so. Vespera reads both from the WebP header
 (`sticker_shape` in `src/backend/worker.rs`) rather than trusting the
 picker.
 

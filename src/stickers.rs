@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn a_thumbnail_is_small_and_written_once() {
-        let dir = std::env::temp_dir().join(format!("zapfast-thumb-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-thumb-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let bytes = webp_picture();
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn a_truncated_thumbnail_is_rebuilt() {
-        let dir = std::env::temp_dir().join(format!("zapfast-thumb-trunc-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-thumb-trunc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let bytes = webp_picture();
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn a_sticker_copy_is_filed_under_its_hash() {
-        let dir = std::env::temp_dir().join(format!("zapfast-file-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-file-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let bytes = small_picture([10, 200, 90]);
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn an_old_pack_is_filed_under_its_content_and_keeps_its_order() {
-        let dir = std::env::temp_dir().join(format!("zapfast-pack-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-pack-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("creates");
         let first = small_picture([10, 200, 90]);

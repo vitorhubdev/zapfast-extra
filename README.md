@@ -2,9 +2,9 @@
   <img src="assets/vespera.png" width="220" alt="Vespera logo">
 </p>
 
-# ZapExt
+# Vespera
 
-**A community mod of ZapFast, native and fast.**
+**A community fork of ZapFast, native and fast.**
 
 What this fork changes, compared with ZapFast 0.16.2, is listed in
 [English](docs/differences.md), [português](docs/differences.pt-BR.md), and
@@ -18,15 +18,15 @@ Archive and unarchive between this computer and the phone are covered only by
 synthetic tests so far: live two-device validation is still pending.
 Keep a backup of your existing profile before testing with important data.
 
-ZapExt is an independent fork/mod maintained by
+Vespera is an independent fork/mod maintained by
 [Vitor (`@vitorhubdev`)](https://github.com/vitorhubdev). It is based on the
 original [ZapFast](https://github.com/crmne/zapfast) project and keeps its MIT
 license and original copyright notices. The fork adds its own desktop fixes,
 packaging, updater path, branding, and extra behavior while preserving
-compatibility-sensitive internal `zapfast` identifiers where changing them
+compatibility-sensitive internal `vespera` identifiers where changing them
 would break existing installations.
 
-ZapExt is written in Rust with [egui](https://github.com/emilk/egui) and uses
+Vespera is written in Rust with [egui](https://github.com/emilk/egui) and uses
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust) for the WhatsApp Web
 protocol. It runs on Linux, macOS, and Windows and links as a companion device
 without embedding a browser engine.
@@ -66,7 +66,7 @@ without embedding a browser engine.
   Group messages show two gray checks after every recipient has received
   them, and blue checks after every recipient has read them. The recipient
   list and individual receipts are saved locally; later membership changes
-  do not change that list. If the original recipients are unknown, ZapExt
+  do not change that list. If the original recipients are unknown, Vespera
   waits for the phone's aggregate status instead of guessing from one reader.
 - **WhatsApp formatting.** Bold, italic, strikethrough, code, lists, quotes,
   mentions, and link previews are supported. Links are clickable. Hebrew and
@@ -107,7 +107,7 @@ without embedding a browser engine.
   after they expire on the phone.
   A clock badge on chat avatars shows enabled timers and follows changes from
   the phone. Changing the default timer for new chats leaves existing chats alone.
-- **View attachments.** ZapExt downloads files up to 64 MB automatically or
+- **View attachments.** Vespera downloads files up to 64 MB automatically or
   on click. Each download streams to a temporary file with a size budget and
   a deadline, publishes only after validation, and never overwrites the last
   valid copy with a failed attempt. Photos, stickers, GIFs, voice messages, audio, locations, contacts,
@@ -159,7 +159,7 @@ without embedding a browser engine.
   remains in the menu. A sticker opens
   bigger in a small dialog instead, with a Save button, and stays out of the
   order walked by the viewer.
-  If an attachment has expired, ZapExt asks your phone to upload it again.
+  If an attachment has expired, Vespera asks your phone to upload it again.
 - **Polls.** Use the checklist button beside the paperclip to create a poll with
   2–12 answers. Turn off **Allow multiple answers** for a single-choice poll.
   Click an answer in a poll to vote; click a selected answer again to remove
@@ -170,7 +170,7 @@ without embedding a browser engine.
   Voting needs the original poll's key;
   if that key is missing, the message explains that voting is available on your
   phone. Creating polls in disappearing-message chats is not yet supported by
-  the protocol library's poll API, so ZapExt blocks it instead of ignoring the timer.
+  the protocol library's poll API, so Vespera blocks it instead of ignoring the timer.
 - **Emoji and sticker picker.** Three tabs: emoji, stickers, and favourites.
   Search emoji, and save stickers with a right-click, which also marks a
   sticker as a favourite or clears the mark. The favourites tab holds every
@@ -219,20 +219,20 @@ without embedding a browser engine.
   when validation fails. Private read-state updates run one at a time. Failures
   pause the whole queue with backoff from 30 seconds to 15 minutes; pending reads
   remain saved and resume automatically. New messages can still arrive.
-- **Runs in the background.** Closing the window keeps ZapExt linked in the
+- **Runs in the background.** Closing the window keeps Vespera linked in the
   system tray. Reopen it from the tray or by launching it again. Quit from the
   tray or with `Ctrl+Q`, or disable this behavior in Settings.
 - **Desktop notifications.** Get notifications with the chat picture when you
   are away from the open chat. Muted chats do not notify you. Windows notifications
-  identify ZapExt as the sender and show chat pictures as small circular icons;
+  identify Vespera as the sender and show chat pictures as small circular icons;
   installed and portable builds register this identity in the current user's registry.
   Clicking a Windows notification opens its chat and anchors on the exact
   notified message. On Linux,
   clicking a notification opens the chat, and reading the chat here or on another
   device dismisses its outstanding notifications. On macOS, notifications use
-  the installed ZapExt application's identity without an application chooser;
+  the installed Vespera application's identity without an application chooser;
   unregistered development builds skip notifications if that identity is unavailable.
-- **Update notices.** ZapExt checks GitHub once a day and shows a download
+- **Update notices.** Vespera checks GitHub once a day and shows a download
   link when a newer release is available. You can turn this off in Settings.
 - **Themes.** Light, dark, follow the system, or a local JSON palette. Native
   Linux packages can follow Omarchy colors without restarting the app. Zoom with
@@ -263,15 +263,15 @@ without embedding a browser engine.
 
 ## Installing
 
-For ZapExt, download the fork build from GitHub Releases. The upstream Homebrew and AUR recipes belong to the original ZapFast project and are not published by this fork.
+For Vespera, download the fork build from GitHub Releases. The upstream Homebrew and AUR recipes belong to the original Vespera project and are not published by this fork.
 
-ZapExt was previously called FastsApp. Version 0.13.0 introduces the new
+Vespera was previously called Vespera. Version 0.13.0 introduces the new
 package and executable names. On Arch Linux:
 
 ```sh
-yay -S zapfast-bin      # the released build, ready made
-yay -S zapfast          # the release, built from source
-yay -S zapfast-git      # built from the latest commit
+yay -S vespera-bin      # the released build, ready made
+yay -S vespera          # the release, built from source
+yay -S vespera-git      # built from the latest commit
 ```
 
 Builds for every release are on the
@@ -279,9 +279,9 @@ Builds for every release are on the
 
 | Platform | File |
 | --- | --- |
-| Linux x86_64 and arm64 | `zapfast-vX.Y.Z-<target>.tar.gz`, with the desktop file and icon in `packaging/` |
-| Windows x64 and arm64 | `zapfast-vX.Y.Z-<target>-setup.exe`, `ZapExt-vX.Y.Z-windows-<arch>-portable.exe`, or the portable `.zip` |
-| macOS, universal | `zapfast-vX.Y.Z-macos-universal.dmg` |
+| Linux x86_64 and arm64 | `vespera-vX.Y.Z-<target>.tar.gz`, with the desktop file and icon in `packaging/` |
+| Windows x64 and arm64 | `vespera-vX.Y.Z-<target>-setup.exe`, `Vespera-vX.Y.Z-windows-<arch>-portable.exe`, or the portable `.zip` |
+| macOS, universal | `vespera-vX.Y.Z-macos-universal.dmg` |
 
 On macOS, the rounded Dock icon matches the app bundle. Native menus provide
 Settings, editing, search, view controls, and window commands. The traffic
@@ -291,19 +291,19 @@ window. Settings is also available with `⌘,`.
 The macOS release process always validates the universal app and its entitlements.
 When Apple Developer credentials are configured it also signs with Developer ID,
 notarizes the DMG, and validates the stapled ticket. Without those credentials,
-the release uses an ad-hoc signature and skips only the Apple notarization checks. Open the DMG and drag **ZapExt** to Applications.
-When upgrading from FastsApp on macOS, quit the old app and remove its
-application bundle after installing ZapExt.
+the release uses an ad-hoc signature and skips only the Apple notarization checks. Open the DMG and drag **Vespera** to Applications.
+When upgrading from Vespera on macOS, quit the old app and remove its
+application bundle after installing Vespera.
 
-Releases before 0.13.0 keep their original FastsApp filenames.
+Releases before 0.13.0 keep their original Vespera filenames.
 
 ### Flatpak
 
 Flatpak packaging lives in `packaging/flatpak/`, following Spotifast's source
 manifest and release-bundle setup. Future releases will attach an x86_64
 `.flatpak` bundle; install a downloaded bundle with `flatpak install --user FILE`
-and run `flatpak run rocks.zapfast.ZapExt`. Flathub publication is pending;
-ZapExt is not yet listed there. See [PACKAGING.md](PACKAGING.md) for local builds
+and run `flatpak run rocks.vespera.Vespera`. Flathub publication is pending;
+Vespera is not yet listed there. See [PACKAGING.md](PACKAGING.md) for local builds
 and preparing a Flathub submission. File selection uses desktop portals;
 the sandbox has no general access to your home directory.
 
@@ -312,7 +312,7 @@ the sandbox has no general access to your home directory.
 The archive key is a random 256-bit secret in Secret Service on Linux, Keychain
 on macOS, or Windows Credential Manager. Linux needs a working Secret Service
 provider (for example GNOME Keyring or KeePassXC with Secret Service enabled).
-If the keyring is locked or unavailable, unlock it and click Retry; ZapExt keeps
+If the keyring is locked or unavailable, unlock it and click Retry; Vespera keeps
 its archive intact and waits before connecting. It never saves a replacement
 plaintext archive. Back up both the archive and its OS keyring key: copying only
 `archive.db` to another computer is insufficient.
@@ -327,7 +327,7 @@ while your login is unlocked.
 
 ### From source
 
-ZapExt needs Rust, a C/C++ toolchain, CMake and Perl (for bundled OpenSSL). `rust-toolchain.toml` pins the exact version. On Linux,
+Vespera needs Rust, a C/C++ toolchain, CMake and Perl (for bundled OpenSSL). `rust-toolchain.toml` pins the exact version. On Linux,
 it also needs GUI development packages:
 
 ```sh
@@ -341,7 +341,7 @@ Then:
 
 ```sh
 cargo install --path .
-zapfast
+vespera
 ```
 
 The desktop file and icon are in `packaging/`. The window, tray, executable,
@@ -354,7 +354,7 @@ surface shows the same mark.
 `whatsapp-rust` is pinned to a Git commit because version 0.7.0 on crates.io
 enables a `simd` feature that needs nightly Rust. The pinned commit builds on
 stable Rust and includes the upstream fixes for missing app-state snapshots and
-conflicts that make no progress. ZapExt does not reset your session to recover
+conflicts that make no progress. Vespera does not reset your session to recover
 a collection.
 
 ## Using it
@@ -379,22 +379,22 @@ contacts; a card with several numbers lets you pick one.
 
 | What | Linux | Notes |
 | --- | --- | --- |
-| Settings | `~/.config/zapfast/settings.json` | JSON, safe to edit |
-| Device keys | `~/.local/state/zapfast/session.db` | Owned by whatsapp-rust; deleting it unlinks |
-| Messages | `~/.local/state/zapfast/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
-| Attachments, avatars | `~/.cache/zapfast/` | Safe to delete |
-| Saved stickers and packs | `~/.local/state/zapfast/stickers/` | Plain WebP files; each pack is a folder |
-| Log of the last run | `~/.local/state/zapfast/zapfast.log` | `--verbose` for more |
+| Settings | `~/.config/vespera/settings.json` | JSON, safe to edit |
+| Device keys | `~/.local/state/vespera/session.db` | Owned by whatsapp-rust; deleting it unlinks |
+| Messages | `~/.local/state/vespera/archive.db` | SQLCipher-encrypted SQLite, unlocked by the OS keyring; raw messages retain attachment keys |
+| Attachments, avatars | `~/.cache/vespera/` | Safe to delete |
+| Saved stickers and packs | `~/.local/state/vespera/stickers/` | Plain WebP files; each pack is a folder |
+| Log of the last run | `~/.local/state/vespera/vespera.log` | `--verbose` for more |
 
 macOS and Windows use the standard platform directories selected by the
-`directories` crate. On first start, ZapExt moves settings, the linked session,
-message archive, saved stickers, caches, and window state from `fastsapp`
-(or the earlier `fastwhatsapp`) paths. Existing ZapExt directories take
-precedence and are never overwritten. Quit FastsApp before starting ZapExt;
+`directories` crate. On first start, Vespera moves settings, the linked session,
+message archive, saved stickers, caches, and window state from `vespera`
+(or the earlier `vespera`) paths. Existing Vespera directories take
+precedence and are never overwritten. Quit Vespera before starting Vespera;
 if an older copy is still running, the new launch brings its window forward.
 Your phone may keep showing the old linked-device name until you link again.
 
-On Linux and macOS, ZapExt restricts its configuration, state, and cache
+On Linux and macOS, Vespera restricts its configuration, state, and cache
 directories to the current user (`0700`), including existing installations.
 Startup stops if those directories cannot be created or secured, before opening
 logs or databases. Windows uses the permissions inherited from your user profile.
@@ -417,7 +417,7 @@ specified. Color names match `Palette`
 in `src/theme.rs`; use `#RRGGBB` or `#RRGGBBAA`. The last accepted palette is cached
 in settings, so a missing or damaged theme file does not reset your appearance.
 Linux watches the themes folder for changes without periodic repaints. On other
-platforms, use `zapfast reload-themes` after editing. The command also works while
+platforms, use `vespera reload-themes` after editing. The command also works while
 the window is closed and never launches a stopped app.
 
 On Omarchy, **Follow system** and **Omarchy** read the active desktop palette and
@@ -427,9 +427,9 @@ packages additionally register a missing per-user template and theme hook on
 first launch; existing user files are preserved. Flatpak uses the desktop's
 light/dark preference and does not read host theme files or install desktop hooks.
 
-### Updating ZapExt
+### Updating Vespera
 
-ZapExt uses the fork's GitHub Releases API at
+Vespera uses the fork's GitHub Releases API at
 `https://api.github.com/repos/vitorhubdev/zapfast-extra/releases/latest`.
 It checks once a day when **Check for updates** is enabled. **Update channel** selects Stable (finished releases, the default) or Testing (also release candidates, never older builds). The current fork
 version has one canonical source in the repository root: [`VERSION`](VERSION).
@@ -442,7 +442,7 @@ checked against the release's SHA-256 checksums. The updater keeps a backup and
 restores it if the updated app cannot start.
 
 The in-app updater supports marked portable downloads, the Windows installer,
-and the macOS app in Applications. Keep `zapfast-portable.txt` beside a portable
+and the macOS app in Applications. Keep `vespera-portable.txt` beside a portable
 executable. AUR, DEB, RPM, Flatpak, Cargo and Homebrew installations use their
 package manager. Older portable downloads without the marker need one manual
 upgrade. No account or additional service is needed.
@@ -468,10 +468,10 @@ WhatsApp, or register a tray icon. You can run it alongside your regular app.
 
 ```sh
 cargo build --locked --features demo
-./target/debug/zapext --demo-tour --demo-size 1280x800
+./target/debug/vespera --demo-tour --demo-size 1280x800
 ```
 
-The **ZapExt Demo** window waits for **Space**. The 35-second tour starts with
+The **Vespera Demo** window waits for **Space**. The 35-second tour starts with
 search, switches chats with keyboard shortcuts, scrolls, right-clicks a message
 and selects Reply, types quickly, completes emoji and mentions, sends a still
 sticker from the picker, opens group information and the shortcut list,
@@ -486,7 +486,7 @@ For deterministic theme screenshots, `--demo-page settings,omarchy` and
 palettes without changing the desktop theme.
 
 On Omarchy, run `omarchy screenrecord`, select the demo window, then press Space
-in ZapExt. Recording has no audio unless you explicitly enable desktop or
+in Vespera. Recording has no audio unless you explicitly enable desktop or
 microphone audio. Stop with `omarchy screenrecord --stop-recording` after the
 tour finishes. The default capture records a fixed rectangle, so keep the demo
 window visible and stationary until recording stops.
@@ -507,7 +507,7 @@ trace contains only pointer coordinates and shortcut labels, not typed text.
 
 ## Disclaimer
 
-ZapExt is an unofficial client and is not affiliated with WhatsApp or
+Vespera is an unofficial client and is not affiliated with WhatsApp or
 Meta. Using an unofficial client may be against WhatsApp's terms of service
 and could get an account suspended. Use it at your own risk.
 
@@ -517,11 +517,11 @@ Release packaging uses the [native-packages](https://rubygems.org/gems/native-pa
 
 ## Credits
 
-ZapExt modifications and fork releases are maintained by
+Vespera modifications and fork releases are maintained by
 [Vitor (`@vitorhubdev`)](https://github.com/vitorhubdev).
 
 The original project is [ZapFast](https://github.com/crmne/zapfast), created
-and developed by its original authors and contributors. ZapExt is a derivative
+and developed by its original authors and contributors. Vespera is a derivative
 MIT-licensed mod/fork. The original license and copyright notice remain in
 [`LICENSE`](LICENSE).
 

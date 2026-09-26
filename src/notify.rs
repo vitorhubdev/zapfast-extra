@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 mod windows;
 
 #[cfg(any(target_os = "macos", test))]
-const MACOS_APPLICATION_ID: &str = "me.paolino.fastsapp";
+const MACOS_APPLICATION_ID: &str = "io.github.vitorhubdev.Vespera";
 
 #[cfg(target_os = "macos")]
 fn macos_application_ready() -> bool {
@@ -150,7 +150,7 @@ fn deliver(
         .appname("Vespera")
         .summary(title)
         .body(body)
-        .icon("zapfast")
+        .icon("vespera")
         .action("default", "Open");
     if let Some(picture) = picture {
         notification.image_path(&picture.to_string_lossy());

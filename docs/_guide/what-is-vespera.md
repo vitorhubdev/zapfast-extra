@@ -1,26 +1,26 @@
 ---
-title: What is ZapFast?
-description: Why ZapFast exists, what it supports, and its current limitations.
+title: What is Vespera?
+description: Why Vespera exists, what it supports, and its current limitations.
 redirect_from:
-  - /what-is-fastsapp/
+  - /what-is-vespera/
 nav_order: 0
 ---
 
-## Why ZapFast
+## Why Vespera
 
-WhatsApp has no official Linux app. ZapFast is a native WhatsApp client
+WhatsApp has no official Linux app. Vespera is a native WhatsApp client
 written in Rust with [egui](https://github.com/emilk/egui). It connects through
-[whatsapp-rust](https://github.com/oxidezap/whatsapp-rust). ZapFast is a
+[whatsapp-rust](https://github.com/oxidezap/whatsapp-rust). The upstream ZapFast project is a
 single binary with no browser engine and uses a layout similar to WhatsApp Web.
 In our Linux test, it opened in under a second and used about 150 MB of idle
 RAM, compared with 1.13 GB for WhatsApp Web and its Chromium processes.
 [See the measurements](/benchmarks/).
 
-![ZapFast showing a chat with a photo, a voice message, and a link preview](/screenshot.png)
+![Vespera showing a chat with a photo, a voice message, and a link preview](/screenshot.png)
 
 ## What it does
 
-- **Stores your chats.** ZapFast links as a companion device and stores
+- **Stores your chats.** Vespera links as a companion device and stores
   messages in one SQLite file. History remains after restart, and older
   messages are fetched from your phone as you scroll.
 - **Sends common message types.** Send formatted text, replies, edits,
@@ -31,7 +31,7 @@ RAM, compared with 1.13 GB for WhatsApp Web and its Chromium processes.
   play in place. The required audio and video decoders are built in.
 - **Uses consistent names.** Choose address-book names or public WhatsApp
   profile names for chats, mentions, replies, and notifications.
-- **Runs in the background.** Closing the window keeps ZapFast in the system
+- **Runs in the background.** Closing the window keeps Vespera in the system
   tray. Notifications can show the chat picture and open the chat. Muting a
   chat also mutes it on your phone.
 - **Copies message text.** Select part of a message or copy across messages
@@ -39,7 +39,7 @@ RAM, compared with 1.13 GB for WhatsApp Web and its Chromium processes.
 
 ## What it does not do yet
 
-ZapFast does not currently support:
+Vespera does not currently support:
 
 - Calls, status posts, communities, newsletters, and group administration.
 - Playing ordinary videos in the app; they open in your player. Voice
@@ -49,13 +49,13 @@ ZapFast does not currently support:
 - Colour emoji on Windows: Segoe UI Emoji is not a bitmap font, so emoji
   stay monochrome there for now.
 
-When reporting [an issue](https://github.com/crmne/zapfast/issues), include
+When reporting [an issue](https://github.com/vitorhubdev/zapfast-extra/issues), include
 what happened, what you expected, and when it happened. This helps match the
 problem to the log in the state directory.
 
 ## Account safety
 
-ZapFast is an **unofficial** client. Using it may be against WhatsApp's terms
+Vespera is an **unofficial** client. Using it may be against WhatsApp's terms
 of service. It uses WhatsApp's companion-device protocol, sends normal
 receipts, and does not automate or send messages in bulk. WhatsApp may still
 restrict accounts that use unofficial clients. Use an official client if you
@@ -63,11 +63,11 @@ cannot accept that risk.
 
 ## Prior art
 
-ZapFast connects through
+Vespera connects through
 [whatsapp-rust](https://github.com/oxidezap/whatsapp-rust), which grew out
 of the [whatsmeow](https://github.com/tulir/whatsmeow) lineage. WhatsApp
-Web defines the companion-device model. ZapFast is a sibling of
+Web defines the companion-device model. Vespera is a sibling of
 [Spotifast](https://spotifast.rocks), a native client for Spotify.
 
-ZapFast is an independent project, not affiliated with or endorsed by
+Vespera is an independent project, not affiliated with or endorsed by
 WhatsApp LLC or Meta. WhatsApp is a trademark of WhatsApp LLC.

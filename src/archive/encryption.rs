@@ -358,7 +358,7 @@ mod tests {
         let directory = directory();
         let path = directory.path().join("archive.db");
         let store = keyring_core::mock::Store::new().unwrap();
-        let entry = store.build("zapfast-test", "archive", None).unwrap();
+        let entry = store.build("vespera-test", "archive", None).unwrap();
         let key = key_from_entry(&path, &entry).unwrap();
         assert_eq!(*key, *key_from_entry(&path, &entry).unwrap());
         let connection = open(&path, &key).unwrap();

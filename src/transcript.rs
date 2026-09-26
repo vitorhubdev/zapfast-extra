@@ -12,7 +12,7 @@ pub struct CopyAnnotator {
 
 impl egui::plugin::Plugin for CopyAnnotator {
     fn debug_name(&self) -> &'static str {
-        "zapfast-transcript"
+        "vespera-transcript"
     }
 
     fn output_hook(&mut self, _ctx: &egui::Context, output: &mut egui::FullOutput) {

@@ -1097,7 +1097,7 @@ static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 
 fn spool_path() -> PathBuf {
     let id = SPOOL_SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("zapfast-audio-{}-{id}.pcm", std::process::id()))
+    std::env::temp_dir().join(format!("vespera-audio-{}-{id}.pcm", std::process::id()))
 }
 
 /// Deletes spool files whose owner process no longer exists.
@@ -1137,9 +1137,9 @@ fn sweep_spool_in(dir: &std::path::Path, liveness: &dyn Fn(u32) -> Liveness) {
     }
 }
 
-/// The owner pid in `zapfast-audio-{pid}-{seq}.pcm`, if well formed.
+/// The owner pid in `vespera-audio-{pid}-{seq}.pcm`, if well formed.
 fn spool_pid(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix("zapfast-audio-")?;
+    let rest = name.strip_prefix("vespera-audio-")?;
     let (pid, seq) = rest.split_once('-')?;
     let seq = seq.strip_suffix(".pcm")?;
     if seq.is_empty() || !seq.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -2139,7 +2139,7 @@ mod tests {
     fn stretch_spool_source_keeps_tone_and_ratio() {
         // The production file path: synthetic speech through a WAV
         // fixture, spool decode, then the same stretcher the sink pulls.
-        let dir = std::env::temp_dir().join(format!("zapfast-stretch-file-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-stretch-file-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("speech.wav");
         std::fs::write(&path, wav_48k(&speech(2.0))).expect("writes");
@@ -2184,7 +2184,7 @@ mod tests {
         // device opens later through restart, which reads the choice.
         // Restart, pause and the rebuilt source need a live sink, so
         // they stay covered by inspection, not by this headless test.
-        let dir = std::env::temp_dir().join(format!("zapfast-voice-nosink-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-voice-nosink-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("note.wav");
         std::fs::write(&path, wav_bytes()).expect("writes");
@@ -2200,7 +2200,7 @@ mod tests {
     fn deleting_the_playing_message_really_stops() {
         // Cessation by identity: the setup needs no audio device, only a
         // decodable file, because loading registers before output opens.
-        let dir = std::env::temp_dir().join(format!("zapfast-voice-stop-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-voice-stop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creates");
         let path = dir.join("note.wav");
         std::fs::write(&path, wav_bytes()).expect("writes");
@@ -2360,7 +2360,7 @@ mod tests {
     #[test]
     fn a_videos_soundtrack_decodes_when_its_metadata_leads() {
         // The clip is made here, so the test skips without ffmpeg.
-        let dir = std::env::temp_dir().join(format!("zapfast-video-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vespera-video-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("clip.mp4");
         let made = std::process::Command::new("ffmpeg")
@@ -2390,7 +2390,7 @@ mod tests {
 
     fn test_spool(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
-            "zapfast-audio-test-{}-{name}.pcm",
+            "vespera-audio-test-{}-{name}.pcm",
             std::process::id()
         ))
     }
@@ -2477,7 +2477,7 @@ mod tests {
     #[ignore = "makes a sound on this machine"]
     fn plays_a_clip_on_this_machine() {
         let dir = std::env::temp_dir();
-        let path = dir.join("zapfast-audio-test.ogg");
+        let path = dir.join("vespera-audio-test.ogg");
         let tone: Vec<f32> = (0..voice::RATE)
             .map(|i| (i as f32 * 330.0 * std::f32::consts::TAU / voice::RATE as f32).sin() * 0.3)
             .collect();
@@ -2527,12 +2527,12 @@ mod tests {
 
 #[test]
 fn spool_names_parse_to_their_owner() {
-    assert_eq!(spool_pid("zapfast-audio-123-4.pcm"), Some(123));
-    assert_eq!(spool_pid("zapfast-audio-123.pcm"), None);
-    assert_eq!(spool_pid("zapfast-audio--4.pcm"), None);
-    assert_eq!(spool_pid("zapfast-audio-12x-4.pcm"), None);
-    assert_eq!(spool_pid("zapfast-audio-123-.pcm"), None);
-    assert_eq!(spool_pid("zapfast-audio-123-x.pcm"), None);
+    assert_eq!(spool_pid("vespera-audio-123-4.pcm"), Some(123));
+    assert_eq!(spool_pid("vespera-audio-123.pcm"), None);
+    assert_eq!(spool_pid("vespera-audio--4.pcm"), None);
+    assert_eq!(spool_pid("vespera-audio-12x-4.pcm"), None);
+    assert_eq!(spool_pid("vespera-audio-123-.pcm"), None);
+    assert_eq!(spool_pid("vespera-audio-123-x.pcm"), None);
     assert_eq!(spool_pid("other-123-4.pcm"), None);
 }
 
@@ -2554,11 +2554,11 @@ fn sweep_keeps_live_spool_and_reaps_the_dead() {
     // handle is open the pid still names the (exited) process.
     drop(child);
     let dir = tempfile::tempdir().expect("scratch spool dir");
-    let orphan = dir.path().join(format!("zapfast-audio-{dead}-4242.pcm"));
+    let orphan = dir.path().join(format!("vespera-audio-{dead}-4242.pcm"));
     std::fs::write(&orphan, b"orphan").unwrap();
     let live = dir
         .path()
-        .join(format!("zapfast-audio-{}-4243.pcm", std::process::id()));
+        .join(format!("vespera-audio-{}-4243.pcm", std::process::id()));
     std::fs::write(&live, b"live").unwrap();
     sweep_spool_in(dir.path(), &process_liveness);
     assert!(!orphan.exists(), "dead owner's spool is reaped");
@@ -2570,7 +2570,7 @@ fn sweep_keeps_live_spool_and_reaps_the_dead() {
 #[test]
 fn sweep_keeps_spool_on_query_error() {
     let dir = tempfile::tempdir().expect("scratch spool dir");
-    let undecided = dir.path().join("zapfast-audio-424242-1.pcm");
+    let undecided = dir.path().join("vespera-audio-424242-1.pcm");
     std::fs::write(&undecided, b"undecided").unwrap();
     sweep_spool_in(dir.path(), &|_| Liveness::Unknown);
     assert!(undecided.exists(), "unknown state preserves the file");
@@ -2632,7 +2632,7 @@ fn sweep_ignores_stray_names_and_missing_dirs() {
     let dir = tempfile::tempdir().expect("scratch spool dir");
     let stray = dir.path().join("notes.txt");
     std::fs::write(&stray, b"not spool").unwrap();
-    let broken = dir.path().join("zapfast-audio-x-1.pcm");
+    let broken = dir.path().join("vespera-audio-x-1.pcm");
     std::fs::write(&broken, b"not a pid").unwrap();
     sweep_spool_in(dir.path(), &|_| Liveness::Dead);
     assert!(stray.exists(), "unrelated file is kept");
