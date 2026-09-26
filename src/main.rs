@@ -118,7 +118,7 @@ fn main() -> eframe::Result<()> {
         match single_instance::acquire(&waker) {
             single_instance::Outcome::Only(guard) => Some(guard),
             single_instance::Outcome::Surfaced => {
-                eprintln!("Vespera or FastsApp is already running; asked it to show its window");
+                eprintln!("Vespera is already running; asked it to show its window");
                 return Ok(());
             }
         }
@@ -128,11 +128,11 @@ fn main() -> eframe::Result<()> {
     } else {
         "warn,zapfast=info"
     };
-    // A demo must not create empty ZapFast directories that would prevent a
-    // later real launch from adopting the existing FastsApp session.
+    // A demo must not create empty directories that would block a later
+    // real launch from adopting an existing session.
     let dirs = if demo {
         paths::AppDirs::under(&std::env::temp_dir().join(format!(
-            "zapfast-demo-{}-{}",
+            "vespera-demo-{}-{}",
             std::process::id(),
             jiff::Timestamp::now().as_millisecond(),
         )))
@@ -335,7 +335,7 @@ fn log_panics(path: std::path::PathBuf) {
         previous(info);
         let thread = std::thread::current();
         let entry = format!(
-            "{} zapext {} on thread {:?}: {info}\n",
+            "{} vespera {} on thread {:?}: {info}\n",
             jiff::Timestamp::now(),
             APP_VERSION,
             thread.name().unwrap_or("unnamed"),
@@ -366,9 +366,9 @@ fn native_options(demo_persistence: Option<std::path::PathBuf>) -> eframe::Nativ
     let viewport = egui::ViewportBuilder::default()
         .with_title(app_title(demo))
         .with_app_id(if demo {
-            "zapfast-demo".to_owned()
+            format!("{}-demo", paths::APP_ID)
         } else {
-            std::env::var("FLATPAK_ID").unwrap_or_else(|_| "zapfast".to_owned())
+            std::env::var("FLATPAK_ID").unwrap_or_else(|_| paths::APP_ID.to_owned())
         })
         .with_inner_size(demo_size)
         .with_min_inner_size([720.0, 480.0])

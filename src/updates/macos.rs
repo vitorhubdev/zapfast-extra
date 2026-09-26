@@ -6,7 +6,8 @@ use anyhow::{Context, Result, ensure};
 
 use super::install::{self, Installation, Prepared};
 
-const IDENTIFIER: &str = "me.paolino.fastsapp";
+const IDENTIFIER: &str = "io.github.vitorhubdev.Vespera";
+const BUNDLE_EXECUTABLE: &str = "Contents/MacOS/vespera";
 
 pub(super) fn bundle_root(executable: &Path) -> Result<&Path> {
     let root = executable
@@ -15,7 +16,7 @@ pub(super) fn bundle_root(executable: &Path) -> Result<&Path> {
         .context("Missing app bundle")?;
     ensure!(
         root.extension().is_some_and(|extension| extension == "app")
-            && root.join("Contents/MacOS/zapfast") == executable,
+            && root.join(BUNDLE_EXECUTABLE) == executable,
         "Move the app to Applications, then open it to update."
     );
     Ok(root)
@@ -33,9 +34,9 @@ fn plist(bundle: &Path, key: &str) -> Result<String> {
 fn identity(bundle: &Path) -> Result<()> {
     ensure!(
         plist(bundle, "CFBundleIdentifier")? == IDENTIFIER
-            && plist(bundle, "CFBundleExecutable")? == "zapfast"
+            && plist(bundle, "CFBundleExecutable")? == "vespera"
             && plist(bundle, "CFBundlePackageType")? == "APPL",
-        "The download is not a ZapExt app bundle"
+        "The download is not a Vespera app bundle"
     );
     Ok(())
 }
@@ -56,7 +57,7 @@ pub(super) fn detect(executable: &Path) -> Result<()> {
     ];
     for prefix in prefixes.into_iter().flatten() {
         ensure!(
-            !["zapfast", "fastsapp"]
+            !["vespera"]
                 .iter()
                 .any(|name| cask_owns(&prefix.join("Caskroom").join(name), bundle)),
             "Update this installation with Homebrew."
@@ -71,15 +72,13 @@ fn cask_owns(cask: &Path, bundle: &Path) -> bool {
     };
     fs::read_dir(cask).is_ok_and(|versions| {
         versions.flatten().any(|version| {
-            ["ZapExt.app", "ZapFast.app", "FastsApp.app"]
-                .iter()
-                .any(|name| {
-                    version
-                        .path()
-                        .join(name)
-                        .canonicalize()
-                        .is_ok_and(|installed| installed == bundle)
-                })
+            ["Vespera.app"].iter().any(|name| {
+                version
+                    .path()
+                    .join(name)
+                    .canonicalize()
+                    .is_ok_and(|installed| installed == bundle)
+            })
         })
     })
 }
@@ -129,7 +128,7 @@ fn validate(bundle: &Path, installation: &Installation, version: &str) -> Result
             "macOS could not approve this update for launch"
         );
     }
-    install::verify_version(&bundle.join("Contents/MacOS/zapfast"), version)
+    install::verify_version(&bundle.join(BUNDLE_EXECUTABLE), version)
 }
 
 struct Mounted(PathBuf);
@@ -166,24 +165,16 @@ impl Mounted {
 }
 
 fn image_bundle(root: &Path) -> Result<PathBuf> {
-    // Prefer the current ZapExt bundle; still accept legacy names when
-    // upgrading from ZapFast/FastsApp or rolling back.
-    //
-    // A name that exists but is not a real directory (a symlink left by a disk
-    // image) is skipped so the next candidate can win, and only a disk image
-    // without any usable bundle is an error.
-    let mut invalid = false;
-    for name in ["ZapExt.app", "ZapFast.app", "FastsApp.app"] {
-        let bundle = root.join(name);
-        match fs::symlink_metadata(&bundle) {
-            Ok(metadata) if metadata.is_dir() => return Ok(bundle),
-            Ok(_) => invalid = true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    // Only the Vespera bundle is an update. A symlink is not a bundle.
+    let bundle = root.join("Vespera.app");
+    match fs::symlink_metadata(&bundle) {
+        Ok(metadata) if metadata.is_dir() => Ok(bundle),
+        Ok(_) => anyhow::bail!("The disk image has an invalid app bundle"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("The disk image has no Vespera app bundle")
         }
+        Err(error) => Err(error.into()),
     }
-    ensure!(!invalid, "The disk image has an invalid app bundle");
-    anyhow::bail!("The disk image has no ZapExt app bundle")
 }
 
 impl Drop for Mounted {
@@ -213,8 +204,7 @@ pub(super) fn replace(prepared: &Prepared) -> Result<()> {
     let backup = prepared.directory.join("previous");
     let mounted = Mounted::open(&prepared.payload)?;
     let source = mounted.bundle()?;
-    // Keep the downloaded bundle name (ZapExt for current releases) so
-    // staging never confuses a new bundle with a legacy one.
+    // Keep the downloaded bundle name so staging replaces the installed app.
     let candidate = prepared.directory.join(
         source
             .file_name()
@@ -261,40 +251,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn renamed_images_prefer_the_new_bundle_and_still_accept_old_images() {
+    fn disk_images_accept_only_the_vespera_bundle() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-image-test-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-image-test-{}", rand::random::<u64>()));
         fs::create_dir(&root).unwrap();
         assert!(image_bundle(&root).is_err());
-        let legacy = root.join("FastsApp.app");
-        fs::create_dir(&legacy).unwrap();
-        assert_eq!(image_bundle(&root).unwrap(), legacy);
-        let previous = root.join("ZapFast.app");
-        fs::create_dir(&previous).unwrap();
-        assert_eq!(image_bundle(&root).unwrap(), previous);
-        let current = root.join("ZapExt.app");
+        for name in crate::migrate::LEGACY_APP_BUNDLES {
+            let legacy = root.join(name);
+            fs::create_dir(&legacy).unwrap();
+            assert!(image_bundle(&root).is_err(), "{name}");
+            fs::remove_dir(&legacy).unwrap();
+        }
+        let current = root.join("Vespera.app");
         fs::create_dir(&current).unwrap();
         assert_eq!(image_bundle(&root).unwrap(), current);
-        fs::remove_dir_all(&current).unwrap();
-        fs::remove_dir(&previous).unwrap();
-        std::os::unix::fs::symlink(&legacy, &previous).unwrap();
-        // Symlinked legacy names are still rejected; the real legacy dir wins.
-        assert_eq!(image_bundle(&root).unwrap(), legacy);
+        fs::remove_dir(&current).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), &current).unwrap();
+        assert!(image_bundle(&root).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn homebrew_ownership_survives_the_bundle_rename() {
         let root =
-            std::env::temp_dir().join(format!("zapfast-cask-test-{}", rand::random::<u64>()));
-        for name in ["ZapExt.app", "ZapFast.app", "FastsApp.app"] {
-            let installed = root.join("Applications").join(name);
-            let version = root.join("Caskroom/zapfast/0.8.0");
-            fs::create_dir_all(&installed).unwrap();
-            fs::create_dir_all(&version).unwrap();
-            std::os::unix::fs::symlink(&installed, version.join(name)).unwrap();
-            assert!(cask_owns(&root.join("Caskroom/zapfast"), &installed));
-            assert!(!cask_owns(&root.join("Caskroom/unrelated"), &installed));
+            std::env::temp_dir().join(format!("vespera-cask-test-{}", rand::random::<u64>()));
+        let installed = root.join("Applications/Vespera.app");
+        let version = root.join("Caskroom/vespera/0.8.0");
+        fs::create_dir_all(&installed).unwrap();
+        fs::create_dir_all(&version).unwrap();
+        std::os::unix::fs::symlink(&installed, version.join("Vespera.app")).unwrap();
+        assert!(cask_owns(&root.join("Caskroom/vespera"), &installed));
+        assert!(!cask_owns(&root.join("Caskroom/unrelated"), &installed));
+        for name in crate::migrate::LEGACY_APP_BUNDLES {
+            let legacy = root.join("Applications").join(name);
+            fs::create_dir_all(&legacy).unwrap();
+            std::os::unix::fs::symlink(&legacy, version.join(name)).unwrap();
+            assert!(!cask_owns(&root.join("Caskroom/vespera"), &legacy));
         }
         fs::remove_dir_all(root).unwrap();
     }
@@ -302,7 +294,7 @@ mod tests {
     #[test]
     fn another_mount_attempt_leaves_the_previous_volume_alone() {
         let directory =
-            std::env::temp_dir().join(format!("zapfast-mount-test-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-mount-test-{}", rand::random::<u64>()));
         fs::create_dir(&directory).unwrap();
         let archive = directory.join("update.dmg");
         let first = mountpoint(&archive).unwrap();
@@ -320,14 +312,14 @@ mod tests {
     #[test]
     fn homebrew_app_symlink_does_not_claim_other_copies() {
         let directory =
-            std::env::temp_dir().join(format!("zapfast-cask-test-{}", rand::random::<u64>()));
-        let installed = directory.join("Applications/ZapFast.app");
-        let cask = directory.join("Caskroom/zapfast");
-        let copy = directory.join("dev/ZapFast.app");
+            std::env::temp_dir().join(format!("vespera-cask-test-{}", rand::random::<u64>()));
+        let installed = directory.join("Applications/Vespera.app");
+        let cask = directory.join("Caskroom/vespera");
+        let copy = directory.join("dev/Vespera.app");
         for path in [&installed, &copy, &cask.join("0.7.1")] {
             fs::create_dir_all(path).unwrap();
         }
-        std::os::unix::fs::symlink(&installed, cask.join("0.7.1/ZapFast.app")).unwrap();
+        std::os::unix::fs::symlink(&installed, cask.join("0.7.1/Vespera.app")).unwrap();
         assert!(cask_owns(&cask, &installed));
         assert!(!cask_owns(&cask, &copy));
         fs::remove_dir_all(directory).unwrap();
@@ -336,20 +328,20 @@ mod tests {
     #[test]
     fn rollback_restores_resources_and_executable_together() {
         let directory =
-            std::env::temp_dir().join(format!("zapfast-mac-test-{}", rand::random::<u64>()));
-        let app = directory.join("ZapFast.app");
+            std::env::temp_dir().join(format!("vespera-mac-test-{}", rand::random::<u64>()));
+        let app = directory.join("Vespera.app");
         fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
-        fs::write(app.join("Contents/MacOS/zapfast"), b"new executable").unwrap();
+        fs::write(app.join("Contents/MacOS/vespera"), b"new executable").unwrap();
         fs::write(app.join("Contents/Info.plist"), b"new metadata").unwrap();
         let installation = Installation {
-            executable: app.join("Contents/MacOS/zapfast"),
+            executable: app.join("Contents/MacOS/vespera"),
             kind: install::Kind::MacBundle,
         };
         let stage = install::staging(&installation).unwrap();
         assert_eq!(stage.parent(), Some(directory.as_path()));
         let backup = stage.join("previous");
         fs::create_dir_all(backup.join("Contents/MacOS")).unwrap();
-        fs::write(backup.join("Contents/MacOS/zapfast"), b"old executable").unwrap();
+        fs::write(backup.join("Contents/MacOS/vespera"), b"old executable").unwrap();
         fs::write(backup.join("Contents/Info.plist"), b"old metadata").unwrap();
         let prepared = Prepared {
             installation,
@@ -360,7 +352,7 @@ mod tests {
         };
         restore(&prepared).unwrap();
         assert_eq!(
-            fs::read(app.join("Contents/MacOS/zapfast")).unwrap(),
+            fs::read(app.join("Contents/MacOS/vespera")).unwrap(),
             b"old executable"
         );
         assert_eq!(
@@ -379,27 +371,27 @@ mod tests {
     fn only_expected_bundle_layout_is_accepted() {
         assert_eq!(
             bundle_root(Path::new(
-                "/Applications/ZapFast.app/Contents/MacOS/zapfast"
+                "/Applications/Vespera.app/Contents/MacOS/vespera"
             ))
             .unwrap(),
-            Path::new("/Applications/ZapFast.app")
+            Path::new("/Applications/Vespera.app")
         );
         for path in [
-            "/Applications/ZapFast.app/zapfast",
-            "/tmp/Contents/MacOS/zapfast",
-            "/usr/local/bin/zapfast",
+            "/Applications/Vespera.app/vespera",
+            "/tmp/Contents/MacOS/vespera",
+            "/usr/local/bin/vespera",
         ] {
             assert!(bundle_root(Path::new(path)).is_err());
         }
         assert!(
             detect(Path::new(
-                "/Volumes/ZapFast/ZapFast.app/Contents/MacOS/zapfast"
+                "/Volumes/Vespera/Vespera.app/Contents/MacOS/vespera"
             ))
             .is_err()
         );
         assert!(
             detect(Path::new(
-                "/private/var/folders/test/AppTranslocation/test/ZapFast.app/Contents/MacOS/zapfast"
+                "/private/var/folders/test/AppTranslocation/test/Vespera.app/Contents/MacOS/vespera"
             ))
             .is_err()
         );

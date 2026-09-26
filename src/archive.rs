@@ -12,6 +12,7 @@ use crate::model::{Chat, ChatKind, Contact, Content, Delivery, LastMessage, Mess
 mod encryption;
 mod polls;
 mod receipts;
+pub(crate) use encryption::{finish_key_migration, note_key_origin};
 pub use polls::PollVote;
 
 /// Recent phone sticker metadata, last-used time, and optional local file.

@@ -1,11 +1,15 @@
-//! Where ZapFast keeps its files.
+//! Where Vespera keeps its files.
 //!
 //! Configuration, session state, and caches use separate standard platform
-//! directories. Clearing a cache does not remove device keys.
+//! directories. Clearing a cache does not remove device keys. A previous
+//! install is moved once by [`AppDirs::adopt_previous_names`].
 
 use std::path::{Path, PathBuf};
 
 use directories::ProjectDirs;
+
+/// eframe persistence id for this install.
+pub const APP_ID: &str = "vespera";
 
 #[derive(Clone, Debug)]
 pub struct AppDirs {
@@ -16,22 +20,22 @@ pub struct AppDirs {
 
 impl AppDirs {
     pub fn discover() -> Self {
-        match Self::of("zapfast") {
+        match Self::located("io.github", "vitorhubdev", APP_ID) {
             Some(dirs) => dirs,
             None => {
                 let fallback = std::env::current_dir().unwrap_or_default();
                 Self {
-                    config: fallback.join("zapfast-config"),
-                    state: fallback.join("zapfast-state"),
-                    cache: fallback.join("zapfast-cache"),
+                    config: fallback.join("vespera-config"),
+                    state: fallback.join("vespera-state"),
+                    cache: fallback.join("vespera-cache"),
                 }
             }
         }
     }
 
-    /// Standard platform directories for the app.
-    fn of(name: &str) -> Option<Self> {
-        let project = ProjectDirs::from("me", "paolino", name)?;
+    /// Standard platform directories for one application id.
+    fn located(qualifier: &str, organization: &str, application: &str) -> Option<Self> {
+        let project = ProjectDirs::from(qualifier, organization, application)?;
         Some(Self {
             config: project.config_dir().to_path_buf(),
             state: project
@@ -42,23 +46,54 @@ impl AppDirs {
         })
     }
 
-    /// Adopts earlier names, newest first, without replacing existing data.
-    /// Call only after acquiring the instance guard, and never for demo runs.
+    /// Moves a previous install into these directories, newest first.
+    ///
+    /// An existing destination is left as it is. Call only after acquiring the
+    /// instance guard, and never for demo runs. The archive key is recorded
+    /// before the state directory moves and finished by
+    /// [`crate::archive::finish_key_migration`].
     pub fn adopt_previous_names(&self) -> std::io::Result<()> {
-        for name in ["fastsapp", "fastwhatsapp"] {
-            if let Some(old) = Self::of(name) {
-                self.adopt(&old)?;
+        let mut previous = Vec::new();
+        for name in crate::migrate::LEGACY_APP_NAMES {
+            if let Some(old) = Self::located(
+                crate::migrate::LEGACY_QUALIFIER,
+                crate::migrate::LEGACY_ORGANIZATION,
+                name,
+            ) {
+                previous.push(old);
             }
-            if let (Some(from), Some(to)) =
-                (eframe::storage_dir(name), eframe::storage_dir("zapfast"))
+        }
+        let mut window_state = Vec::new();
+        for name in crate::migrate::LEGACY_EFRAME_IDS {
+            if let (Some(from), Some(to)) = (eframe::storage_dir(name), eframe::storage_dir(APP_ID))
             {
-                adopt_directory(&from, &to)?;
+                window_state.push((from, to));
             }
+        }
+        self.adopt_predecessors(&previous, &window_state)?;
+        crate::archive::finish_key_migration(&self.state).map_err(std::io::Error::other)?;
+        Ok(())
+    }
+
+    /// Moves `predecessors` and the paired eframe folders into this install.
+    pub fn adopt_predecessors(
+        &self,
+        predecessors: &[Self],
+        window_state: &[(PathBuf, PathBuf)],
+    ) -> std::io::Result<()> {
+        for old in predecessors {
+            self.adopt(old)?;
+        }
+        for (from, to) in window_state {
+            adopt_directory(from, to)?;
         }
         Ok(())
     }
 
     fn adopt(&self, old: &Self) -> std::io::Result<()> {
+        if old.state.is_dir() && !self.state.try_exists()? {
+            crate::archive::note_key_origin(&old.state)?;
+        }
         for (from, to) in [
             (&old.config, &self.config),
             (&old.state, &self.state),
@@ -95,7 +130,7 @@ impl AppDirs {
 
     /// Current-run log, replaced at startup.
     pub fn log_file(&self) -> PathBuf {
-        self.state.join("zapfast.log")
+        self.state.join("vespera.log")
     }
 
     /// Panic log written before process exit.
@@ -192,7 +227,7 @@ mod tests {
 
     fn root(name: &str) -> PathBuf {
         let root =
-            std::env::temp_dir().join(format!("zapfast-paths-{name}-{}", std::process::id()));
+            std::env::temp_dir().join(format!("vespera-paths-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root
@@ -251,10 +286,10 @@ mod tests {
 
     #[test]
     fn rename_preserves_session_archive_settings_and_cached_files() {
-        for name in ["fastsapp", "fastwhatsapp"] {
+        for name in ["previous", "older"] {
             let root = root(name);
             let old = AppDirs::under(&root.join(name));
-            let new = AppDirs::under(&root.join("zapfast"));
+            let new = AppDirs::under(&root.join("vespera"));
             old.ensure().unwrap();
             for path in [
                 old.settings_file(),
@@ -291,9 +326,9 @@ mod tests {
     #[test]
     fn newest_data_wins_without_merging_archives() {
         let root = root("precedence");
-        let new = AppDirs::under(&root.join("zapfast"));
-        let recent = AppDirs::under(&root.join("fastsapp"));
-        let oldest = AppDirs::under(&root.join("fastwhatsapp"));
+        let new = AppDirs::under(&root.join("vespera"));
+        let recent = AppDirs::under(&root.join("previous"));
+        let oldest = AppDirs::under(&root.join("older"));
         recent.ensure().unwrap();
         oldest.ensure().unwrap();
         std::fs::create_dir_all(&new.config).unwrap();
@@ -349,6 +384,34 @@ mod tests {
         std::fs::remove_file(root.join("blocked")).unwrap();
         new.adopt(&old).unwrap();
         assert_eq!(std::fs::read(new.session_db()).unwrap(), b"session");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_previous_tree_and_its_window_state_move_with_the_file_inside() {
+        let root = root("move-file");
+        let old = AppDirs::under(&root.join("previous"));
+        let new = AppDirs::under(&root.join("vespera"));
+        old.ensure().unwrap();
+        let kept = old.state.join("session-note.txt");
+        std::fs::write(&kept, b"still here").unwrap();
+        let from_window = root.join("window-old");
+        let to_window = root.join("window-new");
+        std::fs::create_dir_all(&from_window).unwrap();
+        std::fs::write(from_window.join("app.json"), b"bounds").unwrap();
+        new.adopt_predecessors(&[old], &[(from_window.clone(), to_window.clone())])
+            .unwrap();
+        new.adopt_predecessors(&[], &[(from_window.clone(), to_window.clone())])
+            .unwrap();
+        assert_eq!(
+            std::fs::read(new.state.join("session-note.txt")).unwrap(),
+            b"still here"
+        );
+        assert_eq!(
+            std::fs::read(to_window.join("app.json")).unwrap(),
+            b"bounds"
+        );
+        assert!(!from_window.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

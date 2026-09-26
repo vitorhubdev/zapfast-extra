@@ -109,7 +109,7 @@ jobs:
           else
             cp "target/${{ matrix.target }}/release/zapext" "dist/$name/"
           fi
-          cp README.md LICENSE packaging/zapfast-portable.txt "dist/$name/"
+          cp README.md LICENSE packaging/vespera-portable.txt "dist/$name/"
           if [ "${{ runner.os }}" = "Linux" ]; then
             # Desktop integration for package builds and hand-installs.
             cp --parents packaging/applications/zapfast.desktop contrib/omarchy/zapfast.json.tpl contrib/omarchy/zapfast-theme "dist/$name/"

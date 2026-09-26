@@ -10,15 +10,27 @@
 const COVERED: &[(&str, &str)] = &[
     ("src/main.rs", include_str!("../src/main.rs")),
     ("src/app.rs", include_str!("../src/app.rs")),
-    ("src/archive/encryption.rs", include_str!("../src/archive/encryption.rs")),
-    ("src/backend/worker.rs", include_str!("../src/backend/worker.rs")),
+    (
+        "src/archive/encryption.rs",
+        include_str!("../src/archive/encryption.rs"),
+    ),
+    (
+        "src/backend/worker.rs",
+        include_str!("../src/backend/worker.rs"),
+    ),
     ("src/demo.rs", include_str!("../src/demo.rs")),
     ("src/macos.rs", include_str!("../src/macos.rs")),
     ("src/notify.rs", include_str!("../src/notify.rs")),
-    ("src/notify/windows.rs", include_str!("../src/notify/windows.rs")),
+    (
+        "src/notify/windows.rs",
+        include_str!("../src/notify/windows.rs"),
+    ),
     ("src/tray.rs", include_str!("../src/tray.rs")),
     ("src/tray_native.rs", include_str!("../src/tray_native.rs")),
-    ("src/ui/conversation.rs", include_str!("../src/ui/conversation.rs")),
+    (
+        "src/ui/conversation.rs",
+        include_str!("../src/ui/conversation.rs"),
+    ),
     ("src/ui/dialogs.rs", include_str!("../src/ui/dialogs.rs")),
     ("src/ui/keys.rs", include_str!("../src/ui/keys.rs")),
     ("src/ui/login.rs", include_str!("../src/ui/login.rs")),
@@ -29,13 +41,7 @@ const COVERED: &[(&str, &str)] = &[
 ];
 
 /// Quoted literals that keep an old name on purpose.
-const ALLOWED: &[(&str, &str, &str)] = &[
-    (
-        "src/backend/worker.rs",
-        "with_os(\"ZapExt\")",
-        "pairing device name; renaming it changes what WhatsApp sees, not a label",
-    ),
-];
+const ALLOWED: &[(&str, &str, &str)] = &[];
 
 /// Double-quoted runs on a single line. Escapes inside a literal are not
 /// tracked; none of the covered names sit next to an escaped quote.

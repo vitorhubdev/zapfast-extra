@@ -1,9 +1,8 @@
 //! Single-instance coordination over a loopback socket.
 //!
-//! A later launch closes the running ZapExt and takes its place. A current
-//! build is asked to quit. An older build, which only understands show, is
-//! stopped when the listening program file is one of ours. The operating
-//! system releases the loopback port when that process ends.
+//! A later launch closes the running Vespera and takes its place. A current
+//! build is asked to quit. The operating system releases the loopback port
+//! when that process ends.
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -11,12 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Fixed high loopback port outside the ephemeral range.
-const INSTANCE_PORT: u16 = 47_119;
+const INSTANCE_PORT: u16 = 54_231;
 
-/// Stable wire identity shared with FastsApp so upgrades surface a running
-/// older copy before migrating its session files.
-const PREFIX: &str = "fastsapp:";
-const OK_REPLY: &str = "fastsapp:ok";
+/// Wire identity of this build. The port changed with the name, so a previous
+/// install cannot answer on it.
+const PREFIX: &str = "vespera:";
+const OK_REPLY: &str = "vespera:ok";
 
 pub enum Outcome {
     /// This process owns the instance guard.
@@ -49,7 +48,7 @@ impl Guard {
     }
 }
 
-/// Sends one request and verifies the ZapFast reply prefix.
+/// Sends one request and verifies the Vespera reply prefix.
 pub fn send(verb: &str) -> std::io::Result<()> {
     send_to(INSTANCE_PORT, verb)
 }
@@ -66,7 +65,7 @@ fn send_to(port: u16, verb: &str) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "the port is held by something other than ZapFast",
+            "the port is held by something other than Vespera",
         ))
     }
 }
@@ -75,11 +74,11 @@ pub fn acquire(waker: &crate::backend::Waker) -> Outcome {
     let listener = match bind_instance(INSTANCE_PORT) {
         Ok(listener) => listener,
         Err(_) => {
-            // Replacement failed. Surface a ZapFast holder, otherwise run anyway.
+            // Replacement failed. Surface a Vespera holder, otherwise run anyway.
             if send("show").is_ok() {
                 return Outcome::Surfaced;
             }
-            log::warn!("port {INSTANCE_PORT} is busy but not with ZapFast; running unguarded");
+            log::warn!("port {INSTANCE_PORT} is busy but not with Vespera; running unguarded");
             return Outcome::Only(Guard {
                 commands: Default::default(),
             });
@@ -104,12 +103,12 @@ fn bind_instance(port: u16) -> std::io::Result<TcpListener> {
         && stop_process(pid)
         && let Some(listener) = wait_for_bind(port, Duration::from_secs(3))
     {
-        log::info!("closed the previous ZapExt process {pid}");
+        log::info!("closed the previous Vespera process {pid}");
         return Ok(listener);
     }
     Err(std::io::Error::new(
         std::io::ErrorKind::AddrInUse,
-        "the running ZapExt did not release its port",
+        "the running Vespera did not release its port",
     ))
 }
 
@@ -133,7 +132,7 @@ fn listen(listener: TcpListener, waker: &crate::backend::Waker) -> Guard {
     let commands = Arc::clone(&guard.commands);
     let waker = waker.clone();
     let spawned = std::thread::Builder::new()
-        .name("zapfast-instance".to_owned())
+        .name("vespera-instance".to_owned())
         .spawn(move || serve(listener, &commands, &waker));
     if let Err(error) = spawned {
         log::warn!("cannot listen for other launches: {error}");
@@ -152,7 +151,7 @@ fn serve(
         let Some(line) = read_line(&mut stream) else {
             continue;
         };
-        // Ignore clients without the ZapFast prefix.
+        // Ignore clients without the Vespera prefix.
         if let Some(command) = parse(&line) {
             let _ = stream.write_all(format!("{OK_REPLY}\n").as_bytes());
             commands
@@ -204,11 +203,11 @@ fn is_instance_file_name(file_name: &std::ffi::OsStr) -> bool {
         .split_once('-')
         .map(|(base, suffix)| (base, Some(suffix)))
         .unwrap_or((stem, None));
-    if !matches!(base, "zapext" | "zapfast" | "fastsapp") {
+    if base != "vespera" {
         return false;
     }
-    // `zapext-1.0.95.exe` is a copy of this program. A test binary such as
-    // `zapfast-<hash>.exe` is not.
+    // `vespera-1.0.106.exe` is a copy of this program. A test binary such as
+    // `vespera-<hash>.exe` is not.
     suffix.is_none_or(is_version_suffix)
 }
 
@@ -490,11 +489,11 @@ mod tests {
 
     #[test]
     fn only_our_own_show_is_understood() {
-        assert_eq!(parse("fastsapp:show\n"), Some(ControlCommand::Show));
-        assert_eq!(parse("fastsapp:show"), Some(ControlCommand::Show));
-        assert_eq!(parse("fastsapp:quit\n"), Some(ControlCommand::Quit));
+        assert_eq!(parse("vespera:show\n"), Some(ControlCommand::Show));
+        assert_eq!(parse("vespera:show"), Some(ControlCommand::Show));
+        assert_eq!(parse("vespera:quit\n"), Some(ControlCommand::Quit));
         assert_eq!(parse("GET / HTTP/1.1"), None);
-        assert_eq!(parse("fastsapp:frobnicate"), None);
+        assert_eq!(parse("vespera:frobnicate"), None);
         assert_eq!(parse(""), None);
     }
 
@@ -510,7 +509,7 @@ mod tests {
             std::thread::spawn(move || serve(listener, &commands, &waker))
         };
 
-        send_to(port, "show").expect("answered as ZapFast");
+        send_to(port, "show").expect("answered as Vespera");
         // Unknown verbs close the connection without a reply.
         assert!(send_to(port, "frobnicate").is_err());
 
@@ -522,17 +521,23 @@ mod tests {
     }
 
     #[test]
-    fn instance_names_cover_the_rename_history() {
+    fn instance_names_are_vespera_only() {
         use std::ffi::OsStr;
-        assert!(is_instance_file_name(OsStr::new("zapext.exe")));
-        assert!(is_instance_file_name(OsStr::new("ZapFast.EXE")));
-        assert!(is_instance_file_name(OsStr::new("fastsapp")));
-        assert!(is_instance_file_name(OsStr::new("zapext-1.0.95.exe")));
-        assert!(is_instance_file_name(OsStr::new("zapext-1.0.96.exe")));
+        assert!(is_instance_file_name(OsStr::new("vespera.exe")));
+        assert!(is_instance_file_name(OsStr::new("Vespera.EXE")));
+        assert!(is_instance_file_name(OsStr::new("vespera")));
+        assert!(is_instance_file_name(OsStr::new("vespera-1.0.106.exe")));
         assert!(!is_instance_file_name(OsStr::new(
-            "zapfast-7904565fa5219df1.exe"
+            "vespera-7904565fa5219df1.exe"
         )));
         assert!(!is_instance_file_name(OsStr::new("notepad.exe")));
+        for name in crate::migrate::LEGACY_EXECUTABLES {
+            assert!(
+                !is_instance_file_name(OsStr::new(name)),
+                "{name} is not this program"
+            );
+            assert!(!is_instance_file_name(OsStr::new(&format!("{name}.exe"))));
+        }
     }
 
     #[test]
@@ -552,8 +557,8 @@ mod tests {
                 return;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            if read_line(&mut stream).as_deref() == Some("fastsapp:quit") {
-                let _ = stream.write_all(b"fastsapp:ok\n");
+            if read_line(&mut stream).as_deref() == Some("vespera:quit") {
+                let _ = stream.write_all(b"vespera:ok\n");
             }
             drop(listener);
         });
@@ -566,8 +571,9 @@ mod tests {
     /// miscount can never hide behind a platform gate again.
     #[test]
     fn proc_tcp_inode_reads_a_listener() {
-        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:B80F 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0\n";
-        assert_eq!(proc_tcp_listen_inode(table, 47_119), Some(4242));
+        let table = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 0100007F:D3D7 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0\n";
+        assert_eq!(INSTANCE_PORT, 54_231);
+        assert_eq!(proc_tcp_listen_inode(table, INSTANCE_PORT), Some(4242));
         assert_eq!(proc_tcp_listen_inode(table, 1), None);
     }
 
@@ -575,12 +581,12 @@ mod tests {
     fn process_names_keep_only_the_basename() {
         use std::ffi::OsString;
         assert_eq!(
-            process_name_basename("zapext"),
-            Some(OsString::from("zapext"))
+            process_name_basename("vespera"),
+            Some(OsString::from("vespera"))
         );
         assert_eq!(
-            process_name_basename("/Applications/ZapExt.app/Contents/MacOS/zapext"),
-            Some(OsString::from("zapext"))
+            process_name_basename("/Applications/Vespera.app/Contents/MacOS/vespera"),
+            Some(OsString::from("vespera"))
         );
         assert_eq!(process_name_basename(""), None);
         assert_eq!(process_name_basename("   \n"), None);

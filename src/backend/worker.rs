@@ -265,8 +265,8 @@ fn retriable_download(error: &str) -> bool {
 }
 
 /// App version in WhatsApp device-property format.
-/// Uses the ZapExt fork version so new pairings show the fork identity;
-/// existing pairings keep their old name until relinking (see README Files).
+/// New pairings show Vespera. An existing link keeps its old device name
+/// until the phone is paired again.
 fn app_version() -> wa::device_props::AppVersion {
     let mut parts = crate::updates::zapext_version()
         .split('.')
@@ -1146,7 +1146,7 @@ impl Worker {
             // WhatsApp reads the linked-device name, version, and icon at pairing.
             .with_device_props(
                 DevicePropsOverride::new()
-                    .with_os("ZapExt")
+                    .with_os("Vespera")
                     .with_version(app_version())
                     .with_platform_type(wa::device_props::PlatformType::DESKTOP),
             )

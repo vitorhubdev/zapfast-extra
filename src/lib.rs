@@ -1,4 +1,5 @@
-//! ZapFast internals exposed for diagnostics and tests.
+//! Vespera internals exposed for diagnostics and tests.
+//! The desktop client is a fork of ZapFast (crmne/zapfast, MIT).
 
 pub mod animation;
 pub mod app;
@@ -16,6 +17,7 @@ pub mod image_cache;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod markup;
+pub mod migrate;
 pub mod model;
 pub mod notify;
 pub mod paths;

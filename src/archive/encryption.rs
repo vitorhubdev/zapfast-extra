@@ -29,22 +29,147 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     fs::create_dir_all(parent)?;
     // Separate profiles must not overwrite each other's keys. The credential
     // label contains a digest, never a user path, phone number or message data.
-    let digest = Sha256::digest(parent.canonicalize()?.as_os_str().as_encoded_bytes());
-    let identity = format!(
+    let canonical = parent.canonicalize()?;
+    let identity = identity_for_canonical_bytes(canonical.as_os_str().as_encoded_bytes());
+    let entry = credential(crate::migrate::KEYRING_SERVICE, &identity)?;
+    key_from_entry(path, &entry)
+}
+
+fn identity_for_canonical_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!(
         "archive-{}",
         digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>()
+    )
+}
+
+/// Written into the state directory before it is renamed. The bytes are the
+/// canonical path the previous key was stored under.
+const ORIGIN_FILE: &str = "vespera-key-origin.bin";
+
+/// Records the canonical state path so the archive key can be found after the
+/// directory moves. A note already on disk is kept: it is the original path.
+pub(crate) fn note_key_origin(state: &Path) -> std::io::Result<()> {
+    let note = state.join(ORIGIN_FILE);
+    if note.is_file() {
+        return Ok(());
+    }
+    let canonical = state.canonicalize()?;
+    fs::write(note, canonical.as_os_str().as_encoded_bytes())
+}
+
+/// Copies the archive key from the previous keyring service to the current one.
+///
+/// The previous entry is removed only after the archive opens with the new
+/// entry. A second call with no note does nothing. Any failure leaves the
+/// previous entry in place.
+pub(crate) fn finish_key_migration(state: &Path) -> Result<()> {
+    let note = state.join(ORIGIN_FILE);
+    if !note.is_file() {
+        return Ok(());
+    }
+    let old_bytes = fs::read(&note)
+        .context("Could not read the saved archive location. Nothing was deleted.")?;
+    if old_bytes.is_empty() {
+        anyhow::bail!("The saved archive location is empty. Nothing was deleted.");
+    }
+    let new_path = state
+        .canonicalize()
+        .context("Could not resolve the new archive folder. Nothing was deleted.")?;
+    let old_identity = identity_for_canonical_bytes(&old_bytes);
+    let new_identity = identity_for_canonical_bytes(new_path.as_os_str().as_encoded_bytes());
+    let old_entry = credential(crate::migrate::LEGACY_KEYRING_SERVICE, &old_identity)?;
+    let new_entry = credential(crate::migrate::KEYRING_SERVICE, &new_identity)?;
+    let secret = match old_entry.get_secret() {
+        Ok(secret) => Zeroizing::new(secret),
+        Err(keyring_core::Error::NoEntry) => {
+            if let Ok(existing) = new_entry.get_secret()
+                && existing.len() == 32
+            {
+                let mut key = Zeroizing::new([0u8; 32]);
+                key.copy_from_slice(&existing);
+                if archive_opens(state, &key).is_ok() {
+                    fs::remove_file(&note).context(
+                        "The archive key is already in place, but the migration note remains. Restart Vespera.",
+                    )?;
+                    return Ok(());
+                }
+            }
+            if archive_needs_key(state)? {
+                anyhow::bail!(
+                    "The message archive is encrypted, but its previous key is not in the keyring. Nothing was deleted."
+                );
+            }
+            fs::remove_file(&note).context(
+                "There was no previous archive key, but the migration note could not be removed.",
+            )?;
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(error)
+                .context("Could not read the previous archive key. Nothing was deleted.");
+        }
+    };
+    if secret.len() != 32 {
+        anyhow::bail!("The previous archive key is invalid. Nothing was deleted.");
+    }
+    new_entry.set_secret(&secret).context(
+        "Could not store the archive key under the new name. The previous key was kept.",
+    )?;
+    let saved = Zeroizing::new(
+        new_entry
+            .get_secret()
+            .context("Could not read the new archive key back. The previous key was kept.")?,
     );
+    if saved.as_slice() != secret.as_slice() {
+        anyhow::bail!(
+            "The new archive key does not match the previous one. The previous key was kept."
+        );
+    }
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(&secret);
+    archive_opens(state, &key)
+        .context("The archive did not open with the moved key. The previous key was kept.")?;
+    old_entry.delete_credential().context(
+        "The archive opened with the new key, but the previous keyring entry is still there. Restart Vespera to remove it.",
+    )?;
+    fs::remove_file(&note).context(
+        "The key was moved, but the migration note could not be removed. Restart Vespera.",
+    )?;
+    Ok(())
+}
+
+fn archive_needs_key(state: &Path) -> Result<bool> {
+    let path = state.join("archive.db");
+    if !path.is_file() {
+        return Ok(false);
+    }
+    Ok(fs::metadata(&path)?.len() > 0 && !plaintext(&path)?)
+}
+
+fn archive_opens(state: &Path, key: &[u8; 32]) -> Result<()> {
+    let path = state.join("archive.db");
+    if !path.is_file() || fs::metadata(&path)?.len() == 0 || plaintext(&path)? {
+        return Ok(());
+    }
+    drop(keyed(&path, key)?);
+    Ok(())
+}
+
+fn credential(service: &str, identity: &str) -> Result<keyring_core::Entry> {
     // Tests share one mock so a dropped archive can be opened again without
     // a desktop secret service. Shipping builds keep the OS keyring.
     #[cfg(test)]
-    let entry = test_store()?
-        .build("rocks.zapfast.ZapFast", &identity, None)
-        .context("The OS keyring could not open Vespera's archive key")?;
+    {
+        return test_store()?
+            .build(service, identity, None)
+            .context("The OS keyring could not open Vespera's archive key");
+    }
     #[cfg(not(test))]
-    let entry = {
+    {
         #[cfg(target_os = "linux")]
         let store = zbus_secret_service_keyring_store::Store::new();
         #[cfg(target_os = "macos")]
@@ -53,10 +178,9 @@ pub(super) fn key_for(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
         let store = windows_native_keyring_store::Store::new();
         let store = store.context("Unlock your OS keyring and restart Vespera")?;
         store
-            .build("rocks.zapfast.ZapFast", &identity, None)
-            .context("The OS keyring could not open Vespera's archive key")?
-    };
-    key_from_entry(path, &entry)
+            .build(service, identity, None)
+            .context("The OS keyring could not open Vespera's archive key")
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +497,149 @@ mod tests {
         assert_eq!(read_secret(&Connection::open(&path).unwrap()), "keep me");
         fs::remove_dir(path.with_extension("db.encrypting")).unwrap();
         assert_eq!(read_secret(&open(&path, &[9; 32]).unwrap()), "keep me");
+    }
+
+    fn store_key(service: &str, state: &Path, key: &[u8; 32]) {
+        let canonical = state.canonicalize().unwrap();
+        let identity = identity_for_canonical_bytes(canonical.as_os_str().as_encoded_bytes());
+        test_store()
+            .unwrap()
+            .build(service, &identity, None)
+            .unwrap()
+            .set_secret(key)
+            .unwrap();
+    }
+
+    fn entry(service: &str, state: &Path) -> keyring_core::Entry {
+        let canonical = state.canonicalize().unwrap();
+        let identity = identity_for_canonical_bytes(canonical.as_os_str().as_encoded_bytes());
+        test_store()
+            .unwrap()
+            .build(service, &identity, None)
+            .unwrap()
+    }
+
+    /// Encrypts `archive.db` with `key` inside `state`.
+    fn encrypted_archive(state: &Path, key: &[u8; 32]) {
+        let path = state.join("archive.db");
+        let source = Connection::open(&path).unwrap();
+        source
+            .execute_batch(
+                "CREATE TABLE secrets(value TEXT); INSERT INTO secrets VALUES ('moved history');",
+            )
+            .unwrap();
+        drop(source);
+        drop(open(&path, key).unwrap());
+    }
+
+    #[test]
+    fn the_moved_key_opens_the_archive_and_a_second_run_does_nothing() {
+        let root = directory();
+        let old = root.path().join("old-state");
+        let new = root.path().join("new-state");
+        fs::create_dir_all(&old).unwrap();
+        let key = [4u8; 32];
+        encrypted_archive(&old, &key);
+        store_key(crate::migrate::LEGACY_KEYRING_SERVICE, &old, &key);
+        note_key_origin(&old).unwrap();
+        let old_canonical = fs::read(old.join(ORIGIN_FILE)).unwrap();
+        fs::rename(&old, &new).unwrap();
+        finish_key_migration(&new).unwrap();
+        finish_key_migration(&new).unwrap();
+        assert!(!new.join(ORIGIN_FILE).exists());
+        let old_identity = identity_for_canonical_bytes(&old_canonical);
+        let old_entry = test_store()
+            .unwrap()
+            .build(crate::migrate::LEGACY_KEYRING_SERVICE, &old_identity, None)
+            .unwrap();
+        assert!(matches!(
+            old_entry.get_secret(),
+            Err(keyring_core::Error::NoEntry)
+        ));
+        let opened = key_for(&new.join("archive.db")).unwrap();
+        assert_eq!(opened.as_slice(), &key);
+        assert_eq!(
+            read_secret(&open(&new.join("archive.db"), &opened).unwrap()),
+            "moved history"
+        );
+    }
+
+    #[test]
+    fn a_failed_key_move_keeps_the_previous_entry() {
+        let root = directory();
+        let old = root.path().join("old-state");
+        let new = root.path().join("new-state");
+        fs::create_dir_all(&old).unwrap();
+        let key = [5u8; 32];
+        encrypted_archive(&old, &key);
+        store_key(crate::migrate::LEGACY_KEYRING_SERVICE, &old, &key);
+        note_key_origin(&old).unwrap();
+        let old_canonical = fs::read(old.join(ORIGIN_FILE)).unwrap();
+        fs::rename(&old, &new).unwrap();
+        let new_entry = entry(crate::migrate::KEYRING_SERVICE, &new);
+        new_entry
+            .as_any()
+            .downcast_ref::<keyring_core::mock::Cred>()
+            .unwrap()
+            .set_error(keyring_core::Error::PlatformFailure(Box::new(
+                std::io::Error::other("keyring refused the write"),
+            )));
+        let error = finish_key_migration(&new).unwrap_err();
+        assert!(
+            error.to_string().contains("previous key was kept"),
+            "{error}"
+        );
+        assert!(new.join(ORIGIN_FILE).is_file());
+        let old_identity = identity_for_canonical_bytes(&old_canonical);
+        let old_entry = test_store()
+            .unwrap()
+            .build(crate::migrate::LEGACY_KEYRING_SERVICE, &old_identity, None)
+            .unwrap();
+        assert_eq!(old_entry.get_secret().unwrap(), key);
+        finish_key_migration(&new).unwrap();
+        assert_eq!(
+            read_secret(&open(&new.join("archive.db"), &key).unwrap()),
+            "moved history"
+        );
+        assert!(matches!(
+            old_entry.get_secret(),
+            Err(keyring_core::Error::NoEntry)
+        ));
+    }
+
+    #[test]
+    fn an_archive_that_does_not_open_keeps_the_previous_entry() {
+        let root = directory();
+        let old = root.path().join("old-state");
+        let new = root.path().join("new-state");
+        fs::create_dir_all(&old).unwrap();
+        let key = [6u8; 32];
+        encrypted_archive(&old, &key);
+        store_key(crate::migrate::LEGACY_KEYRING_SERVICE, &old, &key);
+        note_key_origin(&old).unwrap();
+        let old_canonical = fs::read(old.join(ORIGIN_FILE)).unwrap();
+        fs::rename(&old, &new).unwrap();
+        fs::write(new.join("archive.db"), b"this is not the encrypted archive").unwrap();
+        let error = finish_key_migration(&new).unwrap_err();
+        assert!(
+            error.to_string().contains("previous key was kept"),
+            "{error}"
+        );
+        let old_identity = identity_for_canonical_bytes(&old_canonical);
+        let old_entry = test_store()
+            .unwrap()
+            .build(crate::migrate::LEGACY_KEYRING_SERVICE, &old_identity, None)
+            .unwrap();
+        assert_eq!(old_entry.get_secret().unwrap(), key);
+        assert!(new.join(ORIGIN_FILE).is_file());
+    }
+
+    #[test]
+    fn finishing_without_a_note_does_nothing() {
+        let root = directory();
+        let state = root.path().join("state");
+        fs::create_dir_all(&state).unwrap();
+        finish_key_migration(&state).unwrap();
+        assert!(!state.join(ORIGIN_FILE).exists());
     }
 }

@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 
 const LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 #[cfg(not(target_os = "macos"))]
-const MARKER: &str = "zapfast-portable-v1";
+const MARKER: &str = "vespera-portable-v1";
+#[cfg(windows)]
+const INSTALLER_MARKER: &str = "vespera-installer-v1";
 
 #[cfg(not(target_os = "macos"))]
 fn official_portable_filename(path: &Path) -> bool {
@@ -92,9 +94,9 @@ pub fn detect_at(executable: &Path) -> Result<Installation> {
     {
         let installed = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
-            .map(|base| base.join("Programs/ZapFast/zapfast.exe"));
-        if fs::read_to_string(directory.join("zapfast-installer.txt"))
-            .is_ok_and(|value| value.trim() == "zapfast-installer-v1")
+            .map(|base| base.join("Programs/Vespera/vespera.exe"));
+        if fs::read_to_string(directory.join("vespera-installer.txt"))
+            .is_ok_and(|value| value.trim() == INSTALLER_MARKER)
             || (installed
                 .and_then(|path| path.canonicalize().ok())
                 .as_deref()
@@ -118,7 +120,7 @@ pub fn detect_at(executable: &Path) -> Result<Installation> {
     #[cfg(not(target_os = "macos"))]
     {
         ensure!(
-            fs::read_to_string(directory.join("zapfast-portable.txt"))
+            fs::read_to_string(directory.join("vespera-portable.txt"))
                 .is_ok_and(|value| value.trim() == MARKER)
                 || official_portable_filename(executable),
             "This installation does not identify itself as an official portable download. Use the download page to install an update-enabled build."
@@ -165,7 +167,7 @@ pub fn staging(installation: &Installation) -> Result<PathBuf> {
         .root()?
         .parent()
         .context("Missing installation directory")?;
-    let directory = parent.join(format!(".zapfast-update-{:016x}", rand::random::<u64>()));
+    let directory = parent.join(format!(".vespera-update-{:016x}", rand::random::<u64>()));
     fs::create_dir(&directory).context("Cannot write to the installation directory")?;
     #[cfg(unix)]
     {
@@ -233,6 +235,10 @@ pub fn hidden(command: &mut Command) {
     let _ = command;
 }
 
+pub(crate) fn version_line_matches(output: &str, expected: &str) -> bool {
+    output.trim() == format!("vespera {expected}")
+}
+
 pub fn verify_version(executable: &Path, expected: &str) -> Result<()> {
     let mut command = Command::new(executable);
     command
@@ -259,7 +265,7 @@ pub fn verify_version(executable: &Path, expected: &str) -> Result<()> {
                 .take(4096)
                 .read_to_string(&mut version)?;
             ensure!(
-                version.trim() == format!("zapext {expected}"),
+                version_line_matches(&version, expected),
                 "The downloaded app has the wrong version"
             );
             return Ok(());
@@ -635,7 +641,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         for starts in [true, false] {
             let directory = tempfile::tempdir().unwrap();
-            let target = directory.path().join("zapfast");
+            let target = directory.path().join("vespera");
             let original =
                 b"#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$(dirname \"$0\")/restart-arguments\"\n";
             fs::write(&target, original).unwrap();
@@ -717,9 +723,9 @@ mod tests {
             }
         }
         let directory =
-            std::env::temp_dir().join(format!("zapfast-backup-test-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-backup-test-{}", rand::random::<u64>()));
         fs::create_dir(&directory).unwrap();
-        let target = directory.join("zapfast");
+        let target = directory.join("vespera");
         fs::write(&target, b"working executable").unwrap();
         let backup = directory.join("previous");
         let permissions = fs::metadata(&target).unwrap().permissions();
@@ -755,22 +761,32 @@ mod tests {
         assert!(process_identity(&current).unwrap().parse::<u64>().is_ok());
     }
 
+    #[test]
+    fn version_output_must_name_vespera() {
+        assert!(version_line_matches("vespera 1.0.106\n", "1.0.106"));
+        assert!(!version_line_matches(
+            &format!("{} 1.0.106\n", crate::migrate::LEGACY_COMMAND),
+            "1.0.106"
+        ));
+        assert!(!version_line_matches("vespera 1.0.105", "1.0.106"));
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn official_portable_executable_name_is_recognized() {
         assert!(official_portable_filename(Path::new(
-            "ZapExt-v1.0.4-windows-x64-portable.exe"
+            "Vespera-v1.0.106-windows-x64-portable.exe"
         )));
         assert!(official_portable_filename(Path::new(
-            "zapext-v1.0.4-windows-arm64-portable.EXE"
+            "vespera-v1.0.106-windows-arm64-portable.EXE"
         )));
-        assert!(!official_portable_filename(Path::new("zapfast.exe")));
+        assert!(!official_portable_filename(Path::new("vespera.exe")));
         // Case-insensitive suffix, but the stem must be a file name.
         assert!(official_portable_filename(Path::new(
-            r"C:\Users\Ada\ZapExt-v1.0.5-windows-x64-Portable.Exe"
+            r"C:\Users\Ada\Vespera-v1.0.106-windows-x64-Portable.Exe"
         )));
         assert!(!official_portable_filename(Path::new(
-            "zapfast-portable.exe.bak"
+            "vespera-portable.exe.bak"
         )));
         assert!(!official_portable_filename(Path::new("portable.exe")));
     }
@@ -778,10 +794,10 @@ mod tests {
     #[test]
     fn unknown_and_package_managed_paths_are_not_portable() {
         for path in [
-            "/usr/bin/zapfast",
-            "/nix/store/package/bin/zapfast",
-            "/home/test/.cargo/bin/zapfast",
-            "/unknown/zapfast",
+            "/usr/bin/vespera",
+            "/nix/store/package/bin/vespera",
+            "/home/test/.cargo/bin/vespera",
+            "/unknown/vespera",
         ] {
             assert!(detect_at(Path::new(path)).is_err());
         }
@@ -790,12 +806,12 @@ mod tests {
     #[test]
     fn installer_arguments_use_paths_inno_setup_accepts() {
         assert_eq!(
-            installer_path(Path::new(r"\\?\C:\Users\test\ZapFast")),
-            r"C:\Users\test\ZapFast"
+            installer_path(Path::new(r"\\?\C:\Users\test\Vespera")),
+            r"C:\Users\test\Vespera"
         );
         assert_eq!(
-            installer_path(Path::new(r"\\?\UNC\server\share\ZapFast")),
-            r"\\server\share\ZapFast"
+            installer_path(Path::new(r"\\?\UNC\server\share\Vespera")),
+            r"\\server\share\Vespera"
         );
     }
 
@@ -806,7 +822,7 @@ mod tests {
         let stage = tempfile::tempdir().expect("scratch stage");
         let foreign_root = stage.path().join("elsewhere");
         std::fs::create_dir_all(&foreign_root).unwrap();
-        let foreign_exe = foreign_root.join("zapext.exe");
+        let foreign_exe = foreign_root.join("vespera.exe");
         std::fs::write(&foreign_exe, b"not this app").unwrap();
         let payload = stage.path().join("next");
         std::fs::write(&payload, b"payload-bytes").unwrap();
@@ -834,9 +850,9 @@ mod tests {
     #[test]
     fn replacement_verifies_before_touching_the_current_executable() {
         let directory =
-            std::env::temp_dir().join(format!("zapfast-updater-test-{}", rand::random::<u64>()));
+            std::env::temp_dir().join(format!("vespera-updater-test-{}", rand::random::<u64>()));
         fs::create_dir(&directory).unwrap();
-        let target = directory.join("zapfast");
+        let target = directory.join("vespera");
         fs::write(&target, b"old").unwrap();
         let installation = Installation {
             executable: target.clone(),
